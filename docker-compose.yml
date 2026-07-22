@@ -1,0 +1,84 @@
+# ============================================================
+# 智慧古城车辆人流监管平台 - 容器编排
+# 架构: AI 分析服务 / 业务后端 (同一镜像) + Redis + MySQL
+#
+# 启动:
+#   docker compose up -d                # CPU 模式
+#   启用 GPU: 取消下方 ai 服务 deploy 注释后 docker compose up -d
+# ============================================================
+
+services:
+  # ---------- AI 分析服务 (YOLO11/ByteTrack/越线计数) ----------
+  ai:
+    build: .
+    image: smart-city-platform:latest
+    restart: unless-stopped
+    command: ["python", "-m", "app.ai.service"]
+    ports:
+      - "8001:8001"
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - BACKEND_URL=http://backend:8000
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./app:/app/app:cached
+      - model-cache:/root/.cache
+    depends_on:
+      - redis
+    # GPU 支持 (取消注释即可启用; 需主机安装 NVIDIA Container Toolkit)
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+  # ---------- 业务后端 (FastAPI: 实时统计/告警/REST API/预测) ----------
+  backend:
+    image: smart-city-platform:latest
+    restart: unless-stopped
+    command: ["uvicorn", "app.backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8000:8000"
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - MYSQL_URL=mysql+aiomysql://smartcity:smartcity123@mysql:3306/smart_city
+      - AI_SERVICE_URL=http://ai:8001
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./app:/app/app:cached
+    depends_on:
+      - redis
+      - mysql
+
+  # ---------- Redis: 实时状态 (当前车辆/人员数量、告警) ----------
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "16379:6379"
+    volumes:
+      - redis-data:/data
+
+  # ---------- MySQL: 历史数据 (事件记录、统计、预测样本) ----------
+  mysql:
+    image: mysql:8.0
+    restart: unless-stopped
+    environment:
+      - MYSQL_ROOT_PASSWORD=root123
+      - MYSQL_DATABASE=smart_city
+      - MYSQL_USER=smartcity
+      - MYSQL_PASSWORD=smartcity123
+      - TZ=Asia/Shanghai
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    ports:
+      - "13306:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+
+volumes:
+  redis-data:
+  mysql-data:
+  model-cache:

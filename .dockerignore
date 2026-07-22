@@ -1,0 +1,42 @@
+# 版本控制
+.git
+.gitignore
+
+# Python 缓存与虚拟环境
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+.env
+
+# 构建与测试产物
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+coverage.xml
+dist/
+build/
+*.egg-info/
+
+# IDE / 编辑器
+.vscode/
+.idea/
+*.swp
+
+# 日志与数据卷内容 (由 compose 挂载, 不打进镜像)
+*.log
+logs/
+data/
+mysql-data/
+redis-data/
+
+# 文档与无关文件
+*.docx
+*.md
+docs/

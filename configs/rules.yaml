@@ -1,0 +1,29 @@
+# 告警规则配置 (车辆>300 红色告警, 游客>10000 人流饱和)
+rules:
+  - id: vehicle_saturate_warning
+    category: vehicle_saturate
+    metric: current_vehicles
+    threshold: 200
+    level: warning
+    message: "车辆数量接近饱和 ({value}/{threshold})"
+
+  - id: vehicle_saturate_critical
+    category: vehicle_saturate
+    metric: current_vehicles
+    threshold: 300
+    level: critical
+    message: "车辆饱和红色告警 ({value}/{threshold})"
+
+  - id: person_saturate_warning
+    category: person_saturate
+    metric: current_persons
+    threshold: 8000
+    level: warning
+    message: "游客数量接近饱和 ({value}/{threshold})"
+
+  - id: person_saturate_critical
+    category: person_saturate
+    metric: current_persons
+    threshold: 10000
+    level: critical
+    message: "人流饱和 ({value}/{threshold})"

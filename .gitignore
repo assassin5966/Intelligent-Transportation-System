@@ -1,0 +1,52 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# ---- 测试 / 类型 / 缓存 ----
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# ---- 环境与密钥 ----
+.env
+.env.*
+!.env.example
+*.key
+
+# ---- IDE ----
+.vscode/
+.idea/
+*.swp
+
+# ---- 运行时数据卷 (容器挂载, 不入库) ----
+data/
+logs/
+mysql-data/
+redis-data/
+*.log
+
+# ---- 模型权重 (体积大, 按需单独管理) ----
+*.pt
+*.onnx
+*.engine
+weights/
+
+# ---- 系统 ----
+.DS_Store
+Thumbs.db
+
+# ---- 文档 (开发方案等不入库) ----
+*.docx
+*.doc
