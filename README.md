@@ -117,6 +117,51 @@ docker compose -p smartcity down
 > 注：docker-compose.yml 未固定 container_name，使用 `-p smartcity` 项目名隔离，
 > 适合在共享服务器上运行，避免与其他项目冲突。
 
+## 部署到新机器（跨机器构建指南）
+
+镜像不随仓库分发，需在目标机器上本地构建（Dockerfile 已跨架构自动适配）。
+
+### 前置条件
+- 已安装 Docker 20.10+（含 BuildKit）与 Docker Compose v2
+- Windows 需 10 22H2 (build 19045)+ 或 Windows 11（否则无法安装 Docker Desktop）；Linux / macOS 直接安装 Docker Engine / Docker Desktop
+
+### 标准步骤
+```bash
+# 1. 克隆仓库
+git clone git@github.com:assassin5966/Intelligent-Transportation-System.git
+cd Intelligent-Transportation-System
+
+# 2. 准备环境变量
+cp .env.example .env   # Windows PowerShell: copy .env.example .env
+
+# 3. 构建镜像（自动按当前机器 CPU 架构选 torch 源，无需任何参数）
+docker build -t smart-city-platform:latest .
+
+# 4. 启动全栈 (ai + backend + redis + mysql)
+docker compose -p smartcity up -d --build
+```
+
+### 国内网络加速
+- **pip / apt 已内置加速**：Dockerfile 配置了清华 PyPI + 清华 debian 源，构建时装包很快。
+- **Docker Hub 基础镜像拉取慢**时，用 `docker.1ms.run` 镜像前缀预拉并重打标，构建/启动时直接走本地缓存：
+  ```bash
+  docker pull docker.1ms.run/library/python:3.11-slim && docker tag docker.1ms.run/library/python:3.11-slim python:3.11-slim
+  docker pull docker.1ms.run/library/redis:7-alpine && docker tag docker.1ms.run/library/redis:7-alpine redis:7-alpine
+  docker pull docker.1ms.run/library/mysql:8.0 && docker tag docker.1ms.run/library/mysql:8.0 mysql:8.0
+  ```
+  预拉后再 `docker compose up`，基础镜像命中本地缓存，不再连 Docker Hub。
+- **GitHub 克隆慢**：可用 HTTPS 方式 `https://github.com/assassin5966/Intelligent-Transportation-System.git`，或配置 git 代理。
+
+### CPU 架构自动适配
+
+| 架构 | torch 来源 | 说明 |
+|------|-----------|------|
+| x86_64 (amd64，常见 PC/服务器) | `download.pytorch.org/whl/cpu` | 轻量 CPU 版 (~200MB) |
+| aarch64 (arm64，如 Grace/树莓派) | PyPI | 官方 CPU 源无 aarch64 wheel，用 PyPI 版（含 CUDA，可在 GPU 服务器推理）|
+
+- amd64 机器如需 **GPU 版 torch**：编辑 Dockerfile 中 amd64 分支，把 `--index-url` 改为 `https://download.pytorch.org/whl/cu121`，并在 docker-compose.yml 中启用 ai 服务的 `deploy.resources.reservations.devices` GPU 块。
+- 镜像只在本机构建、本机运行，不会自动同步；换机器重新 `docker build` 即可。
+
 ## API 接口
 
 ### 后端（端口 8000）
