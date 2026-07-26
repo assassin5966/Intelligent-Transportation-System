@@ -105,8 +105,8 @@ class LineCrossingCounter:
         self._anchor_px: List[float] = [0.0, 0.0]
         self._line_vec: List[float] = [0.0, 0.0]
         self._line_len_sq: float = 1.0
-        self._is_horizontal: bool = False
         self._n_inner: List[float] = [0.0, 0.0]
+        self._n_unit: List[float] = [0.0, 0.0]  # 归一化法向 (朝向锚点)
         self._precompute()
 
     def set_frame_size(self, width: int, height: int):
@@ -134,7 +134,7 @@ class LineCrossingCounter:
         self.set_line(outer_line)
 
     def _precompute(self):
-        """预计算像素坐标几何量与内侧法向."""
+        """预计算像素坐标几何量与内侧法向 (适用于任意角度计数线)."""
         self._p1 = self._normalize_to_pixel(self.line_points[0])
         self._p2 = self._normalize_to_pixel(self.line_points[1])
         self._anchor_px = self._normalize_to_pixel(self.anchor_points)
@@ -142,15 +142,19 @@ class LineCrossingCounter:
         dy = self._p2[1] - self._p1[1]
         self._line_vec = [dx, dy]
         self._line_len_sq = dx * dx + dy * dy
-        # 线段方向: |dx| >= |dy| 视为水平线
-        self._is_horizontal = abs(dx) >= abs(dy)
-        # 法向 (左旋90°): n=(-dy, dx)
+        line_len = math.sqrt(self._line_len_sq)
+        # 法向 (左旋90°): n=(-dy, dx), 长度=线段长度
         nx, ny = -dy, dx
         # 用锚点归一化: 使法向指向锚点所在侧 (内侧)
         anchor_off = nx * (self._anchor_px[0] - self._p1[0]) + ny * (self._anchor_px[1] - self._p1[1])
         if anchor_off < 0:
             nx, ny = -nx, -ny
         self._n_inner = [nx, ny]
+        # 归一化法向 (用于夹角过滤等需要真实距离的计算)
+        if line_len > 0:
+            self._n_unit = [nx / line_len, ny / line_len]
+        else:
+            self._n_unit = [0.0, 0.0]
 
     def _normalize_to_pixel(self, point: List[float]) -> List[float]:
         return [point[0] * self.frame_width, point[1] * self.frame_height]
@@ -207,18 +211,16 @@ class LineCrossingCounter:
         return 0.0 <= t <= 1.0
 
     def _angle_filter(self, prev_point, curr_point) -> bool:
-        """夹角过滤: 根据线段水平/垂直方向, 要求跨线方向位移 >= min_motion.
+        """夹角过滤: 运动向量在法向方向的投影 >= min_motion.
 
-        水平线 -> 跨线方向为垂直, 要求 |dy| >= min_motion;
-        垂直线 -> 跨线方向为水平, 要求 |dx| >= min_motion.
-        不要求跨线分量占主导, 以兼容斜向车流 (如右上->左下).
+        适用于任意角度计数线: 通过朝向锚点的归一化法向量计算跨线分量.
+        运动向量 v 在法向 n_unit 上的投影 = v·n_unit, 即跨线方向位移.
         返回 True 表示通过 (有效跨线运动).
         """
         vx = curr_point[0] - prev_point[0]
         vy = curr_point[1] - prev_point[1]
-        if self._is_horizontal:
-            return abs(vy) >= self.min_motion
-        return abs(vx) >= self.min_motion
+        cross_component = vx * self._n_unit[0] + vy * self._n_unit[1]
+        return abs(cross_component) >= self.min_motion
 
     def _filter_endpoint_false_positive(self, track) -> bool:
         """端点附近误判过滤 (保留原逻辑)."""
@@ -349,15 +351,18 @@ class LineCrossingCounter:
 
             # 方向一致性验证: 跨线方向应与最近运动方向一致 (过滤 ID 切换)
             # ID 切换时 start_pos 来自前一辆车, 与当前车辆运动方向矛盾
+            # 用 offset 变化判断, 适用于任意角度计数线
             h = track.history
             if len(h) >= 5:
-                recent_dy = h[-1][1] - h[-5][1]
-                if entry_exit == "exit" and recent_dy > 0:
-                    # 判定 Exit(下->上) 但最近向下移动 -> start_pos 可能有误
+                recent_start_off = self._offset(h[-5])
+                recent_end_off = self._offset(h[-1])
+                recent_cross_inner = recent_end_off - recent_start_off  # >0 向内, <0 向外
+                if entry_exit == "exit" and recent_cross_inner > 0:
+                    # 判定 Exit(内->外) 但最近向内移动 -> start_pos 可能有误
                     self.track_states[track_id] = "TRACKING"
                     continue
-                if entry_exit == "enter" and recent_dy < 0:
-                    # 判定 Enter(上->下) 但最近向上移动 -> start_pos 可能有误
+                if entry_exit == "enter" and recent_cross_inner < 0:
+                    # 判定 Enter(外->内) 但最近向外移动 -> start_pos 可能有误
                     self.track_states[track_id] = "TRACKING"
                     continue
 

@@ -23,6 +23,7 @@ class DeviceIn(BaseModel):
     name: str
     stream_url: str
     line_coords: Optional[str] = None  # "x1,y1,x2,y2" 归一化 0-1
+    anchor_coords: Optional[str] = None  # "x,y" 归一化 0-1, 内侧锚点
 
 
 class DeviceOut(BaseModel):
@@ -30,11 +31,12 @@ class DeviceOut(BaseModel):
     name: str
     stream_url: str
     line_coords: Optional[str] = None
+    anchor_coords: Optional[str] = None
     status: str = "registered"
 
 
 def _line_from_coords(line_coords: Optional[str]) -> list[list[float]]:
-    """解析 line_coords -> [[x1,y1],[x2,y2]]; 无法解析时返回默认外线."""
+    """解析 line_coords -> [[x1,y1],[x2,y2]]; 无法解析时返回默认线."""
     if line_coords:
         try:
             parts = [float(x) for x in line_coords.split(",")]
@@ -42,7 +44,19 @@ def _line_from_coords(line_coords: Optional[str]) -> list[list[float]]:
                 return [[parts[0], parts[1]], [parts[2], parts[3]]]
         except ValueError:
             pass
-    return [[0.1, 0.4], [0.9, 0.4]]
+    return [[0.5, 0.1], [0.5, 0.9]]
+
+
+def _anchor_from_coords(anchor_coords: Optional[str]) -> Optional[list[float]]:
+    """解析 anchor_coords -> [x,y]; 无法解析时返回 None (由 counter 用默认锚点)."""
+    if anchor_coords:
+        try:
+            parts = [float(x) for x in anchor_coords.split(",")]
+            if len(parts) == 2:
+                return [parts[0], parts[1]]
+        except ValueError:
+            pass
+    return None
 
 
 async def _forward_to_ai(method: str, path: str, json_body: Optional[dict] = None) -> None:
@@ -82,15 +96,16 @@ async def register(dev: DeviceIn):
             "name": dev.name,
             "stream_url": dev.stream_url,
             "line_coords": dev.line_coords or "",
+            "anchor_coords": dev.anchor_coords or "",
             "status": "registered",
         },
     )
     line = _line_from_coords(dev.line_coords)
-    await _forward_to_ai(
-        "POST",
-        "/devices",
-        {"device_id": dev.id, "stream_url": dev.stream_url, "line": line},
-    )
+    anchor = _anchor_from_coords(dev.anchor_coords)
+    payload = {"device_id": dev.id, "stream_url": dev.stream_url, "line": line}
+    if anchor is not None:
+        payload["anchor"] = anchor
+    await _forward_to_ai("POST", "/devices", payload)
     return {"id": dev.id, "status": "registered"}
 
 
