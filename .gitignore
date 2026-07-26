@@ -11,6 +11,7 @@ env/
 dist/
 build/
 .trae/
+models/
 
 # ---- 测试 / 类型 / 缓存 ----
 .pytest_cache/

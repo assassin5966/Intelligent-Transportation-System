@@ -1,4 +1,9 @@
-"""Chronos 时序大模型封装 (懒加载, chronos 库优先, 缺失时降级为趋势外推)."""
+"""Chronos-2 时序大模型封装 (懒加载, chronos 库优先, 缺失时降级为趋势外推).
+
+本地模型: models/ 目录 (Chronos-2-Small, 28M 参数, Chronos2Pipeline)
+配置文件: models/config.json (chronos_pipeline_class: Chronos2Pipeline)
+"""
+from pathlib import Path
 from typing import Optional
 
 import torch
@@ -26,19 +31,19 @@ class ChronosPredictor:
     def _ensure_loaded(self) -> None:
         if self._mode is not None:
             return
-        name = settings.chronos_model
+        model_path = settings.chronos_model
         try:
-            from chronos import ChronosPipeline
+            from chronos import Chronos2Pipeline
 
-            logger.info(f"加载 ChronosPipeline: {name} (device={self._device})")
-            self._pipeline = ChronosPipeline.from_pretrained(
-                name, device_map=self._device
+            logger.info(f"加载 Chronos2Pipeline: {model_path} (device={self._device})")
+            self._pipeline = Chronos2Pipeline.from_pretrained(
+                model_path, device_map=self._device
             )
             self._mode = "chronos"
         except Exception as e:  # noqa: BLE001
             logger.warning(
-                f"chronos 库不可用 ({e}), 降级为线性趋势外推. "
-                f"建议安装 chronos-forecasting 以获得大模型预测能力."
+                f"Chronos-2 模型加载失败 ({e}), 降级为线性趋势外推. "
+                f"模型路径: {model_path}"
             )
             self._mode = "naive"
 
@@ -52,11 +57,15 @@ class ChronosPredictor:
         return self._predict_naive(history, horizon)
 
     def _predict_chronos(self, history: list[float], horizon: int) -> list[float]:
-        ctx = torch.tensor([history], dtype=torch.float32)
-        forecast = self._pipeline.predict(context=ctx, prediction_length=horizon)
+        # Chronos-2 输入: 3维张量 (batch=1, n_variates=1, history_length)
+        ctx = torch.tensor([history], dtype=torch.float32).unsqueeze(0)
+        forecast = self._pipeline.predict(inputs=ctx, prediction_length=horizon)
+        # 返回 list[torch.Tensor], 每个元素形状 [n_variates, num_quantiles, horizon]
         arr = forecast[0].cpu().numpy()
-        # forecast 形状 [num_samples, horizon] -> 取均值
-        if arr.ndim == 2:
+        # 沿 quantiles 维取均值 -> [n_variates, horizon], 取第0维 -> [horizon]
+        if arr.ndim == 3:
+            arr = arr.mean(axis=1)[0]
+        elif arr.ndim == 2:
             arr = arr.mean(axis=0)
         return [max(0.0, float(v)) for v in arr.tolist()]
 

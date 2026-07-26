@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     track_buffer: int = 30
 
     # ---- 时序预测 ----
-    chronos_model: str = "amazon/chronos-t5-tiny"
+    chronos_model: str = "models"  # 本地 Chronos-2 模型目录
     prediction_horizon: int = 60
     prediction_history_hours: int = 168
 
