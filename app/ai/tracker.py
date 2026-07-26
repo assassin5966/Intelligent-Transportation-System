@@ -1,13 +1,18 @@
 """ByteTrack 目标跟踪封装.
 
 支持 car/truck/bus/person 四类细分跟踪, 包含轨迹历史和速度计算.
+使用自定义 bytetrack.yaml 配置 (configs/bytetrack.yaml), 降低 ID 切换.
 """
+from pathlib import Path
 import numpy as np
 from collections import OrderedDict
 from ultralytics import YOLO
 
 from ..common.config import settings
 from ..common.logger import logger
+
+# 自定义 ByteTrack 配置路径
+_TRACKER_CFG = str(Path(__file__).resolve().parents[2] / "configs" / "bytetrack.yaml")
 
 _DETECTION_CLASSES = {
     2: "car",
@@ -58,7 +63,7 @@ class ByteTracker:
             conf=settings.yolo_conf,
             iou=settings.yolo_iou,
             verbose=False,
-            tracker="bytetrack.yaml"
+            tracker=_TRACKER_CFG
         )
         
         tracks = []

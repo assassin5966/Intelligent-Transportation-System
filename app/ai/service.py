@@ -5,6 +5,7 @@
 """
 import asyncio
 import json
+from typing import Optional
 
 import uvicorn
 from contextlib import asynccontextmanager
@@ -35,6 +36,7 @@ class DeviceRegister(BaseModel):
     device_id: str
     stream_url: str
     line: list[list[float]]
+    anchor: Optional[list[float]] = None
 
 
 @app.get("/health", tags=["system"])
@@ -60,7 +62,10 @@ async def register(dev: DeviceRegister):
         (float(dev.line[0][0]), float(dev.line[0][1])),
         (float(dev.line[1][0]), float(dev.line[1][1])),
     )
-    p = DevicePipeline(dev.device_id, dev.stream_url, line)
+    anchor: Optional[Point] = None
+    if dev.anchor and len(dev.anchor) == 2:
+        anchor = (float(dev.anchor[0]), float(dev.anchor[1]))
+    p = DevicePipeline(dev.device_id, dev.stream_url, line, anchor)
     p.start()
     _pipelines[dev.device_id] = p
     return {"device_id": dev.device_id, "status": "started"}

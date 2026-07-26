@@ -123,6 +123,8 @@ def parse_args():
     parser.add_argument("--frame_skip", type=int, default=5, help="跳帧间隔（1=全处理，5=每5帧处理1帧）")
     parser.add_argument("--no-annotated", action="store_true", help="不生成标注视频")
     parser.add_argument("--line", default="0.5,0.1,0.5,0.9", help="计数线坐标（归一化 x1,y1,x2,y2, 默认垂直线）")
+    parser.add_argument("--anchor", default="0.9,0.5", help="内侧锚点（归一化 x,y, 标识Enter方向所在侧）")
+    parser.add_argument("--count-only", default=None, choices=["enter", "exit"], help="单向计数模式: enter=只计进入, exit=只计离开")
     return parser.parse_args()
 
 
@@ -138,6 +140,13 @@ def draw_annotations(frame, track_result, events, statistics, counter):
              (0, 0, 255), 2)
     cv2.putText(annotated, "counting line", (int(line_start[0]), int(line_start[1]) - 10),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+
+    # 内侧锚点 (标识Enter方向所在侧)
+    anchor_px = counter._normalize_to_pixel(counter.anchor_points)
+    cv2.drawMarker(annotated, (int(anchor_px[0]), int(anchor_px[1])),
+                   (255, 0, 0), cv2.MARKER_CROSS, 20, 2)
+    cv2.putText(annotated, "inner(anchor)", (int(anchor_px[0]) + 12, int(anchor_px[1])),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
 
     colors = {
         "car": (0, 255, 0),
@@ -227,9 +236,13 @@ def process_video(args):
 
     try:
         line_parts = [float(x) for x in args.line.split(",")]
+        anchor_parts = [float(x) for x in args.anchor.split(",")]
         counter = LineCrossingCounter()
         counter.set_frame_size(frame_width, frame_height)
-        counter.set_line([[line_parts[0], line_parts[1]], [line_parts[2], line_parts[3]]])
+        counter.set_line([[line_parts[0], line_parts[1]], [line_parts[2], line_parts[3]]],
+                         anchor=(anchor_parts[0], anchor_parts[1]))
+        if args.count_only:
+            counter.count_only = args.count_only
         print("  [OK] 越线计数模块 (LineCrossingCounter)")
     except Exception as e:
         print(f"  [FAIL] 越线计数模块: {e}")
