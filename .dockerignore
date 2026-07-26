@@ -33,7 +33,6 @@ build/
 *.log
 logs/
 data/
-mysql-data/
 redis-data/
 
 # 文档与无关文件

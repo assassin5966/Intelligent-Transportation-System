@@ -1,4 +1,6 @@
 """Chronos 时序大模型封装 (懒加载, chronos 库优先, 缺失时降级为趋势外推)."""
+from typing import Optional
+
 import torch
 
 from ..common.config import settings
@@ -8,11 +10,11 @@ from ..common.logger import logger
 class ChronosPredictor:
     """单例预测器."""
 
-    _instance: "ChronosPredictor | None" = None
+    _instance: Optional["ChronosPredictor"] = None
 
     def __init__(self):
         self._pipeline = None
-        self._mode: str | None = None  # "chronos" | "naive"
+        self._mode: Optional[str] = None  # "chronos" | "naive"
         self._device = "cuda" if torch.cuda.is_available() else "cpu"
 
     @classmethod

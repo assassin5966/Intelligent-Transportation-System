@@ -37,26 +37,26 @@ WORKDIR /app
 ENV PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# ---------- 2. 安装 PyTorch (独立层, 利用缓存; 自动适配 CPU 架构) ----------
+# ---------- 2. 安装依赖 (PyTorch + 业务依赖, 自动适配 CPU 架构) ----------
 # x86_64 (amd64): 用 PyTorch 官方 CPU 源 (轻量约 200MB, 无 CUDA)
 # aarch64 (arm64): 官方 CPU 源无对应 wheel, 改用 PyPI (aarch64 版, 含 CUDA 可用于 GPU 推理)
 # 如需 amd64 + NVIDIA GPU: 把下方 amd64 分支的 --index-url 改为
 #   https://download.pytorch.org/whl/cu121
+COPY requirements.txt /app/requirements.txt
 RUN ARCH=$(dpkg --print-architecture) && \
     if [ "$ARCH" = "amd64" ]; then \
-        pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu; \
+        pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu && \
+        pip install --no-cache-dir -r /app/requirements.txt; \
     else \
-        pip install --no-cache-dir torch torchvision; \
+        pip install --no-cache-dir -r /app/requirements.txt; \
     fi
-
-# ---------- 3. 安装业务依赖 ----------
-COPY requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r /app/requirements.txt
 
 # ---------- 3.5 应用代码 (镜像自包含; compose 挂载会覆盖用于开发热加载) ----------
 COPY app /app/app
 COPY configs /app/configs
 COPY scripts /app/scripts
+COPY tool /app/tool
+COPY models /app/models
 
 # ---------- 4. 环境配置 ----------
 ENV TZ=Asia/Shanghai \
@@ -65,9 +65,9 @@ ENV TZ=Asia/Shanghai \
     LANG=C.UTF-8
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
-# 预下载 YOLO11 模型权重到镜像内, 避免运行时联网下载
-# (首次构建会拉取 yolov11n.pt, 离线/内网部署友好)
-RUN python -c "from ultralytics import YOLO; YOLO('yolo11n.pt')" || true
+# 校验 YOLO11 权重可加载 (models/yolo11n.pt 已随 COPY 进入镜像).
+# 文件缺失时联网下载, 下载失败则构建中断, 避免静默产出无权重镜像.
+RUN python -c "from ultralytics import YOLO; YOLO('models/yolo11n.pt')"
 
 # ---------- 5. 端口 ----------
 # 8000: 业务后端 (FastAPI REST/WebSocket)

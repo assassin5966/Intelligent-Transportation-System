@@ -7,24 +7,14 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from ..common.db import close_engine
 from ..common.logger import logger
 from ..common.redis_client import close_redis
 from .api import alerts, devices, events, stats
-from .core.aggregator import start_aggregator, stop_aggregator
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("业务后端启动")
-    # 小时统计聚合器 (趋势/预测的数据源)
-    aggregator_started = False
-    try:
-        await start_aggregator()
-        aggregator_started = True
-    except Exception as e:  # noqa: BLE001
-        logger.warning(f"聚合器未启动: {e}")
-    # 预测模块调度器 (可选, 加载失败不影响后端)
     scheduler_started = False
     try:
         from ..prediction import start_scheduler
@@ -44,13 +34,7 @@ async def lifespan(app: FastAPI):
             await stop_scheduler()
         except Exception:  # noqa: BLE001
             pass
-    if aggregator_started:
-        try:
-            await stop_aggregator()
-        except Exception:  # noqa: BLE001
-            pass
     await close_redis()
-    await close_engine()
     logger.info("业务后端关闭")
 
 
@@ -63,7 +47,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,  # 与 allow_origins=["*"] 组合才符合 CORS 规范
     allow_methods=["*"],
     allow_headers=["*"],
 )

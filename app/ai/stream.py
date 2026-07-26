@@ -1,5 +1,6 @@
 """RTSP / GB28181 视频流拉取 (异步, 断流自动重连)."""
 import asyncio
+from typing import Optional
 
 import cv2
 from tenacity import (
@@ -30,7 +31,7 @@ def _open(url: str) -> cv2.VideoCapture:
     return cap
 
 
-async def stream_frames(url: str, stop_event: asyncio.Event | None = None):
+async def stream_frames(url: str, stop_event: Optional[asyncio.Event] = None):
     """异步帧生成器. cv2 同步读帧用 asyncio.to_thread 包装, 不阻塞事件循环."""
     try:
         cap = await asyncio.to_thread(_open, url)

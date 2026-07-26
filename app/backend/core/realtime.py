@@ -26,6 +26,19 @@ def _daily_key(d: date) -> str:
     return f"{settings.redis_prefix}:realtime:daily:{d.strftime('%Y%m%d')}"
 
 
+def _hourly_key(dt: datetime) -> str:
+    return f"{settings.redis_prefix}:realtime:hourly:{dt.strftime('%Y%m%d%H')}"
+
+
+# 日累计字段 -> 小时累计字段 (供时序预测读取逐小时序列)
+_HOURLY_FIELD_MAP = {
+    "today_vehicle_in": "vehicle_in",
+    "today_vehicle_out": "vehicle_out",
+    "today_person_in": "person_in",
+    "today_person_out": "person_out",
+}
+
+
 async def apply_event(event_type: str, device_id: str) -> dict:
     """应用一个业务事件到 Redis 实时状态, 返回更新后的统计."""
     delta = EVENT_DELTA.get(event_type)
@@ -33,15 +46,21 @@ async def apply_event(event_type: str, device_id: str) -> dict:
         return await get_stats()
 
     redis = get_redis()
-    daily_key = _daily_key(date.today())
+    now_local = datetime.now()
+    daily_key = _daily_key(now_local.date())
+    hourly_key = _hourly_key(now_local)
     pipe = redis.pipeline()
     for field, d in delta.items():
         if field in _CURRENT_FIELDS:
             pipe.hincrby(_CUR_KEY, field, d)
         else:
             pipe.hincrby(daily_key, field, d)
+            hourly_field = _HOURLY_FIELD_MAP.get(field)
+            if hourly_field is not None:
+                pipe.hincrby(hourly_key, hourly_field, d)
     pipe.hset(_CUR_KEY, "updated_at", datetime.utcnow().isoformat())
     pipe.sadd(_DEVICES_KEY, device_id)
+    pipe.expire(hourly_key, 8 * 24 * 3600)  # 小时序列保留 8 天
     await pipe.execute()
 
     await _clamp_negatives(_CUR_KEY, _CURRENT_FIELDS)
