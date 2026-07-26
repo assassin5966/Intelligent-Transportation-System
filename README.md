@@ -194,7 +194,7 @@ docker compose -p smartcity up -d --build
 |------|--------|------|
 | `REDIS_URL` | `redis://redis:6379/0` | Redis 连接 |
 | `YOLO_MODEL` | `models/yolo11n.pt` | YOLO 权重 |
-| `CHRONOS_MODEL` | `amazon/chronos-t5-tiny` | Chronos 模型 |
+| `CHRONOS_MODEL` | `models` | Chronos-2 本地模型目录 |
 | `PREDICTION_HORIZON` | `60` | 预测步长（小时）|
 | `PREDICTION_HISTORY_HOURS` | `168` | 预测历史窗口（小时）|
 | `RULES_FILE` | `configs/rules.yaml` | 告警规则文件 |
