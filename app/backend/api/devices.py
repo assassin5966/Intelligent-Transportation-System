@@ -43,6 +43,7 @@ class DeviceIn(BaseModel):
     stream_url: str
     line_coords: Optional[str] = None  # "x1,y1,x2,y2" 归一化 0-1
     anchor_coords: Optional[str] = None  # "x,y" 归一化 0-1, 内侧锚点
+    count_only: Optional[str] = None  # None=双向, "enter"=只计进入, "exit"=只计离开
 
 
 class DeviceOut(BaseModel):
@@ -51,6 +52,7 @@ class DeviceOut(BaseModel):
     stream_url: str
     line_coords: Optional[str] = None
     anchor_coords: Optional[str] = None
+    count_only: Optional[str] = None
     status: str = "registered"
 
 
@@ -119,6 +121,7 @@ async def register(dev: DeviceIn):
             "stream_url": dev.stream_url,
             "line_coords": dev.line_coords or "",
             "anchor_coords": dev.anchor_coords or "",
+            "count_only": dev.count_only or "",
             "status": "registered",
         },
     )
@@ -127,6 +130,8 @@ async def register(dev: DeviceIn):
     payload = {"device_id": dev.id, "stream_url": dev.stream_url, "line": line}
     if anchor is not None:
         payload["anchor"] = anchor
+    if dev.count_only is not None:
+        payload["count_only"] = dev.count_only
     await _forward_to_ai("POST", "/devices", payload)
     return {"id": dev.id, "status": "registered"}
 

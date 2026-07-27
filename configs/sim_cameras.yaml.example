@@ -1,0 +1,34 @@
+# 多摄像头模拟配置 (用于多路联合计数联调测试)
+#
+# 用法:
+#   1. 将录像视频文件放入 ./videos/ 目录 (该目录会挂载到 ai 容器 /data/videos)
+#   2. 复制本文件为 configs/sim_cameras.yaml 并按实际视频填写
+#   3. docker compose -p smartcity up -d
+#   4. python scripts/simulate_multi_camera.py
+#
+# 说明:
+#   - video 为容器内路径 (/data/videos/<文件名>), 视频播完自动循环 (模拟持续信号)
+#   - line/anchor 为归一化坐标 [0,1]; 不同摄像头可配置不同计数线
+#   - count_only: null=双向计数, "enter"=只计进入, "exit"=只计离开
+
+cameras:
+  - id: CAM001
+    name: 北门入口
+    video: /data/videos/cam001.mp4
+    line: [[0.5, 0.1], [0.5, 0.9]]   # 垂直计数线 (左->右为进入)
+    anchor: [0.9, 0.5]                # 内侧锚点 (右侧为内侧)
+    count_only: enter                 # 只计进入
+
+  - id: CAM002
+    name: 南门出口
+    video: /data/videos/cam002.mp4
+    line: [[0.1, 0.5], [0.9, 0.5]]   # 水平计数线
+    anchor: [0.5, 0.9]                # 内侧锚点 (下方为内侧)
+    count_only: exit                  # 只计离开
+
+  - id: CAM003
+    name: 东门人行道
+    video: /data/videos/cam003.mp4
+    line: [[0.5, 0.2], [0.5, 0.8]]
+    anchor: [0.2, 0.5]
+    count_only: null                  # 双向计数

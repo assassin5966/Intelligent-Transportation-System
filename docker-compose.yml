@@ -25,6 +25,7 @@ services:
       - ./models:/app/models:cached
       - ./configs:/app/configs:cached
       - ./logs:/app/logs
+      - ./videos:/data/videos:ro      # 模拟用录像视频 (多摄像头联调)
       - model-cache:/root/.cache
     depends_on:
       - redis

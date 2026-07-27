@@ -38,6 +38,8 @@ logs/
 redis-data/
 *.log
 output/
+videos/
+configs/sim_cameras.yaml
 
 # ---- 模型权重 (体积大, 按需单独管理) ----
 *.pt
