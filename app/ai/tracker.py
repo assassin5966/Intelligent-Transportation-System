@@ -1,7 +1,7 @@
-"""ByteTrack 目标跟踪封装.
+"""目标跟踪封装 (基于 ultralytics, 配置 bytetrack.yaml 实际使用 BoT-SORT 算法).
 
-支持 car/truck/bus/person 四类细分跟踪, 包含轨迹历史和速度计算.
-使用自定义 bytetrack.yaml 配置 (configs/bytetrack.yaml), 降低 ID 切换.
+注: 类名保留 ByteTracker 为历史命名; 实际 tracker_type 由 configs/bytetrack.yaml
+决定 (当前为 botsort). 支持 car/truck/bus/person 四类细分跟踪, 含轨迹历史与速度.
 """
 from pathlib import Path
 import numpy as np
@@ -11,15 +11,10 @@ from ultralytics import YOLO
 from ..common.config import settings
 from ..common.logger import logger
 
-# 自定义 ByteTrack 配置路径
-_TRACKER_CFG = str(Path(__file__).resolve().parents[2] / "configs" / "bytetrack.yaml")
+from . import DETECTION_CLASSES as _DETECTION_CLASSES
 
-_DETECTION_CLASSES = {
-    2: "car",
-    7: "truck",
-    5: "bus",
-    0: "person"
-}
+# 自定义跟踪配置路径 (文件名沿用 bytetrack, 实际算法由其中 tracker_type 决定)
+_TRACKER_CFG = str(Path(__file__).resolve().parents[2] / "configs" / "bytetrack.yaml")
 
 
 class Track:

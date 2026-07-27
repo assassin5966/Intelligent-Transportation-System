@@ -1,7 +1,7 @@
 """预测定时调度: 每小时对 vehicle/person 各做一次预测, 缓存到 Redis."""
 import asyncio
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from ..common.config import settings
@@ -11,6 +11,7 @@ from .chronos_model import ChronosPredictor
 from .repository import load_history
 
 _task: Optional[asyncio.Task] = None
+_PREDICT_TIMEOUT = 120  # 调度场景超时放宽
 
 
 async def _run_once() -> None:
@@ -20,15 +21,25 @@ async def _run_once() -> None:
             history = await load_history(metric)
             if not history:
                 continue
-            forecast = ChronosPredictor.instance().predict(
-                history, settings.prediction_horizon
-            )
+            # 同步推理放到线程池, 避免阻塞事件循环
+            try:
+                forecast = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        ChronosPredictor.instance().predict,
+                        history,
+                        settings.prediction_horizon,
+                    ),
+                    timeout=_PREDICT_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                logger.error(f"预测超时 {metric} ({_PREDICT_TIMEOUT}s)")
+                continue
             payload = json.dumps(
                 {
                     "metric": metric,
                     "horizon": settings.prediction_horizon,
                     "forecast": forecast,
-                    "generated_at": datetime.utcnow().isoformat(),
+                    "generated_at": datetime.now(timezone.utc).isoformat(),
                 }
             )
             await redis.set(

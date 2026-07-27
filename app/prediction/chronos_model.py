@@ -20,6 +20,7 @@ class ChronosPredictor:
     def __init__(self):
         self._pipeline = None
         self._mode: Optional[str] = None  # "chronos" | "naive"
+        self._degraded = False  # True 表示已降级 (模型加载失败或推理异常)
         self._device = "cuda" if torch.cuda.is_available() else "cpu"
 
     @classmethod
@@ -27,6 +28,11 @@ class ChronosPredictor:
         if cls._instance is None:
             cls._instance = ChronosPredictor()
         return cls._instance
+
+    @property
+    def is_degraded(self) -> bool:
+        """是否处于降级状态 (naive 外推而非 Chronos 大模型)."""
+        return self._degraded or self._mode == "naive"
 
     def _ensure_loaded(self) -> None:
         if self._mode is not None:
@@ -46,14 +52,20 @@ class ChronosPredictor:
                 f"模型路径: {model_path}"
             )
             self._mode = "naive"
+            self._degraded = True
 
     def predict(self, history: list[float], horizon: int) -> list[float]:
-        """给定历史序列, 预测未来 horizon 步."""
+        """给定历史序列, 预测未来 horizon 步. 推理异常时自动降级为趋势外推."""
         self._ensure_loaded()
         if not history or horizon <= 0:
             return []
         if self._mode == "chronos":
-            return self._predict_chronos(history, horizon)
+            try:
+                return self._predict_chronos(history, horizon)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"Chronos 推理失败, 降级为趋势外推: {e}")
+                self._degraded = True
+                return self._predict_naive(history, horizon)
         return self._predict_naive(history, horizon)
 
     def _predict_chronos(self, history: list[float], horizon: int) -> list[float]:

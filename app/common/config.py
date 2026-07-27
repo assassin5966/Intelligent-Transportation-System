@@ -35,5 +35,8 @@ class Settings(BaseSettings):
     # ---- Redis 实时状态 key 前缀 ----
     redis_prefix: str = "sc"
 
+    # ---- 安全 ----
+    cors_origins: str = "*"  # 允许的跨域来源, 逗号分隔; 生产环境应配置具体前端域名
+
 
 settings = Settings()

@@ -208,6 +208,8 @@ def process_video(args):
     frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fps = cap.get(cv2.CAP_PROP_FPS)
+    if not fps or fps <= 0:
+        fps = 25.0  # 视频 FPS 元数据缺失时默认 25 帧, 避免除零
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     duration_sec = total_frames / fps if fps > 0 else 0
 
@@ -285,7 +287,8 @@ def process_video(args):
 
     frame_idx = 0
     processed_idx = 0
-    last_progress_time = time.time()
+    process_start_time = time.time()
+    last_progress_time = process_start_time
 
     print(f"\n开始处理视频（共{total_frames}帧，每{args.frame_skip}帧处理1帧）...\n")
 
@@ -371,7 +374,7 @@ def process_video(args):
         current_time = time.time()
         if current_time - last_progress_time >= 5.0 or frame_idx >= total_frames:
             progress = frame_idx / total_frames * 100
-            elapsed = current_time - (last_progress_time - 5) if processed_idx > 1 else 0
+            elapsed = current_time - process_start_time if processed_idx > 1 else 0
             speed = processed_idx / max(elapsed, 1) if elapsed > 0 else 0
 
             print(f"  进度: {frame_idx}/{total_frames} ({progress:.1f}%) | "
