@@ -23,6 +23,8 @@ services:
     volumes:
       - ./app:/app/app:cached
       - ./models:/app/models:cached
+      - ./configs:/app/configs:cached
+      - ./logs:/app/logs
       - model-cache:/root/.cache
     depends_on:
       - redis
@@ -47,6 +49,9 @@ services:
       - PYTHONUNBUFFERED=1
     volumes:
       - ./app:/app/app:cached
+      - ./models:/app/models:cached
+      - ./configs:/app/configs:cached
+      - ./logs:/app/logs
     depends_on:
       - redis
 

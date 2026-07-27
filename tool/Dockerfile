@@ -18,7 +18,7 @@ ENV PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
 COPY requirements.txt /app/requirements.txt
 RUN ARCH=$(dpkg --print-architecture) && \
     if [ "$ARCH" = "amd64" ]; then \
-        pip install --no-cache-dir torch==2.3.1 torchvision==0.18.1 --index-url https://download.pytorch.org/whl/cpu && \
+        pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu && \
         pip install --no-cache-dir -r /app/requirements.txt; \
     else \
         pip install --no-cache-dir -r /app/requirements.txt; \

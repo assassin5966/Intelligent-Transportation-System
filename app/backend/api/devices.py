@@ -17,6 +17,25 @@ router = APIRouter(prefix="/api/devices", tags=["devices"])
 
 _DEVICE_KEY_PREFIX = f"{settings.redis_prefix}:device:"
 
+# 模块级共享 httpx 连接池 (设备 API 调用频率低, 复用避免反复建连)
+_shared_client: Optional[httpx.AsyncClient] = None
+
+
+def _get_client() -> httpx.AsyncClient:
+    global _shared_client
+    if _shared_client is None:
+        _shared_client = httpx.AsyncClient(timeout=10.0)
+    return _shared_client
+
+
+def _warn_if_out_of_range(coords: list[list[float]], name: str) -> None:
+    """归一化坐标应在 [0,1]; 超出范围告警 (计数线会画到画面外)."""
+    for pt in coords:
+        for v in pt:
+            if v < 0 or v > 1:
+                logger.warning(f"{name} 存在超出 [0,1] 的值 {v}, 计数线可能偏离画面")
+                return
+
 
 class DeviceIn(BaseModel):
     id: str
@@ -36,26 +55,29 @@ class DeviceOut(BaseModel):
 
 
 def _line_from_coords(line_coords: Optional[str]) -> list[list[float]]:
-    """解析 line_coords -> [[x1,y1],[x2,y2]]; 无法解析时返回默认线."""
+    """解析 line_coords -> [[x1,y1],[x2,y2]]; 无法解析时返回默认线并告警."""
     if line_coords:
         try:
             parts = [float(x) for x in line_coords.split(",")]
             if len(parts) == 4:
-                return [[parts[0], parts[1]], [parts[2], parts[3]]]
+                coords = [[parts[0], parts[1]], [parts[2], parts[3]]]
+                _warn_if_out_of_range(coords, "line_coords")
+                return coords
         except ValueError:
-            pass
+            logger.warning(f"line_coords 格式非法, 使用默认线: {line_coords!r}")
     return [[0.5, 0.1], [0.5, 0.9]]
 
 
 def _anchor_from_coords(anchor_coords: Optional[str]) -> Optional[list[float]]:
-    """解析 anchor_coords -> [x,y]; 无法解析时返回 None (由 counter 用默认锚点)."""
+    """解析 anchor_coords -> [x,y]; 无法解析时返回 None (由 counter 用默认锚点) 并告警."""
     if anchor_coords:
         try:
             parts = [float(x) for x in anchor_coords.split(",")]
             if len(parts) == 2:
+                _warn_if_out_of_range([parts], "anchor_coords")
                 return [parts[0], parts[1]]
         except ValueError:
-            pass
+            logger.warning(f"anchor_coords 格式非法, 使用默认锚点: {anchor_coords!r}")
     return None
 
 
@@ -63,13 +85,13 @@ async def _forward_to_ai(method: str, path: str, json_body: Optional[dict] = Non
     """转发到 AI 分析服务; 失败仅告警, 不阻塞设备配置落库."""
     url = f"{settings.ai_service_url}{path}"
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            if method == "POST":
-                resp = await client.post(url, json=json_body)
-            else:
-                resp = await client.request(method, url)
-            if resp.status_code >= 400:
-                logger.warning(f"AI 服务转发失败 {method} {url}: HTTP {resp.status_code}")
+        client = _get_client()
+        if method == "POST":
+            resp = await client.post(url, json=json_body)
+        else:
+            resp = await client.request(method, url)
+        if resp.status_code >= 400:
+            logger.warning(f"AI 服务转发失败 {method} {url}: HTTP {resp.status_code}")
     except Exception as e:  # noqa: BLE001
         logger.warning(f"AI 服务不可达 {method} {url}: {e}")
 

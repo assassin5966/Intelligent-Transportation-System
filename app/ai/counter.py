@@ -14,6 +14,7 @@ import math
 from datetime import datetime
 from typing import List, Tuple, Optional, Dict
 
+from ..common.logger import logger
 from ..schemas.events import (
     PERSON_ENTER,
     PERSON_EXIT,
@@ -35,24 +36,6 @@ class CrossingEvent:
         self.cross_line = cross_line
         self.direction = direction
         self.confidence = confidence
-
-
-def _cross_product(o, a, b) -> float:
-    return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
-
-
-def _point_side_of_line(point, line_start, line_end) -> float:
-    """叉积侧别 (遗留接口, 新逻辑使用 _offset)."""
-    return _cross_product(line_start, line_end, point)
-
-
-def _detect_crossing(prev_point, curr_point, line) -> Tuple[bool, float, float]:
-    """叉积异号判定跨线 (遗留接口)."""
-    prev_side = _point_side_of_line(prev_point, line[0], line[1])
-    curr_side = _point_side_of_line(curr_point, line[0], line[1])
-    if prev_side * curr_side < 0:
-        return True, prev_side, curr_side
-    return False, prev_side, curr_side
 
 
 class LineCrossingCounter:
@@ -88,13 +71,22 @@ class LineCrossingCounter:
         self.min_motion = 3  # 最小位移(像素), 小于此值视为抖动
         self.count_only: Optional[str] = None  # None=双向, "enter"=只计Enter, "exit"=只计Exit
 
+        # ID 切换检测参数 (可配置, 适配不同帧率/分辨率)
+        self.id_switch_speed_ratio = 3.0  # 速度超过历史平均 N 倍视为 ID 切换
+        self.id_switch_min_pixel = 30.0  # 速度差距至少 N 像素
+        self.id_switch_min_avg_speed = 5.0  # 历史平均速度低于此值不判 (静止误判)
+        self.id_switch_history_window = 5  # 方向一致性验证的历史窗口
+
+        # 已计数轨迹的去重保留时长 (秒); 超时后淘汰, 避免内存泄漏与流重连 ID 重用漏计
+        self.counted_tracks_ttl = 3600
+
         # 轨迹状态
         self.track_crossing_history: Dict[str, List[Tuple[float, str, str]]] = {}
         self.track_states: Dict[str, str] = {}
         self.track_crossing_start_pos: Dict[str, List[float]] = {}  # 跨线前位置
         self.track_confirm_side: Dict[str, int] = {}  # 滞留确认侧 (+1/-1)
         self.track_hold_count: Dict[str, int] = {}  # 滞留已确认帧数
-        self.counted_tracks: set = set()  # 已计数轨迹 (单向流动只计一次)
+        self.counted_tracks: Dict[str, float] = {}  # track_id -> 计数时间戳 (TTL 淘汰)
 
         self.frame_width = 1920
         self.frame_height = 1080
@@ -155,6 +147,11 @@ class LineCrossingCounter:
             self._n_unit = [nx / line_len, ny / line_len]
         else:
             self._n_unit = [0.0, 0.0]
+        # 几何校验: 线段退化 / 锚点落在线上 -> 计数语义失效, 仅告警不中断
+        if self._line_len_sq < 1e-6:
+            logger.warning("计数线退化为点 (P1==P2), 越线计数将不触发, 请检查 line_coords")
+        elif abs(anchor_off) < 1e-6:
+            logger.warning("内侧锚点落在计数线上, 法向方向不确定, 请调整 anchor_coords")
 
     def _normalize_to_pixel(self, point: List[float]) -> List[float]:
         return [point[0] * self.frame_width, point[1] * self.frame_height]
@@ -223,24 +220,29 @@ class LineCrossingCounter:
         return abs(cross_component) >= self.min_motion
 
     def _filter_endpoint_false_positive(self, track) -> bool:
-        """端点附近误判过滤 (保留原逻辑)."""
+        """端点附近误判过滤: 仅当轨迹连续两帧都停滞在线段端点附近时过滤 (表示在线端徘徊).
+
+        单帧靠近端点 (仅经过) 不过滤, 避免端点附近正常越线被误删.
+        """
         current_center = track.center
+        sensitivity_pixel = self.endpoint_sensitivity * max(self.frame_width, self.frame_height)
+        if not (track.history and len(track.history) > 1):
+            return True
+        prev_center = track.history[-2]
         for endpoint in self.line_points:
             endpoint_pixel = self._normalize_to_pixel(endpoint)
-            distance = math.sqrt(
-                (current_center[0] - endpoint_pixel[0]) ** 2
-                + (current_center[1] - endpoint_pixel[1]) ** 2
+            cur_dist = math.hypot(
+                current_center[0] - endpoint_pixel[0],
+                current_center[1] - endpoint_pixel[1],
             )
-            sensitivity_pixel = self.endpoint_sensitivity * max(self.frame_width, self.frame_height)
-            if distance < sensitivity_pixel:
-                if track.history and len(track.history) > 1:
-                    prev_center = track.history[-2]
-                    prev_distance = math.sqrt(
-                        (prev_center[0] - endpoint_pixel[0]) ** 2
-                        + (prev_center[1] - endpoint_pixel[1]) ** 2
-                    )
-                    if prev_distance < sensitivity_pixel:
-                        return False
+            if cur_dist >= sensitivity_pixel:
+                continue
+            # 当前帧靠近端点: 仅当前一帧也靠近同一端点时才过滤
+            prev_dist = math.hypot(
+                prev_center[0] - endpoint_pixel[0],
+                prev_center[1] - endpoint_pixel[1],
+            )
+            if prev_dist < sensitivity_pixel:
                 return False
         return True
 
@@ -275,8 +277,12 @@ class LineCrossingCounter:
                         curr_point[0] - prev_point[0],
                         curr_point[1] - prev_point[1],
                     )
-                    # 速度突变 (>3倍历史平均且差距>30像素) -> ID 切换, 清除跨线状态
-                    if avg_speed > 5 and curr_speed > avg_speed * 3 and (curr_speed - avg_speed) > 30:
+                    # 速度突变 (超过历史平均 N 倍且差距足够) -> ID 切换, 清除跨线状态
+                    if (
+                        avg_speed > self.id_switch_min_avg_speed
+                        and curr_speed > avg_speed * self.id_switch_speed_ratio
+                        and (curr_speed - avg_speed) > self.id_switch_min_pixel
+                    ):
                         self.track_states[track_id] = "TRACKING"
                         self.track_crossing_start_pos.pop(track_id, None)
                         self.track_confirm_side.pop(track_id, None)
@@ -353,8 +359,9 @@ class LineCrossingCounter:
             # ID 切换时 start_pos 来自前一辆车, 与当前车辆运动方向矛盾
             # 用 offset 变化判断, 适用于任意角度计数线
             h = track.history
-            if len(h) >= 5:
-                recent_start_off = self._offset(h[-5])
+            win = self.id_switch_history_window
+            if len(h) >= win:
+                recent_start_off = self._offset(h[-win])
                 recent_end_off = self._offset(h[-1])
                 recent_cross_inner = recent_end_off - recent_start_off  # >0 向内, <0 向外
                 if entry_exit == "exit" and recent_cross_inner > 0:
@@ -394,14 +401,14 @@ class LineCrossingCounter:
                 confidence=track.confidence,
             )
             events.append(event)
-            self.counted_tracks.add(track_id)
+            self.counted_tracks[track_id] = datetime.now().timestamp()
             self.track_states[track_id] = "TRACKING"
 
         self._cleanup_old_tracks()
         return events
 
     def _cleanup_old_tracks(self):
-        """清理长时间无跨线的轨迹状态 (不清理 counted_tracks, 保证永久去重)."""
+        """清理长时间无跨线的轨迹状态; 按 TTL 淘汰已计数轨迹 (防内存泄漏与流重连 ID 重用漏计)."""
         current_time = datetime.now().timestamp()
         to_remove = []
         for track_id, history in self.track_crossing_history.items():
@@ -413,18 +420,20 @@ class LineCrossingCounter:
                 to_remove.append(track_id)
 
         for track_id in to_remove:
-            if track_id in self.track_crossing_history:
-                del self.track_crossing_history[track_id]
-            if track_id in self.track_states:
-                del self.track_states[track_id]
-            if track_id in self.track_crossing_start_pos:
-                del self.track_crossing_start_pos[track_id]
-            if track_id in self.track_confirm_side:
-                del self.track_confirm_side[track_id]
-            if track_id in self.track_hold_count:
-                del self.track_hold_count[track_id]
-            # 注意: 不清理 counted_tracks -- 已计数的轨迹永久去重,
-            # 避免离线处理慢帧/墙钟时间偏差导致同一轨迹被重复计数.
+            self.track_crossing_history.pop(track_id, None)
+            self.track_states.pop(track_id, None)
+            self.track_crossing_start_pos.pop(track_id, None)
+            self.track_confirm_side.pop(track_id, None)
+            self.track_hold_count.pop(track_id, None)
+
+        # 已计数轨迹按 TTL 淘汰: 7x24 流长期运行防止内存无限增长;
+        # 流重连后跟踪器 ID 从头分配, 淘汰旧 ID 避免新轨迹被误判为已计数而漏计.
+        expired = [
+            tid for tid, ts in self.counted_tracks.items()
+            if current_time - ts > self.counted_tracks_ttl
+        ]
+        for tid in expired:
+            self.counted_tracks.pop(tid, None)
 
     def reset(self):
         self.track_crossing_history.clear()

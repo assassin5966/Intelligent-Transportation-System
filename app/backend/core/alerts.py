@@ -4,7 +4,7 @@
 并持久化到 Redis List 供 /api/alerts 查询.
 """
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -16,6 +16,7 @@ from ...common.redis_client import get_redis
 from .realtime import get_stats
 
 _rules_cache: Optional[list[dict]] = None
+_rules_mtime: Optional[float] = None  # 规则文件修改时间, 变化时自动重载
 
 _ALERTS_KEY = f"{settings.redis_prefix}:alerts"
 _ALERT_SEQ_KEY = f"{settings.redis_prefix}:alert:seq"
@@ -23,12 +24,17 @@ _ALERT_MAX = 1000
 
 
 def load_rules(path: Optional[str] = None) -> list[dict]:
-    """加载告警规则 (带缓存)."""
-    global _rules_cache
-    if _rules_cache is None:
-        p = Path(path or settings.rules_file)
+    """加载告警规则 (带缓存, 文件修改后自动重载, 无需重启)."""
+    global _rules_cache, _rules_mtime
+    p = Path(path or settings.rules_file)
+    try:
+        mtime = p.stat().st_mtime
+    except OSError:
+        mtime = None
+    if _rules_cache is None or (mtime is not None and _rules_mtime != mtime):
         data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
         _rules_cache = data.get("rules", [])
+        _rules_mtime = mtime
         logger.info(f"已加载 {len(_rules_cache)} 条告警规则")
     return _rules_cache
 
@@ -56,7 +62,7 @@ async def evaluate() -> list[dict]:
             "message": msg,
             "value": value,
             "threshold": threshold,
-            "created_at": datetime.utcnow().isoformat(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
         }
         alert_id = await redis.incr(_ALERT_SEQ_KEY)
         alert["id"] = alert_id

@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from ..common.config import settings
 from ..common.logger import logger
 from ..common.redis_client import close_redis
 from .api import alerts, devices, events, stats
@@ -32,8 +33,8 @@ async def lifespan(app: FastAPI):
             from ..prediction import stop_scheduler
 
             await stop_scheduler()
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"停止预测调度器失败: {e}")
     await close_redis()
     logger.info("业务后端关闭")
 
@@ -44,10 +45,12 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# CORS: 通过环境变量 CORS_ORIGINS 配置允许的来源 (逗号分隔), 生产环境应限定具体前端域名
+_cors_origins = [o.strip() for o in settings.cors_origins.split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,  # 与 allow_origins=["*"] 组合才符合 CORS 规范
+    allow_origins=_cors_origins,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )

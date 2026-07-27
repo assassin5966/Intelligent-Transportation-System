@@ -18,7 +18,7 @@ async def receive_event(
     if event.event_type not in EVENT_TYPES:
         raise HTTPException(400, f"invalid event_type: {event.event_type}")
 
-    await apply_event(event.event_type, event.device_id)
+    await apply_event(event.event_type, event.device_id, event.occurred_at)
 
     background.add_task(evaluate)
 

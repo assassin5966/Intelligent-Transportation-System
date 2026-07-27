@@ -25,11 +25,12 @@ def unregister_ws_client(queue: asyncio.Queue):
 
 
 async def broadcast_ws_message(message: dict):
-    for queue in _ws_clients:
+    # 遍历快照, 避免 WebSocket 断开修改 set 时 RuntimeError
+    for queue in list(_ws_clients):
         try:
             await queue.put(message)
-        except Exception:
-            pass
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"WebSocket 广播失败: {e}")
 
 
 class DevicePipeline:
@@ -50,17 +51,19 @@ class DevicePipeline:
         self._task: Optional[asyncio.Task] = None
         self._stop = asyncio.Event()
         self._client = httpx.AsyncClient(timeout=10.0)
-        self._frame_size_set = False
+        self._frame_size: Optional[tuple[int, int]] = None  # 跟踪当前帧尺寸, 变化时更新 (含流重连)
 
     async def _run(self) -> None:
         logger.info(f"[{self.device_id}] 管道启动: {self.stream_url}")
         try:
             async for frame, _idx in stream_frames(self.stream_url, self._stop):
-                if not self._frame_size_set and frame is not None:
+                if frame is not None:
                     h, w = frame.shape[:2]
-                    self.counter.set_frame_size(w, h)
-                    self._frame_size_set = True
-                    logger.info(f"[{self.device_id}] 计数线帧尺寸: {w}x{h}")
+                    if self._frame_size != (w, h):
+                        # 首帧或流重连后分辨率变化 -> 更新计数器帧尺寸
+                        self.counter.set_frame_size(w, h)
+                        self._frame_size = (w, h)
+                        logger.info(f"[{self.device_id}] 计数线帧尺寸: {w}x{h}")
                 track_result = await asyncio.to_thread(self.tracker.track, frame)
                 
                 events = self.counter.process_tracks(track_result, self.device_id)
