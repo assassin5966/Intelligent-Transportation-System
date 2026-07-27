@@ -43,6 +43,8 @@ class DeviceIn(BaseModel):
     stream_url: str
     line_coords: Optional[str] = None  # "x1,y1,x2,y2" 归一化 0-1
     anchor_coords: Optional[str] = None  # "x,y" 归一化 0-1, 内侧锚点
+    count_only: Optional[str] = None  # None=双向, "enter"=只计Enter, "exit"=只计Exit
+    camera_type: Optional[str] = None  # None=全部检测, "vehicle"=只检测机动车, "person"=只检测人流(含非机动车)
 
 
 class DeviceOut(BaseModel):
@@ -51,6 +53,8 @@ class DeviceOut(BaseModel):
     stream_url: str
     line_coords: Optional[str] = None
     anchor_coords: Optional[str] = None
+    count_only: Optional[str] = None
+    camera_type: Optional[str] = None
     status: str = "registered"
 
 
@@ -119,6 +123,8 @@ async def register(dev: DeviceIn):
             "stream_url": dev.stream_url,
             "line_coords": dev.line_coords or "",
             "anchor_coords": dev.anchor_coords or "",
+            "count_only": dev.count_only or "",
+            "camera_type": dev.camera_type or "",
             "status": "registered",
         },
     )
@@ -127,6 +133,10 @@ async def register(dev: DeviceIn):
     payload = {"device_id": dev.id, "stream_url": dev.stream_url, "line": line}
     if anchor is not None:
         payload["anchor"] = anchor
+    if dev.count_only is not None:
+        payload["count_only"] = dev.count_only
+    if dev.camera_type is not None:
+        payload["camera_type"] = dev.camera_type
     await _forward_to_ai("POST", "/devices", payload)
     return {"id": dev.id, "status": "registered"}
 

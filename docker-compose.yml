@@ -65,6 +65,50 @@ services:
     volumes:
       - redis-data:/data
 
+  # ---------- MediaMTX: RTSP 服务器 (测试用) ----------
+  # 接收 FFmpeg 推流, AI 服务通过 RTSP 地址拉流
+  # 参考: https://github.com/bluenviron/mediamtx
+  rtsp-server:
+    image: bluenviron/mediamtx:latest
+    container_name: traffic-rtsp-server
+    ports:
+      - "8554:8554"    # RTSP
+      - "1935:1935"    # RTMP
+      - "8888:8888"    # HTTP
+    volumes:
+      - ./data:/data/video:ro
+    # 默认配置即可接收 publisher 模式推流
+
+  # ---------- RTSP 推流服务 - 车辆识别 (用 FFmpeg 推送本地视频到 MediaMTX) ----------
+  rtsp-streamer-vehicle:
+    image: smart-city-platform:latest
+    container_name: traffic-rtsp-streamer-vehicle
+    depends_on:
+      - rtsp-server
+    volumes:
+      - ./data:/data/video:ro
+    environment:
+      - PYTHONUNBUFFERED=1
+    command: >
+      ffmpeg -re -stream_loop -1 -i /data/video/车辆识别20s.mp4
+      -c:v libx264 -preset ultrafast -tune zerolatency
+      -f rtsp -rtsp_transport tcp rtsp://rtsp-server:8554/vehicle
+
+  # ---------- RTSP 推流服务 - 人流识别 (用 FFmpeg 推送本地视频到 MediaMTX) ----------
+  rtsp-streamer-person:
+    image: smart-city-platform:latest
+    container_name: traffic-rtsp-streamer-person
+    depends_on:
+      - rtsp-server
+    volumes:
+      - ./data:/data/video:ro
+    environment:
+      - PYTHONUNBUFFERED=1
+    command: >
+      ffmpeg -re -stream_loop -1 -i /data/video/人流识别20s.mp4
+      -c:v libx264 -preset ultrafast -tune zerolatency
+      -f rtsp -rtsp_transport tcp rtsp://rtsp-server:8554/person
+
   # ---------- 视频处理器 (本地测试用) ----------
   ai-processor:
     image: smart-city-platform:latest

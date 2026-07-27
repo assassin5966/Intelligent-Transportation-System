@@ -42,12 +42,16 @@ class DevicePipeline:
         stream_url: str,
         line: tuple[Point, Point],
         anchor: Optional[Point] = None,
+        count_only: Optional[str] = None,
+        camera_type: Optional[str] = None,
     ):
         self.device_id = device_id
         self.stream_url = stream_url
         self.line = line
-        self.tracker = ByteTracker()
+        self.tracker = ByteTracker(camera_type=camera_type)
         self.counter = LineCrossingCounter(line, anchor)
+        if count_only is not None:
+            self.counter.count_only = count_only
         self._task: Optional[asyncio.Task] = None
         self._stop = asyncio.Event()
         self._client = httpx.AsyncClient(timeout=10.0)

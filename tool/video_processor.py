@@ -125,6 +125,7 @@ def parse_args():
     parser.add_argument("--line", default="0.5,0.1,0.5,0.9", help="计数线坐标（归一化 x1,y1,x2,y2, 默认垂直线）")
     parser.add_argument("--anchor", default="0.9,0.5", help="内侧锚点（归一化 x,y, 标识Enter方向所在侧）")
     parser.add_argument("--count-only", default=None, choices=["enter", "exit"], help="单向计数模式: enter=只计进入, exit=只计离开")
+    parser.add_argument("--camera-type", default=None, choices=["vehicle", "person"], help="摄像头类型: vehicle=只检测机动车, person=只检测人流(含非机动车)")
     return parser.parse_args()
 
 
@@ -231,7 +232,7 @@ def process_video(args):
 
     try:
         from app.ai.tracker import ByteTracker
-        tracker = ByteTracker()
+        tracker = ByteTracker(camera_type=args.camera_type)
         print("  [OK] 跟踪模块 (ByteTracker)")
     except Exception as e:
         print(f"  [FAIL] 跟踪模块: {e}")

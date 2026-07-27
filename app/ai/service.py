@@ -37,6 +37,8 @@ class DeviceRegister(BaseModel):
     stream_url: str
     line: list[list[float]]
     anchor: Optional[list[float]] = None
+    count_only: Optional[str] = None  # None=双向, "enter"=只计Enter, "exit"=只计Exit
+    camera_type: Optional[str] = None  # None=全部检测, "vehicle"=只检测机动车, "person"=只检测人流(含非机动车)
 
 
 @app.get("/health", tags=["system"])
@@ -65,7 +67,7 @@ async def register(dev: DeviceRegister):
     anchor: Optional[Point] = None
     if dev.anchor and len(dev.anchor) == 2:
         anchor = (float(dev.anchor[0]), float(dev.anchor[1]))
-    p = DevicePipeline(dev.device_id, dev.stream_url, line, anchor)
+    p = DevicePipeline(dev.device_id, dev.stream_url, line, anchor, dev.count_only, dev.camera_type)
     p.start()
     _pipelines[dev.device_id] = p
     return {"device_id": dev.device_id, "status": "started"}

@@ -64,11 +64,11 @@ class LineCrossingCounter:
         self.line_name = "line_a"
 
         self.anti_jitter = True
-        self.min_distance_ratio = 0.05  # 距线最小距离占帧短边比例
+        self.min_distance_ratio = 0.02  # 距线最小距离占帧短边比例
         self.min_distance_threshold = 50  # set_frame_size 重算
         self.endpoint_sensitivity = 0.05
-        self.hold_frames = 3  # 滞留确认帧数 (跨线后需在新侧连续保持)
-        self.min_motion = 3  # 最小位移(像素), 小于此值视为抖动
+        self.hold_frames = 2  # 滞留确认帧数 (跨线后需在新侧连续保持)
+        self.min_motion = 2  # 最小位移(像素), 小于此值视为抖动
         self.count_only: Optional[str] = None  # None=双向, "enter"=只计Enter, "exit"=只计Exit
 
         # ID 切换检测参数 (可配置, 适配不同帧率/分辨率)
@@ -383,8 +383,8 @@ class LineCrossingCounter:
                 self.track_states[track_id] = "TRACKING"
                 continue
 
-            # 7. 生成事件
-            if track.class_name == "person":
+            # 7. 生成事件 (person/bicycle/motorcycle 归为人流, car/truck/bus 归为车流)
+            if track.class_name in ("person", "bicycle", "motorcycle"):
                 event_type = PERSON_ENTER if entry_exit == "enter" else PERSON_EXIT
             else:
                 event_type = VEHICLE_ENTER if entry_exit == "enter" else VEHICLE_EXIT
