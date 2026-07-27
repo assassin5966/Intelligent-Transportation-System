@@ -1,9 +1,11 @@
 """Redis 异步客户端 (实时状态: 当前车辆/人员数量、今日累计、告警)."""
+from typing import Optional
+
 import redis.asyncio as aioredis
 
 from .config import settings
 
-_pool: aioredis.ConnectionPool | None = None
+_pool: Optional[aioredis.ConnectionPool] = None
 
 
 def _get_pool() -> aioredis.ConnectionPool:

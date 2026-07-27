@@ -1,6 +1,6 @@
 # Intelligent Transportation System / 智慧古城车辆人流监管平台
 
-基于 GB28181 视频平台 → AI 分析 → 业务后端 → Redis/MySQL → 展示大屏 的轻量化架构。
+基于 GB28181 视频平台 → AI 分析 → 业务后端 → Redis → 展示大屏 的轻量化架构。
 AI 与后端均采用 Python，**共用一个 Docker 镜像**，以不同启动命令运行两个服务。
 
 ## 系统架构
@@ -16,17 +16,18 @@ GB28181/RTSP 视频流
 │  端口 8001       │                     │  端口 8000       │
 └─────────────────┘                     └────────┬────────┘
                                                  │
-                          ┌──────────────────────┼──────────────────┐
-                          ▼                      ▼                  ▼
-                    ┌──────────┐          ┌──────────┐        ┌──────────┐
-                    │  Redis   │          │  MySQL   │        │ Chronos  │
-                    │ 实时状态  │          │ 历史数据  │        │ 时序预测 │
-                    └──────────┘          └──────────┘        └──────────┘
+                          ┌──────────────────────┴──────────────────┐
+                          ▼                                         ▼
+                    ┌──────────────────┐                    ┌──────────┐
+                    │      Redis       │                    │  Chronos  │
+                    │ 实时状态 / 告警  │                    │ 时序预测 │
+                    │ 小时聚合 / 趋势  │                    └──────────┘
+                    └──────────────────┘
 ```
 
 - **AI 分析服务**：YOLO11 检测 + ByteTrack 跟踪 + 越线计数，仅输出业务事件（不传视频），大幅降低通信压力。
 - **业务后端**：实时统计、规则告警、REST API、小时聚合、时序预测。
-- **时序预测**：接入 Chronos 大模型，预测未来 15/30/45/60 分钟人流/车辆趋势。
+- **时序预测**：接入 Chronos 大模型，基于逐小时历史序列预测未来 15/30/45/60 小时人流/车辆趋势。
 
 ## 技术栈
 
@@ -35,8 +36,7 @@ GB28181/RTSP 视频流
 | AI 视觉 | ultralytics (YOLO11) + ByteTrack + OpenCV + PyTorch |
 | 时序预测 | Chronos (HuggingFace transformers) |
 | 业务后端 | FastAPI + Pydantic v2 + asyncio |
-| 实时状态 | Redis (redis.asyncio) |
-| 历史数据 | MySQL 8 + SQLAlchemy 2.0 (async) + aiomysql |
+| 实时状态/历史 | Redis (redis.asyncio) |
 | 通信 | HTTPX + WebSockets |
 
 ## 目录结构
@@ -44,17 +44,18 @@ GB28181/RTSP 视频流
 ```
 智慧交通项目/
 ├── app/
-│   ├── common/        # 配置·日志·Redis·MySQL·ORM 模型 (基础层)
+│   ├── common/        # 配置·日志·Redis (基础层)
 │   ├── schemas/       # 事件/统计 Pydantic 契约
 │   ├── ai/            # YOLO11 检测·ByteTrack 跟踪·越线计数·RTSP 拉流·管道·服务入口
 │   ├── backend/       # FastAPI: 事件接收·实时统计·告警·趋势·设备·小时聚合
 │   └── prediction/    # Chronos 时序预测·路由·定时调度
 ├── configs/rules.yaml # 告警规则 (车辆>300红警 / 游客>10000饱和)
 ├── scripts/
-│   ├── init_db.py     # 建表脚本
-│   └── smoke_test.sh  # 冒烟测试
+│   ├── run_video_processor.sh  # 离线视频处理 (Docker 一键运行)
+│   └── smoke_test.sh           # 冒烟测试
+├── tool/              # 离线视频处理器 (独立组件)
 ├── Dockerfile         # 统一镜像 (AI + 后端)
-├── docker-compose.yml # 编排: ai + backend + redis + mysql
+├── docker-compose.yml # 编排: ai + backend + redis + ai-processor
 ├── requirements.txt
 └── .env.example
 ```
@@ -95,7 +96,7 @@ docker build --no-cache -t smart-city-platform:latest .
 # 复制环境变量示例并按需修改
 cp .env.example .env
 
-# 构建并启动全部服务 (ai + backend + redis + mysql)
+# 构建并启动全部服务 (ai + backend + redis)
 docker compose -p smartcity up -d --build
 
 # 查看状态
@@ -112,7 +113,6 @@ docker compose -p smartcity down
 - 后端 API：`8000`
 - AI 分析服务：`8001`
 - Redis：`16379`（主机映射，避免与宿主机 6379 冲突）
-- MySQL：`13306`（主机映射，避免与宿主机 3306 冲突）
 
 > 注：docker-compose.yml 未固定 container_name，使用 `-p smartcity` 项目名隔离，
 > 适合在共享服务器上运行，避免与其他项目冲突。
@@ -137,7 +137,7 @@ cp .env.example .env   # Windows PowerShell: copy .env.example .env
 # 3. 构建镜像（自动按当前机器 CPU 架构选 torch 源，无需任何参数）
 docker build -t smart-city-platform:latest .
 
-# 4. 启动全栈 (ai + backend + redis + mysql)
+# 4. 启动全栈 (ai + backend + redis)
 docker compose -p smartcity up -d --build
 ```
 
@@ -147,7 +147,6 @@ docker compose -p smartcity up -d --build
   ```bash
   docker pull docker.1ms.run/library/python:3.11-slim && docker tag docker.1ms.run/library/python:3.11-slim python:3.11-slim
   docker pull docker.1ms.run/library/redis:7-alpine && docker tag docker.1ms.run/library/redis:7-alpine redis:7-alpine
-  docker pull docker.1ms.run/library/mysql:8.0 && docker tag docker.1ms.run/library/mysql:8.0 mysql:8.0
   ```
   预拉后再 `docker compose up`，基础镜像命中本地缓存，不再连 Docker Hub。
 - **GitHub 克隆慢**：可用 HTTPS 方式 `https://github.com/assassin5966/Intelligent-Transportation-System.git`，或配置 git 代理。
@@ -171,8 +170,8 @@ docker compose -p smartcity up -d --build
 | GET | `/health` | 健康检查 |
 | POST | `/api/events` | 接收 AI 推送的事件 `{device_id, event_type, occurred_at}` |
 | GET | `/api/stats/realtime` | 实时统计（当前车辆/人员、今日累计、活跃设备）|
-| GET | `/api/stats/trend?hours=24` | 历史趋势曲线 |
-| GET | `/api/alerts?limit=100` | 告警列表 |
+| GET | `/api/stats/trend?hours=24` | 逐小时历史趋势（车辆/人员进出总量）|
+| GET | `/api/alerts?limit=100` | 告警列表（Redis 保留最近 1000 条）|
 | GET/POST/DELETE | `/api/devices` | 设备管理（含越线计数线配置）|
 | GET | `/api/prediction/health` | 预测服务健康 |
 | POST | `/api/prediction/predict` | 时序预测 `{metric, horizon}` |
@@ -194,20 +193,18 @@ docker compose -p smartcity up -d --build
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `REDIS_URL` | `redis://redis:6379/0` | Redis 连接 |
-| `MYSQL_URL` | `mysql+aiomysql://smartcity:smartcity123@mysql:3306/smart_city` | MySQL 连接 |
-| `YOLO_MODEL` | `yolo11n.pt` | YOLO 权重 |
-| `CHRONOS_MODEL` | `amazon/chronos-t5-tiny` | Chronos 模型 |
+| `YOLO_MODEL` | `models/yolo11n.pt` | YOLO 权重 |
+| `CHRONOS_MODEL` | `models` | Chronos-2 本地模型目录 |
+| `PREDICTION_HORIZON` | `60` | 预测步长（小时）|
+| `PREDICTION_HISTORY_HOURS` | `168` | 预测历史窗口（小时）|
 | `RULES_FILE` | `configs/rules.yaml` | 告警规则文件 |
 
 ## 开发指南
 
 ```bash
 # 后端开发（热加载，挂载本地 app/ 目录）
-docker compose -p smartcity up -d redis mysql
+docker compose -p smartcity up -d redis
 docker compose -p smartcity up backend  # 挂载 ./app 实时生效
-
-# 初始化数据库表
-docker compose -p smartcity exec backend python -m scripts.init_db
 
 # 冒烟测试（仅需 Redis，验证后端 API）
 bash scripts/smoke_test.sh
@@ -219,7 +216,7 @@ bash scripts/smoke_test.sh
 |------|------|------|
 | 视频接入 | GB28181/RTSP 接入、多路管理 | ✅ 框架就绪 |
 | AI 分析 | 检测、跟踪、越线计数、HTTP 推送 | ✅ |
-| 后端 | 统计、Redis、MySQL、REST API、告警 | ✅ |
+| 后端 | 统计、Redis、REST API、告警 | ✅ |
 | 预测 | Chronos 预测接口 | ✅ |
 | 展示大屏 | Vue3 + ECharts | ⏳ 待开发 |
 | 联调 | 设备、AI、后端、大屏 | ⏳ |

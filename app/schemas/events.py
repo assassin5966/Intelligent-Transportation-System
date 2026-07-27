@@ -1,9 +1,9 @@
 """事件与统计 schema (AI <-> 后端 通信契约)."""
 from datetime import datetime
+from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
-# 业务事件类型 (与方案一致: 仅输出事件, 不传视频)
 VEHICLE_ENTER = "VehicleEnter"
 VEHICLE_EXIT = "VehicleExit"
 PERSON_ENTER = "PersonEnter"
@@ -11,7 +11,6 @@ PERSON_EXIT = "PersonExit"
 
 EVENT_TYPES = {VEHICLE_ENTER, VEHICLE_EXIT, PERSON_ENTER, PERSON_EXIT}
 
-# 进入/离开 -> 对统计量的影响 (delta)
 EVENT_DELTA: dict[str, dict[str, int]] = {
     VEHICLE_ENTER: {"current_vehicles": 1, "today_vehicle_in": 1},
     VEHICLE_EXIT: {"current_vehicles": -1, "today_vehicle_out": 1},
@@ -20,17 +19,55 @@ EVENT_DELTA: dict[str, dict[str, int]] = {
 }
 
 
-class EventIn(BaseModel):
-    """AI 推送到后端的事件."""
+class Detection(BaseModel):
+    id: int
+    class_name: str
+    bbox: List[float]
+    confidence: float
+    center: List[float]
 
+
+class DetectionResult(BaseModel):
+    frame_id: int
+    timestamp: str
+    detections: List[Detection]
+
+
+class Track(BaseModel):
+    track_id: str
+    class_name: str
+    bbox: List[float]
+    center: List[float]
+    confidence: float
+    age: int
+    velocity: Optional[List[float]] = None
+    history: Optional[List[List[float]]] = None
+
+
+class TrackResult(BaseModel):
+    frame_id: int
+    tracks: List[Track]
+
+
+class CrossingEvent(BaseModel):
+    event_type: str
+    track_id: str
+    class_name: str
+    timestamp: str
+    camera_id: str
+    cross_point: List[float]
+    cross_line: str
+    direction: str
+    confidence: float
+
+
+class EventIn(BaseModel):
     device_id: str = Field(..., description="设备ID")
     event_type: str = Field(..., description="VehicleEnter/VehicleExit/PersonEnter/PersonExit")
     occurred_at: datetime = Field(..., description="事件发生时间")
 
 
 class RealtimeStats(BaseModel):
-    """实时统计 (Redis 维护)."""
-
     current_vehicles: int = 0
     current_persons: int = 0
     today_vehicle_in: int = 0
@@ -41,19 +78,11 @@ class RealtimeStats(BaseModel):
     updated_at: datetime
 
 
-class TrendPoint(BaseModel):
-    """趋势曲线单点."""
-
-    time: datetime
-    vehicles: int = 0
-    persons: int = 0
-
-
 class AlertOut(BaseModel):
     id: int
     level: str
     category: str
     message: str
-    value: float | None = None
-    threshold: float | None = None
+    value: Optional[float] = None
+    threshold: Optional[float] = None
     created_at: datetime

@@ -1,6 +1,6 @@
 # ============================================================
 # 智慧古城车辆人流监管平台 - 容器编排
-# 架构: AI 分析服务 / 业务后端 (同一镜像) + Redis + MySQL
+# 架构: AI 分析服务 / 业务后端 (同一镜像) + Redis
 #
 # 启动:
 #   docker compose up -d                # CPU 模式
@@ -22,10 +22,10 @@ services:
       - PYTHONUNBUFFERED=1
     volumes:
       - ./app:/app/app:cached
+      - ./models:/app/models:cached
       - model-cache:/root/.cache
     depends_on:
       - redis
-    # GPU 支持 (取消注释即可启用; 需主机安装 NVIDIA Container Toolkit)
     # deploy:
     #   resources:
     #     reservations:
@@ -43,16 +43,14 @@ services:
       - "8000:8000"
     environment:
       - REDIS_URL=redis://redis:6379/0
-      - MYSQL_URL=mysql+aiomysql://smartcity:smartcity123@mysql:3306/smart_city
       - AI_SERVICE_URL=http://ai:8001
       - PYTHONUNBUFFERED=1
     volumes:
       - ./app:/app/app:cached
     depends_on:
       - redis
-      - mysql
 
-  # ---------- Redis: 实时状态 (当前车辆/人员数量、告警) ----------
+  # ---------- Redis: 实时状态 (当前车辆/人员数量、告警、设备配置) ----------
   redis:
     image: redis:7-alpine
     restart: unless-stopped
@@ -62,23 +60,23 @@ services:
     volumes:
       - redis-data:/data
 
-  # ---------- MySQL: 历史数据 (事件记录、统计、预测样本) ----------
-  mysql:
-    image: mysql:8.0
-    restart: unless-stopped
-    environment:
-      - MYSQL_ROOT_PASSWORD=root123
-      - MYSQL_DATABASE=smart_city
-      - MYSQL_USER=smartcity
-      - MYSQL_PASSWORD=smartcity123
-      - TZ=Asia/Shanghai
-    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
-    ports:
-      - "13306:3306"
+  # ---------- 视频处理器 (本地测试用) ----------
+  ai-processor:
+    image: smart-city-platform:latest
+    container_name: traffic-ai-processor
     volumes:
-      - mysql-data:/var/lib/mysql
+      - ./output:/data/video:ro
+      - ./output:/data/output
+      - ./models:/app/models:ro
+    environment:
+      - PYTHONPATH=/app
+    command: >
+      python /app/tool/video_processor.py
+      --video /data/video/test_50f.mp4
+      --output /data/output
+      --camera_id CAM001
+      --frame_skip 5
 
 volumes:
   redis-data:
-  mysql-data:
   model-cache:

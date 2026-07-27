@@ -9,7 +9,6 @@ class Settings(BaseSettings):
 
     # ---- 数据存储 ----
     redis_url: str = "redis://redis:6379/0"
-    mysql_url: str = "mysql+aiomysql://smartcity:smartcity123@mysql:3306/smart_city"
 
     # ---- 服务间通信 ----
     backend_url: str = "http://backend:8000"
@@ -20,16 +19,15 @@ class Settings(BaseSettings):
     ai_port: int = 8001
 
     # ---- AI 视觉分析 ----
-    yolo_model: str = "yolo11n.pt"
+    yolo_model: str = "models/yolo11n.pt"
     yolo_conf: float = 0.4
     yolo_iou: float = 0.5
-    # COCO: 0=person 1=bicycle 2=car 3=motorcycle 5=bus 7=truck
-    detect_classes: list[int] = [0, 1, 2, 3, 5, 7]
-    track_buffer: int = 30  # ByteTrack 跟踪帧缓冲
+    track_buffer: int = 30
 
     # ---- 时序预测 ----
-    chronos_model: str = "amazon/chronos-t5-tiny"
-    prediction_horizon: int = 60  # 预测分钟数 (15/30/45/60)
+    chronos_model: str = "models"  # 本地 Chronos-2 模型目录
+    prediction_horizon: int = 60
+    prediction_history_hours: int = 168
 
     # ---- 告警 ----
     rules_file: str = "configs/rules.yaml"

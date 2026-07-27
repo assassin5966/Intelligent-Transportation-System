@@ -2,47 +2,46 @@
 import asyncio
 import json
 from datetime import datetime
+from typing import Optional
 
 from ..common.config import settings
-from ..common.db import AsyncSessionLocal
 from ..common.logger import logger
 from ..common.redis_client import get_redis
 from .chronos_model import ChronosPredictor
 from .repository import load_history
 
-_task: asyncio.Task | None = None
+_task: Optional[asyncio.Task] = None
 
 
 async def _run_once() -> None:
-    async with AsyncSessionLocal() as session:
-        redis = get_redis()
-        for metric in ("vehicle", "person"):
-            try:
-                history = await load_history(session, metric)
-                if not history:
-                    continue
-                forecast = ChronosPredictor.instance().predict(
-                    history, settings.prediction_horizon
-                )
-                payload = json.dumps(
-                    {
-                        "metric": metric,
-                        "horizon": settings.prediction_horizon,
-                        "forecast": forecast,
-                        "generated_at": datetime.utcnow().isoformat(),
-                    }
-                )
-                await redis.set(
-                    f"{settings.redis_prefix}:prediction:latest:{metric}",
-                    payload,
-                    ex=7200,
-                )
-                logger.info(
-                    f"预测已更新: {metric} horizon={settings.prediction_horizon} "
-                    f"len={len(forecast)}"
-                )
-            except Exception as e:  # noqa: BLE001
-                logger.error(f"预测失败 {metric}: {e}")
+    redis = get_redis()
+    for metric in ("vehicle", "person"):
+        try:
+            history = await load_history(metric)
+            if not history:
+                continue
+            forecast = ChronosPredictor.instance().predict(
+                history, settings.prediction_horizon
+            )
+            payload = json.dumps(
+                {
+                    "metric": metric,
+                    "horizon": settings.prediction_horizon,
+                    "forecast": forecast,
+                    "generated_at": datetime.utcnow().isoformat(),
+                }
+            )
+            await redis.set(
+                f"{settings.redis_prefix}:prediction:latest:{metric}",
+                payload,
+                ex=7200,
+            )
+            logger.info(
+                f"预测已更新: {metric} horizon={settings.prediction_horizon} "
+                f"len={len(forecast)}"
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"预测失败 {metric}: {e}")
 
 
 async def _loop() -> None:

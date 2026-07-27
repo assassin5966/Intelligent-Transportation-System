@@ -1,35 +1,33 @@
 # ============================================================
 # 智慧古城车辆人流监管平台 - AI 分析 + 业务后端 统一依赖
-# 技术栈: YOLO11 / ByteTrack / FastAPI / Redis / MySQL / TimesFM-Chronos
+# 技术栈: YOLO11 / BoT-SORT / FastAPI / Redis / Chronos-2
 # ============================================================
 
 # === AI 视觉分析层 ===
-ultralytics>=8.3.0            # YOLO11 目标检测 + ByteTrack 跟踪 + 越线计数
-opencv-python-headless>=4.9.0 # RTSP 视频流处理 (无 GUI 头, 适合容器)
+# torch/torchvision 在 Dockerfile 中单独安装 (使用 PyTorch 官方 CPU 源)
+ultralytics>=8.3.0
+lap>=0.5.12
+opencv-python-headless>=4.9.0
 numpy>=1.26.0
-# torch / torchvision 在 Dockerfile 中单独安装 (便于切换 CPU/CUDA 源)
 
-# === 时序预测层 (TimesFM / Chronos) ===
-transformers>=4.40.0          # Chronos 时序大模型基于 HuggingFace
-accelerate>=0.30.0            # 模型推理加速
-# timesfm>=1.1.0              # TimesFM (可选, 按需启用, 体积较大)
+# === 时序预测层 ===
+chronos-forecasting>=1.4.0
+transformers>=4.40.0
+accelerate>=0.30.0
 
-# === 业务后端层 (FastAPI) ===
+# === 业务后端层 ===
 fastapi>=0.111.0
-uvicorn[standard]>=0.29.0     # ASGI 服务器 + WebSocket 支持
-python-multipart>=0.0.9       # 表单/文件上传
+uvicorn[standard]>=0.29.0
+python-multipart>=0.0.9
 pydantic>=2.7.0
-pydantic-settings>=2.2.0      # 配置管理
+pydantic-settings>=2.2.0
 
 # === 数据存储 ===
-redis>=5.0.0                  # 实时状态 (通过 redis.asyncio 异步访问)
-sqlalchemy>=2.0.0             # MySQL 历史数据 ORM
-aiomysql>=0.2.0               # MySQL 异步驱动
-alembic>=1.13.0               # 数据库迁移
+redis>=5.0.0
 
 # === 通信与工具 ===
-httpx>=0.27.0                 # HTTP 客户端 (AI 推送事件到后端)
-websockets>=12.0              # WebSocket 事件推送
+httpx>=0.27.0
+websockets>=12.0
 python-dotenv>=1.0.0
-loguru>=0.7.2                 # 日志
-tenacity>=8.3.0               # 重试 (RTSP 断流重连等)
+loguru>=0.7.2
+tenacity>=8.3.0

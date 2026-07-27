@@ -1,0 +1,29 @@
+# BoT-SORT 自定义配置 (用于交通监控场景, 降低 ID 切换)
+#
+# 与 ByteTrack 核心区别:
+#   1. GMC 全局运动补偿 (固定摄像头场景可关闭, 设为 none)
+#   2. 支持外观特征匹配 (with_reid, 需额外模型)
+#   3. 卡尔曼滤波状态向量更丰富
+#
+# 调参思路:
+#   - match_thresh: 0.8→0.4, 大幅降低 IOU 匹配门槛, 减少漏匹配
+#   - track_buffer: 30→60, 遮挡时保留轨迹更久 (2秒 @30fps)
+#   - new_track_thresh: 0.25→0.5, 更难创建新轨迹, 减少 ID 分裂
+#   - track_high_thresh: 0.25→0.35, 只信任高置信度检测
+
+tracker_type: botsort
+track_high_thresh: 0.35
+track_low_thresh: 0.1
+new_track_thresh: 0.5
+track_buffer: 60
+match_thresh: 0.4
+fuse_score: True
+
+# GMC: 固定摄像头无需运动补偿, 设为 none 节省计算
+gmc_method: none
+
+# ReID 外观匹配 (关闭, 需额外模型文件)
+with_reid: False
+model: none
+proximity_thresh: 0.5
+appearance_thresh: 0.8

@@ -1,19 +1,17 @@
 """告警 API."""
-from fastapi import APIRouter, Depends, Query
-from sqlalchemy.ext.asyncio import AsyncSession
+import json
 
-from ...common.db import get_session
-from ...schemas.events import AlertOut
-from ..crud import list_alerts
+from fastapi import APIRouter, Query
+
+from ...common.config import settings
+from ...common.redis_client import get_redis
 
 router = APIRouter(prefix="/api/alerts", tags=["alerts"])
 
 
-@router.get("", response_model=list[AlertOut])
-async def list_(
-    limit: int = Query(100, ge=1, le=500),
-    session: AsyncSession = Depends(get_session),
-):
-    """告警列表 (按时间倒序)."""
-    rows = await list_alerts(session, limit=limit)
-    return [AlertOut.model_validate(a, from_attributes=True) for a in rows]
+@router.get("")
+async def list_(limit: int = Query(100, ge=1, le=1000)):
+    """告警列表 (Redis List 保留最近 1000 条, 按时间倒序)."""
+    redis = get_redis()
+    raw = await redis.lrange(f"{settings.redis_prefix}:alerts", 0, limit - 1)
+    return [json.loads(item) for item in raw]

@@ -10,6 +10,8 @@ env/
 *.egg-info/
 dist/
 build/
+.trae/
+models/
 
 # ---- 测试 / 类型 / 缓存 ----
 .pytest_cache/
@@ -33,9 +35,9 @@ coverage.xml
 # ---- 运行时数据卷 (容器挂载, 不入库) ----
 data/
 logs/
-mysql-data/
 redis-data/
 *.log
+output/
 
 # ---- 模型权重 (体积大, 按需单独管理) ----
 *.pt

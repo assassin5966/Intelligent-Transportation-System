@@ -1,45 +1,121 @@
-"""设备管理 API (注册/列表/删除, 含越线计数线配置)."""
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
-from sqlalchemy.ext.asyncio import AsyncSession
+"""设备管理 API (注册/列表/删除, 含越线计数线配置).
 
-from ...common.db import get_session
-from ...common.models import Device
-from ..crud import delete_device, list_devices, upsert_device
+注册/删除时转发到 AI 分析服务启停视频处理管道, 同时在 Redis 保存配置.
+AI 服务不可达时仅告警, 不阻塞配置落库.
+"""
+from typing import Optional
+
+import httpx
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
+
+from ...common.config import settings
+from ...common.logger import logger
+from ...common.redis_client import get_redis
 
 router = APIRouter(prefix="/api/devices", tags=["devices"])
+
+_DEVICE_KEY_PREFIX = f"{settings.redis_prefix}:device:"
 
 
 class DeviceIn(BaseModel):
     id: str
     name: str
     stream_url: str
-    line_coords: str | None = None  # JSON, e.g. "[[x1,y1],[x2,y2]]"
+    line_coords: Optional[str] = None  # "x1,y1,x2,y2" 归一化 0-1
+    anchor_coords: Optional[str] = None  # "x,y" 归一化 0-1, 内侧锚点
+
+
+class DeviceOut(BaseModel):
+    id: str
+    name: str
+    stream_url: str
+    line_coords: Optional[str] = None
+    anchor_coords: Optional[str] = None
+    status: str = "registered"
+
+
+def _line_from_coords(line_coords: Optional[str]) -> list[list[float]]:
+    """解析 line_coords -> [[x1,y1],[x2,y2]]; 无法解析时返回默认线."""
+    if line_coords:
+        try:
+            parts = [float(x) for x in line_coords.split(",")]
+            if len(parts) == 4:
+                return [[parts[0], parts[1]], [parts[2], parts[3]]]
+        except ValueError:
+            pass
+    return [[0.5, 0.1], [0.5, 0.9]]
+
+
+def _anchor_from_coords(anchor_coords: Optional[str]) -> Optional[list[float]]:
+    """解析 anchor_coords -> [x,y]; 无法解析时返回 None (由 counter 用默认锚点)."""
+    if anchor_coords:
+        try:
+            parts = [float(x) for x in anchor_coords.split(",")]
+            if len(parts) == 2:
+                return [parts[0], parts[1]]
+        except ValueError:
+            pass
+    return None
+
+
+async def _forward_to_ai(method: str, path: str, json_body: Optional[dict] = None) -> None:
+    """转发到 AI 分析服务; 失败仅告警, 不阻塞设备配置落库."""
+    url = f"{settings.ai_service_url}{path}"
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            if method == "POST":
+                resp = await client.post(url, json=json_body)
+            else:
+                resp = await client.request(method, url)
+            if resp.status_code >= 400:
+                logger.warning(f"AI 服务转发失败 {method} {url}: HTTP {resp.status_code}")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"AI 服务不可达 {method} {url}: {e}")
 
 
 @router.get("")
-async def list_(session: AsyncSession = Depends(get_session)):
-    return await list_devices(session)
+async def list_():
+    redis = get_redis()
+    found = []
+    async for key in redis.scan_iter(f"{_DEVICE_KEY_PREFIX}*"):
+        data = await redis.hgetall(key)
+        if data:
+            found.append(DeviceOut(**data))
+    return found
 
 
 @router.post("", status_code=201)
-async def register(
-    dev: DeviceIn, session: AsyncSession = Depends(get_session)
-):
-    device = Device(
-        id=dev.id,
-        name=dev.name,
-        stream_url=dev.stream_url,
-        line_coords=dev.line_coords,
-        status="registered",
+async def register(dev: DeviceIn):
+    redis = get_redis()
+    key = f"{_DEVICE_KEY_PREFIX}{dev.id}"
+    await redis.hset(
+        key,
+        mapping={
+            "id": dev.id,
+            "name": dev.name,
+            "stream_url": dev.stream_url,
+            "line_coords": dev.line_coords or "",
+            "anchor_coords": dev.anchor_coords or "",
+            "status": "registered",
+        },
     )
-    saved = await upsert_device(session, device)
-    return {"id": saved.id, "status": saved.status}
+    line = _line_from_coords(dev.line_coords)
+    anchor = _anchor_from_coords(dev.anchor_coords)
+    payload = {"device_id": dev.id, "stream_url": dev.stream_url, "line": line}
+    if anchor is not None:
+        payload["anchor"] = anchor
+    await _forward_to_ai("POST", "/devices", payload)
+    return {"id": dev.id, "status": "registered"}
 
 
 @router.delete("/{device_id}")
-async def remove(device_id: str, session: AsyncSession = Depends(get_session)):
-    ok = await delete_device(session, device_id)
-    if not ok:
+async def remove(device_id: str):
+    redis = get_redis()
+    key = f"{_DEVICE_KEY_PREFIX}{device_id}"
+    exists = await redis.exists(key)
+    if not exists:
         raise HTTPException(404, "device not found")
+    await redis.delete(key)
+    await _forward_to_ai("DELETE", f"/devices/{device_id}")
     return {"status": "deleted", "id": device_id}
