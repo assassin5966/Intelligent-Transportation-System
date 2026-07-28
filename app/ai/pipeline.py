@@ -42,12 +42,16 @@ class DevicePipeline:
         stream_url: str,
         line: tuple[Point, Point],
         anchor: Optional[Point] = None,
+        roi: Optional[List[Point]] = None,
     ):
         self.device_id = device_id
         self.stream_url = stream_url
         self.line = line
         self.tracker = ByteTracker()
         self.counter = LineCrossingCounter(line, anchor)
+        if roi is not None:
+            # 归一化 ROI; 首帧 set_frame_size 后像素坐标自动重算
+            self.counter.set_roi(roi)
         self._task: Optional[asyncio.Task] = None
         self._stop = asyncio.Event()
         self._client = httpx.AsyncClient(timeout=10.0)

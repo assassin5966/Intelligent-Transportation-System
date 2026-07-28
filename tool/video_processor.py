@@ -20,12 +20,14 @@
 import argparse
 import csv
 import json
+import math
 import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import cv2
+import numpy as np
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = SCRIPT_DIR.parent
@@ -124,8 +126,27 @@ def parse_args():
     parser.add_argument("--no-annotated", action="store_true", help="不生成标注视频")
     parser.add_argument("--line", default="0.5,0.1,0.5,0.9", help="计数线坐标（归一化 x1,y1,x2,y2, 默认垂直线）")
     parser.add_argument("--anchor", default="0.9,0.5", help="内侧锚点（归一化 x,y, 标识Enter方向所在侧）")
+    parser.add_argument("--roi", default=None, help="ROI 感兴趣区域多边形（归一化 x1,y1,x2,y2,... 至少3个顶点；仅ROI内轨迹计数，不填则全画面计数）")
     parser.add_argument("--count-only", default=None, choices=["enter", "exit"], help="单向计数模式: enter=只计进入, exit=只计离开")
     return parser.parse_args()
+
+
+def _draw_dashed_line(img, pt1, pt2, color, thickness, dash=8):
+    """画虚线 (沿线段方向交替画/空 dash 像素)."""
+    x1, y1 = pt1
+    x2, y2 = pt2
+    dist = math.hypot(x2 - x1, y2 - y1)
+    if dist < 1:
+        return
+    n = max(1, int(dist // dash))
+    for i in range(n):
+        if i % 2 == 0:
+            t0 = i * dash / dist
+            t1 = min(1.0, (i + 1) * dash / dist)
+            cv2.line(img,
+                     (int(x1 + t0 * (x2 - x1)), int(y1 + t0 * (y2 - y1))),
+                     (int(x1 + t1 * (x2 - x1)), int(y1 + t1 * (y2 - y1))),
+                     color, thickness)
 
 
 def draw_annotations(frame, track_result, events, statistics, counter):
@@ -134,11 +155,18 @@ def draw_annotations(frame, track_result, events, statistics, counter):
     line_start = counter._normalize_to_pixel(counter.line_points[0])
     line_end = counter._normalize_to_pixel(counter.line_points[1])
 
+    # 原计数线: 暗红虚线 (表示用户原始线, ROI 外部分为失效段)
+    _draw_dashed_line(annotated,
+                      (int(line_start[0]), int(line_start[1])),
+                      (int(line_end[0]), int(line_end[1])),
+                      (128, 0, 128), 1, dash=8)
+
+    # 裁剪后有效段: 亮红粗实线 (ROI 内, 实际触发计数的部分)
     cv2.line(annotated,
-             (int(line_start[0]), int(line_start[1])),
-             (int(line_end[0]), int(line_end[1])),
-             (0, 0, 255), 2)
-    cv2.putText(annotated, "counting line", (int(line_start[0]), int(line_start[1]) - 10),
+             (int(counter._clip_p0[0]), int(counter._clip_p0[1])),
+             (int(counter._clip_p1[0]), int(counter._clip_p1[1])),
+             (0, 0, 255), 3)
+    cv2.putText(annotated, "counting line", (int(counter._clip_p0[0]), int(counter._clip_p0[1]) - 10),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
     # 内侧锚点 (标识Enter方向所在侧)
@@ -147,6 +175,16 @@ def draw_annotations(frame, track_result, events, statistics, counter):
                    (255, 0, 0), cv2.MARKER_CROSS, 20, 2)
     cv2.putText(annotated, "inner(anchor)", (int(anchor_px[0]) + 12, int(anchor_px[1])),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
+
+    # ROI 多边形 (半透明绿色填充 + 边界, 标识计数有效区域)
+    if counter._roi_px is not None and len(counter._roi_px) >= 3:
+        roi_int = [[int(p[0]), int(p[1])] for p in counter._roi_px]
+        overlay = annotated.copy()
+        cv2.fillPoly(overlay, [np.array(roi_int, dtype=np.int32)], (0, 255, 0))
+        cv2.addWeighted(overlay, 0.15, annotated, 0.85, 0, annotated)
+        cv2.polylines(annotated, [np.array(roi_int, dtype=np.int32)], True, (0, 255, 0), 2)
+        cv2.putText(annotated, "ROI", (roi_int[0][0], roi_int[0][1] - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
     colors = {
         "car": (0, 255, 0),
@@ -245,6 +283,13 @@ def process_video(args):
                          anchor=(anchor_parts[0], anchor_parts[1]))
         if args.count_only:
             counter.count_only = args.count_only
+        if args.roi:
+            roi_parts = [float(x) for x in args.roi.split(",")]
+            if len(roi_parts) % 2 == 0 and len(roi_parts) >= 6:
+                roi_polygon = [[roi_parts[i], roi_parts[i + 1]] for i in range(0, len(roi_parts), 2)]
+                counter.set_roi(roi_polygon)
+            else:
+                print(f"  [WARN] --roi 参数需为偶数个值且至少3个顶点, 已忽略: {args.roi}")
         print("  [OK] 越线计数模块 (LineCrossingCounter)")
     except Exception as e:
         print(f"  [FAIL] 越线计数模块: {e}")

@@ -37,6 +37,7 @@ class DeviceRegister(BaseModel):
     stream_url: str
     line: list[list[float]]
     anchor: Optional[list[float]] = None
+    roi: Optional[list[list[float]]] = None  # ROI 多边形顶点 [[x,y],...], >=3 个, 归一化
 
 
 @app.get("/health", tags=["system"])
@@ -65,7 +66,12 @@ async def register(dev: DeviceRegister):
     anchor: Optional[Point] = None
     if dev.anchor and len(dev.anchor) == 2:
         anchor = (float(dev.anchor[0]), float(dev.anchor[1]))
-    p = DevicePipeline(dev.device_id, dev.stream_url, line, anchor)
+    roi: Optional[list[Point]] = None
+    if dev.roi is not None:
+        if len(dev.roi) < 3:
+            raise HTTPException(400, "roi must have >=3 points [[x,y],...]")
+        roi = [(float(p[0]), float(p[1])) for p in dev.roi]
+    p = DevicePipeline(dev.device_id, dev.stream_url, line, anchor, roi)
     p.start()
     _pipelines[dev.device_id] = p
     return {"device_id": dev.device_id, "status": "started"}

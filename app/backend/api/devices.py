@@ -43,6 +43,7 @@ class DeviceIn(BaseModel):
     stream_url: str
     line_coords: Optional[str] = None  # "x1,y1,x2,y2" 归一化 0-1
     anchor_coords: Optional[str] = None  # "x,y" 归一化 0-1, 内侧锚点
+    roi_coords: Optional[str] = None  # "x1,y1,x2,y2,..." 归一化 0-1, >=3 顶点
 
 
 class DeviceOut(BaseModel):
@@ -51,6 +52,7 @@ class DeviceOut(BaseModel):
     stream_url: str
     line_coords: Optional[str] = None
     anchor_coords: Optional[str] = None
+    roi_coords: Optional[str] = None
     status: str = "registered"
 
 
@@ -79,6 +81,23 @@ def _anchor_from_coords(anchor_coords: Optional[str]) -> Optional[list[float]]:
         except ValueError:
             logger.warning(f"anchor_coords 格式非法, 使用默认锚点: {anchor_coords!r}")
     return None
+
+
+def _roi_from_coords(roi_coords: Optional[str]) -> Optional[list[list[float]]]:
+    """解析 roi_coords -> [[x,y],...]; 需偶数个值且 >=3 顶点, 否则返回 None 并告警."""
+    if not roi_coords:
+        return None
+    try:
+        parts = [float(x) for x in roi_coords.split(",")]
+    except ValueError:
+        logger.warning(f"roi_coords 格式非法, 忽略 ROI: {roi_coords!r}")
+        return None
+    if len(parts) % 2 != 0 or len(parts) < 6:
+        logger.warning(f"roi_coords 需偶数个值且至少3个顶点, 忽略 ROI: {roi_coords!r}")
+        return None
+    polygon = [[parts[i], parts[i + 1]] for i in range(0, len(parts), 2)]
+    _warn_if_out_of_range(polygon, "roi_coords")
+    return polygon
 
 
 async def _forward_to_ai(method: str, path: str, json_body: Optional[dict] = None) -> None:
@@ -119,14 +138,18 @@ async def register(dev: DeviceIn):
             "stream_url": dev.stream_url,
             "line_coords": dev.line_coords or "",
             "anchor_coords": dev.anchor_coords or "",
+            "roi_coords": dev.roi_coords or "",
             "status": "registered",
         },
     )
     line = _line_from_coords(dev.line_coords)
     anchor = _anchor_from_coords(dev.anchor_coords)
+    roi = _roi_from_coords(dev.roi_coords)
     payload = {"device_id": dev.id, "stream_url": dev.stream_url, "line": line}
     if anchor is not None:
         payload["anchor"] = anchor
+    if roi is not None:
+        payload["roi"] = roi
     await _forward_to_ai("POST", "/devices", payload)
     return {"id": dev.id, "status": "registered"}
 
