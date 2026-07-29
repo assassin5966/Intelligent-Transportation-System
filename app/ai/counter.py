@@ -77,8 +77,8 @@ class LineCrossingCounter:
         self.id_switch_min_avg_speed = 5.0  # 历史平均速度低于此值不判 (静止误判)
         self.id_switch_history_window = 5  # 方向一致性验证的历史窗口
 
-        # 已计数轨迹的去重保留时长 (秒); 超时后淘汰, 避免内存泄漏与流重连 ID 重用漏计
-        self.counted_tracks_ttl = 3600
+        # 已计数去重保留时长 (秒); 超时后淘汰, 避免内存泄漏与流重连 ID 重用漏计
+        self.counted_tracks_ttl = 300
 
         # 轨迹状态
         self.track_crossing_history: Dict[str, List[Tuple[float, str, str]]] = {}
@@ -86,7 +86,9 @@ class LineCrossingCounter:
         self.track_crossing_start_pos: Dict[str, List[float]] = {}  # 跨线前位置
         self.track_confirm_side: Dict[str, int] = {}  # 滞留确认侧 (+1/-1)
         self.track_hold_count: Dict[str, int] = {}  # 滞留已确认帧数
-        self.counted_tracks: Dict[str, float] = {}  # track_id -> 计数时间戳 (TTL 淘汰)
+        # 双向计数: track_id+direction 维度去重, 允许同一轨迹来回各计一次
+        # key: "track_id|direction", value: 计数时间戳
+        self.counted_tracks: Dict[str, float] = {}
 
         # ROI 感兴趣区域多边形 (归一化坐标 [x1,y1,x2,y2,...], >=6 个值即 >=3 个顶点).
         # 仅 ROI 内 (中心点在多边形内) 的轨迹参与越线计数;
@@ -452,9 +454,11 @@ class LineCrossingCounter:
             # 4. 滞留确认: 连续 hold_frames 帧保持在跨线后侧
             curr_side_now = self._side(curr_point)
             if curr_side_now != self.track_confirm_side.get(track_id, 0):
-                # 侧别反转 (抖动跨回), 重新等待
+                # 侧别反转 -> 目标可能来回跨线, 更新 start_pos 为当前位置前一点
+                # 这样下一次跨线确认时方向判定基于最新的跨线起点
                 self.track_hold_count[track_id] = 0
                 self.track_confirm_side[track_id] = curr_side_now
+                self.track_crossing_start_pos[track_id] = list(prev_point)
                 continue
             self.track_hold_count[track_id] = self.track_hold_count.get(track_id, 0) + 1
             if self.track_hold_count[track_id] < self.hold_frames:
@@ -477,24 +481,27 @@ class LineCrossingCounter:
 
             # 方向一致性验证: 跨线方向应与最近运动方向一致 (过滤 ID 切换)
             # ID 切换时 start_pos 来自前一辆车, 与当前车辆运动方向矛盾
-            # 用 offset 变化判断, 适用于任意角度计数线
+            # 注意: 双向场景下来回运动也会方向反转, 需结合跨线幅度判断
             h = track.history
             win = self.id_switch_history_window
             if len(h) >= win:
                 recent_start_off = self._offset(h[-win])
                 recent_end_off = self._offset(h[-1])
                 recent_cross_inner = recent_end_off - recent_start_off  # >0 向内, <0 向外
-                if entry_exit == "exit" and recent_cross_inner > 0:
-                    # 判定 Exit(内->外) 但最近向内移动 -> start_pos 可能有误
-                    self.track_states[track_id] = "TRACKING"
-                    continue
-                if entry_exit == "enter" and recent_cross_inner < 0:
-                    # 判定 Enter(外->内) 但最近向外移动 -> start_pos 可能有误
-                    self.track_states[track_id] = "TRACKING"
-                    continue
+                # 仅当矛盾幅度较大时才判定为 ID 切换 (避免慢速来回运动被误杀)
+                recent_cross_mag = abs(recent_cross_inner)
+                line_span = math.sqrt(self._line_len_sq)
+                if line_span > 0 and recent_cross_mag > line_span * 0.5:
+                    if entry_exit == "exit" and recent_cross_inner > 0:
+                        self.track_states[track_id] = "TRACKING"
+                        continue
+                    if entry_exit == "enter" and recent_cross_inner < 0:
+                        self.track_states[track_id] = "TRACKING"
+                        continue
 
-            # 6. 单向流动: 每条轨迹只计一次
-            if track_id in self.counted_tracks:
+            # 6. 双向去重: track_id+direction 维度, 允许同一轨迹来回各计一次
+            dedup_key = f"{track_id}|{entry_exit}"
+            if dedup_key in self.counted_tracks:
                 self.track_states[track_id] = "TRACKING"
                 continue
 
@@ -521,7 +528,8 @@ class LineCrossingCounter:
                 confidence=track.confidence,
             )
             events.append(event)
-            self.counted_tracks[track_id] = datetime.now().timestamp()
+            # 双向计数: 记录 track_id+direction, 允许反方向再计一次
+            self.counted_tracks[dedup_key] = datetime.now().timestamp()
             self.track_states[track_id] = "TRACKING"
 
         self._cleanup_old_tracks()
