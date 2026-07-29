@@ -88,6 +88,11 @@ class LineCrossingCounter:
         self.track_hold_count: Dict[str, int] = {}  # 滞留已确认帧数
         self.counted_tracks: Dict[str, float] = {}  # track_id -> 计数时间戳 (TTL 淘汰)
 
+        # ROI 感兴趣区域多边形 (归一化坐标 [x1,y1,x2,y2,...], >=6 个值即 >=3 个顶点).
+        # 仅 ROI 内 (中心点在多边形内) 的轨迹参与越线计数;
+        # None 表示不启用 ROI, 全画面计数 (向后兼容).
+        self.roi_polygon: Optional[List[Point]] = None
+
         self.frame_width = 1920
         self.frame_height = 1080
 
@@ -99,6 +104,13 @@ class LineCrossingCounter:
         self._line_len_sq: float = 1.0
         self._n_inner: List[float] = [0.0, 0.0]
         self._n_unit: List[float] = [0.0, 0.0]  # 归一化法向 (朝向锚点)
+        self._roi_px: Optional[List[List[float]]] = None  # ROI 像素多边形顶点
+        # 计数线裁剪到 ROI 内的有效区间 [t0, t1] (线段参数 t∈[0,1]); ROI 关闭时 [0,1]
+        self._clip_t0: float = 0.0
+        self._clip_t1: float = 1.0
+        # 裁剪后红线端点像素坐标 (供可视化区分有效段); ROI 关闭时等于 _p1/_p2
+        self._clip_p0: List[float] = [0.0, 0.0]
+        self._clip_p1: List[float] = [0.0, 0.0]
         self._precompute()
 
     def set_frame_size(self, width: int, height: int):
@@ -152,6 +164,106 @@ class LineCrossingCounter:
             logger.warning("计数线退化为点 (P1==P2), 越线计数将不触发, 请检查 line_coords")
         elif abs(anchor_off) < 1e-6:
             logger.warning("内侧锚点落在计数线上, 法向方向不确定, 请调整 anchor_coords")
+        # ROI 像素多边形随帧尺寸/线变化重算 (归一化 -> 像素)
+        self._recompute_roi_px()
+        # 计数线裁剪到 ROI 内的有效区间 (ROI 关闭时整段有效)
+        self._recompute_clip()
+
+    def _recompute_roi_px(self):
+        """将归一化 ROI 多边形转像素坐标 (None 时禁用)."""
+        if self.roi_polygon is None or len(self.roi_polygon) < 3:
+            self._roi_px = None
+            return
+        self._roi_px = [self._normalize_to_pixel(list(p)) for p in self.roi_polygon]
+
+    def _recompute_clip(self):
+        """将计数线 P1->P2 裁剪到 ROI 多边形内, 得到有效参数区间 [t0,t1] 与端点像素.
+
+        线段参数 t: P(t) = P1 + t*(P2-P1), t∈[0,1] 为原线段.
+        算法: 收集线段与 ROI 所有边的交点 t + 端点 t=0/1, 排序后扫描相邻 t 的中点,
+        中点在 ROI 内 -> 该子段有效; 合并所有有效子段取最长者作为 [_clip_t0,_clip_t1].
+        ROI 关闭时整段有效 [0,1]; 线完全在 ROI 外时 t0>t1 (整段失效).
+        """
+        # 默认整段有效; 端点像素用于可视化
+        self._clip_t0 = 0.0
+        self._clip_t1 = 1.0
+        self._clip_p0 = list(self._p1)
+        self._clip_p1 = list(self._p2)
+        if self._roi_px is None or self._line_len_sq < 1e-6:
+            return
+        p1x, p1y = self._p1
+        dx, dy = self._line_vec
+        # 候选参数点: 端点 + 线段与 ROI 每条边的交点
+        ts = [0.0, 1.0]
+        n = len(self._roi_px)
+        for i in range(n):
+            ax, ay = self._roi_px[i]
+            bx, by = self._roi_px[(i + 1) % n]
+            ex, ey = bx - ax, by - ay
+            # 求解 P1 + t*(dx,dy) = (ax,ay) + s*(ex,ey), t∈[0,1], s∈[0,1]
+            denom = dx * (-ey) + dy * ex
+            if abs(denom) < 1e-9:
+                continue  # 线段与边平行/重合, 跳过
+            t = ((ax - p1x) * (-ey) + (ay - p1y) * ex) / denom
+            s = (dx * (ay - p1y) - dy * (ax - p1x)) / denom
+            if 0.0 <= t <= 1.0 and 0.0 <= s <= 1.0:
+                ts.append(t)
+        ts = sorted(set(ts))
+        # 扫描相邻 t 区间, 中点在 ROI 内则为有效子段; 取最长有效段
+        best_t0, best_t1, best_len = 1.0, 0.0, -1.0
+        for i in range(len(ts) - 1):
+            t0, t1 = ts[i], ts[i + 1]
+            if t1 - t0 < 1e-9:
+                continue
+            mid_t = (t0 + t1) / 2
+            mx = p1x + mid_t * dx
+            my = p1y + mid_t * dy
+            if self._point_in_roi([mx, my]):
+                if (t1 - t0) > best_len:
+                    best_t0, best_t1, best_len = t0, t1, t1 - t0
+        if best_len < 0:
+            # 线段完全在 ROI 外, 标记整段失效 (t0>t1)
+            self._clip_t0 = 1.0
+            self._clip_t1 = 0.0
+            return
+        self._clip_t0 = best_t0
+        self._clip_t1 = best_t1
+        self._clip_p0 = [p1x + best_t0 * dx, p1y + best_t0 * dy]
+        self._clip_p1 = [p1x + best_t1 * dx, p1y + best_t1 * dy]
+
+    def set_roi(self, polygon: Optional[List[Point]]):
+        """设置 ROI 感兴趣区域多边形 (归一化 [x,y] 顶点列表, >=3 个顶点).
+
+        仅 ROI 内轨迹参与越线计数; 传 None 关闭 ROI (全画面计数).
+        """
+        if polygon is None or len(polygon) < 3:
+            self.roi_polygon = None
+            self._roi_px = None
+            self._recompute_clip()
+            logger.info("ROI 已关闭, 全画面计数")
+            return
+        self.roi_polygon = [list(p) for p in polygon]
+        self._recompute_roi_px()
+        self._recompute_clip()
+        logger.info(f"已设置 ROI 多边形 ({len(self.roi_polygon)} 顶点)")
+
+    def _point_in_roi(self, point) -> bool:
+        """点是否在 ROI 多边形内 (射线法); ROI 未启用时恒返回 True."""
+        if self._roi_px is None:
+            return True
+        n = len(self._roi_px)
+        inside = False
+        j = n - 1
+        for i in range(n):
+            xi, yi = self._roi_px[i]
+            xj, yj = self._roi_px[j]
+            # 射线法: point 与多边形边的交点奇偶性判断内外
+            if (yi > point[1]) != (yj > point[1]):
+                x_int = (xj - xi) * (point[1] - yi) / (yj - yi) + xi
+                if point[0] < x_int:
+                    inside = not inside
+            j = i
+        return inside
 
     def _normalize_to_pixel(self, point: List[float]) -> List[float]:
         return [point[0] * self.frame_width, point[1] * self.frame_height]
@@ -198,14 +310,18 @@ class LineCrossingCounter:
         return dist >= self.min_distance_threshold
 
     def _in_segment(self, point) -> bool:
-        """跨线点投影落在线段内 (t∈[0,1]), 排除延长线上的误判."""
+        """跨线点投影落在计数线有效段内 (裁剪到 ROI 后的 t∈[_clip_t0,_clip_t1]).
+
+        ROI 关闭时有效段为整条线 [0,1]; ROI 启用时仅 ROI 内部分有效,
+        越过 ROI 外线段不触发计数 (避免失效区误计).
+        """
         if self._line_len_sq == 0:
             return False
         t = (
             (point[0] - self._p1[0]) * self._line_vec[0]
             + (point[1] - self._p1[1]) * self._line_vec[1]
         ) / self._line_len_sq
-        return 0.0 <= t <= 1.0
+        return self._clip_t0 <= t <= self._clip_t1
 
     def _angle_filter(self, prev_point, curr_point) -> bool:
         """夹角过滤: 运动向量在法向方向的投影 >= min_motion.
@@ -262,6 +378,10 @@ class LineCrossingCounter:
 
             prev_point = track.history[-2]
             curr_point = track.center
+
+            # ROI 过滤: 中心点不在多边形内的轨迹跳过计数 (减算力 / 过滤画面边缘干扰)
+            if not self._point_in_roi(curr_point):
+                continue
 
             # 轨迹连续性验证: 速度突变检测 (过滤 ByteTrack ID 切换)
             # ID 切换时 prev_point 与 curr_point 来自不同车辆, 位移远超历史速度

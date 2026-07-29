@@ -44,6 +44,7 @@ class DevicePipeline:
         anchor: Optional[Point] = None,
         count_only: Optional[str] = None,
         camera_type: Optional[str] = None,
+        roi: Optional[List[Point]] = None,
     ):
         self.device_id = device_id
         self.stream_url = stream_url
@@ -52,6 +53,9 @@ class DevicePipeline:
         self.counter = LineCrossingCounter(line, anchor)
         if count_only is not None:
             self.counter.count_only = count_only
+        if roi is not None:
+            # 归一化 ROI; 首帧 set_frame_size 后像素坐标自动重算
+            self.counter.set_roi(roi)
         self._task: Optional[asyncio.Task] = None
         self._stop = asyncio.Event()
         self._client = httpx.AsyncClient(timeout=10.0)

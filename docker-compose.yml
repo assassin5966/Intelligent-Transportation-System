@@ -117,6 +117,8 @@ services:
       - ./output:/data/video:ro
       - ./output:/data/output
       - ./models:/app/models:ro
+      - ./tool:/app/tool:ro
+      - ./app:/app/app:ro
     environment:
       - PYTHONPATH=/app
     command: >
