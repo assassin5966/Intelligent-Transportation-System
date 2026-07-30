@@ -355,7 +355,7 @@ def process_video(args):
 
         track_result = tracker.track(frame)
 
-        events = counter.process_tracks(track_result, camera_id=args.camera_id)
+        events = counter.process_tracks(track_result, camera_id=args.camera_id, current_time=current_video_time.timestamp())
 
         for event in events:
             event.timestamp = current_video_time.isoformat()
