@@ -58,6 +58,7 @@ class DeviceOut(BaseModel):
     camera_type: Optional[str] = None
     roi_coords: Optional[str] = None
     status: str = "registered"
+    last_heartbeat: Optional[str] = None
 
 
 def _line_from_coords(line_coords: Optional[str]) -> list[list[float]]:
@@ -174,3 +175,20 @@ async def remove(device_id: str):
     await redis.delete(key)
     await _forward_to_ai("DELETE", f"/devices/{device_id}")
     return {"status": "deleted", "id": device_id}
+
+
+@router.post("/{device_id}/heartbeat")
+async def heartbeat(device_id: str):
+    """AI 服务心跳: 更新设备最后心跳时间, 标记设备在线."""
+    from datetime import datetime, timezone
+    redis = get_redis()
+    key = f"{_DEVICE_KEY_PREFIX}{device_id}"
+    exists = await redis.exists(key)
+    if not exists:
+        raise HTTPException(404, "device not found")
+    now_iso = datetime.now(timezone.utc).isoformat()
+    await redis.hset(key, mapping={
+        "last_heartbeat": now_iso,
+        "status": "online",
+    })
+    return {"device_id": device_id, "heartbeat": now_iso}

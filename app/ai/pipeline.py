@@ -63,6 +63,8 @@ class DevicePipeline:
 
     async def _run(self) -> None:
         logger.info(f"[{self.device_id}] 管道启动: {self.stream_url}")
+        # 启动心跳任务 (每 30 秒向后端发送心跳)
+        heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         try:
             async for frame, _idx in stream_frames(self.stream_url, self._stop):
                 if frame is not None:
@@ -73,21 +75,37 @@ class DevicePipeline:
                         self._frame_size = (w, h)
                         logger.info(f"[{self.device_id}] 计数线帧尺寸: {w}x{h}")
                 track_result = await asyncio.to_thread(self.tracker.track, frame)
-                
+
                 events = self.counter.process_tracks(track_result, self.device_id)
-                
+
                 for event in events:
                     await self._push(event)
                     await self._broadcast_ws(event)
-                    
+
                 await self._broadcast_tracks_ws(track_result)
         except asyncio.CancelledError:
             pass
         except Exception as e:  # noqa: BLE001
             logger.error(f"[{self.device_id}] 管道异常: {e}")
         finally:
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except asyncio.CancelledError:
+                pass
             await self._client.aclose()
             logger.info(f"[{self.device_id}] 管道停止")
+
+    async def _heartbeat_loop(self) -> None:
+        """每 30 秒向后端发送心跳, 供离线检测使用."""
+        while not self._stop.is_set():
+            try:
+                await self._client.post(
+                    f"{settings.backend_url}/api/devices/{self.device_id}/heartbeat"
+                )
+            except Exception:  # noqa: BLE001
+                pass  # 心跳失败不影响视频处理
+            await asyncio.sleep(30)
 
     async def _push(self, event: CrossingEvent) -> None:
         payload = EventIn(

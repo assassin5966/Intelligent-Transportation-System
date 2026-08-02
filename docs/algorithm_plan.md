@@ -510,7 +510,7 @@ def process_tracks(self, track_result, camera_id="CAM001", current_time=None):
 | 今日车辆离开 | `sc:realtime:daily:{YYYYMMDD}` -> `today_vehicle_out` | 只增 |
 | 今日人员进入 | `sc:realtime:daily:{YYYYMMDD}` -> `today_person_in` | 只增 |
 | 今日人员离开 | `sc:realtime:daily:{YYYYMMDD}` -> `today_person_out` | 只增 |
-| 小时聚合 | `sc:realtime:hourly:{YYYYMMDDHH}` | TTL 8天，供时序预测 |
+| N分钟区间 | `sc:realtime:interval:{YYYYMMDDHHmm}` | TTL=(序列长度+10)×N分钟×60秒，供Chronos-2预测 |
 | 活跃设备数 | `sc:devices:active` (Set) | 设备事件时自动加入 |
 
 ### 5.2 数据更新流程
@@ -520,7 +520,7 @@ AI推送事件 -> POST /api/events -> apply_event()
     │
     ├── 当前数量: HINCRBY sc:realtime:current (+1/-1)
     ├── 今日累计: HINCRBY sc:realtime:daily:{date} (+1)
-    ├── 小时聚合: HINCRBY sc:realtime:hourly:{hour} (+1, TTL=8天)
+    ├── N分钟区间: HINCRBY sc:realtime:interval:{interval} (+1, TTL=(序列长度+10)×N分钟×60秒)
     ├── 设备活跃: SADD sc:devices:active {device_id}
     └── 负数钳位: 当前数量不允许为负
 ```
@@ -530,8 +530,7 @@ AI推送事件 -> POST /api/events -> apply_event()
 ```
 实时状态 -> Redis Hash (持久, 无TTL)
 今日累计 -> Redis Hash (按日key, 自然按天切换)
-小时聚合 -> Redis Hash (TTL=8天, 供时序预测)
-历史趋势 -> 从 Redis 小时聚合读取 (不使用MySQL)
+N分钟区间 -> Redis Hash (TTL=(序列长度+10)×N分钟×60秒, 供Chronos-2预测)
 ```
 
 **设计决策**：不使用 MySQL 持久化事件，Redis 性能足够支撑实时统计需求。
@@ -556,9 +555,11 @@ AI推送事件 -> POST /api/events -> apply_event()
 ### 6.2 预测配置
 
 ```python
-chronos_model: str = "models"            # 本地 Chronos-2 模型目录
-prediction_horizon: int = 60             # 预测步长 (小时)
-prediction_history_hours: int = 168      # 历史窗口 (7天)
+chronos_model: str = "models"              # 本地 Chronos-2 模型目录
+prediction_interval_minutes: int = 15      # N 分钟预测间隔
+prediction_series_length: int = 30         # 历史序列长度 (30 个 N 分钟区间)
+vehicle_person_min: int = 2                # 每车最少人数 (车流转人流)
+vehicle_person_max: int = 5                # 每车最多人数 (车流转人流)
 ```
 
 ### 6.3 输入输出张量规格
@@ -580,21 +581,22 @@ arr = arr.mean(axis=1)[0]  # 平均 13 个分位数
 ### 6.4 预测流程
 
 ```
-Redis小时聚合(168小时) -> load_history() -> Chronos-2预测 -> 缓存到Redis(TTL=2小时)
+Redis N分钟区间(30点) -> load_interval_history() -> 车流×random(2,5)转化为人流 + 人流加总
+    -> Chronos-2预测下一个N分钟总人数 -> 取整 -> 缓存到Redis
 ```
 
-- 定时调度：每小时执行一次（vehicle + person 各一次）
-- 实时预测：POST /api/prediction/predict（支持 15/30/45/60 小时）
-- 缓存查询：GET /api/prediction/latest?metric=vehicle
+- 定时调度：每 N 分钟执行一次，预测总人数并推送 WebSocket + 评估告警
+- 实时预测：POST /api/prediction/predict（无需参数）
+- 缓存查询：GET /api/prediction/latest
 
 ### 6.5 降级方案
 
-当 chronos 库不可用或模型加载失败时，使用最近 24 小时窗口的线性趋势外推：
+当 chronos 库不可用或模型加载失败时，使用最近窗口的线性趋势外推：
 
 ```python
-window = history[-24:]
+window = history[-10:]
 trend = (window[-1] - window[0]) / (len(window) - 1)
-forecast = [max(0, window[-1] + trend * (i+1)) for i in range(horizon)]
+forecast = max(0, window[-1] + trend)  # 预测下一个点
 ```
 
 实现位于 [app/prediction/chronos_model.py](file:///Users/bianwei/Desktop/codes/DT/app/prediction/chronos_model.py)。
@@ -689,11 +691,10 @@ rules:
 | GET | `/health` | 健康检查 |
 | POST | `/api/events` | 接收 AI 推送的事件 |
 | GET | `/api/stats/realtime` | 实时统计 |
-| GET | `/api/stats/trend?hours=24` | 历史趋势 |
 | GET | `/api/alerts?limit=100` | 告警列表 |
 | GET/POST/DELETE | `/api/devices` | 设备管理（含计数线+锚点配置）|
-| POST | `/api/prediction/predict` | 时序预测 |
-| GET | `/api/prediction/latest?metric=vehicle` | 最近预测缓存 |
+| POST | `/api/prediction/predict` | 时序预测（总人数，无需参数） |
+| GET | `/api/prediction/latest` | 最近预测缓存 |
 
 ### 8.4 WebSocket 消息格式
 

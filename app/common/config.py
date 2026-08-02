@@ -26,14 +26,22 @@ class Settings(BaseSettings):
 
     # ---- 时序预测 ----
     chronos_model: str = "models"  # 本地 Chronos-2 模型目录
-    prediction_horizon: int = 60
-    prediction_history_hours: int = 168
+    prediction_interval_minutes: int = 15  # N 分钟预测间隔
+    prediction_series_length: int = 30  # 历史序列长度 (30 个 N 分钟区间)
+    vehicle_person_min: int = 2  # 每车最少人数 (车流转人流)
+    vehicle_person_max: int = 5  # 每车最多人数 (车流转人流)
 
     # ---- 告警 ----
     rules_file: str = "configs/rules.yaml"
 
     # ---- Redis 实时状态 key 前缀 ----
     redis_prefix: str = "sc"
+
+    # ---- 警力分配 ----
+    police_demand_weight_current: float = 0.3  # 需求计算: 当前人数权重 α
+    police_demand_weight_predict: float = 0.7  # 需求计算: 预测人数权重 β
+    police_movement_ratio: float = 0.5  # 每轮最大移动比例 (占总警力)
+    police_min_per_region: int = 1  # 每区域最少警力
 
     # ---- 安全 ----
     cors_origins: str = "*"  # 允许的跨域来源, 逗号分隔; 生产环境应配置具体前端域名

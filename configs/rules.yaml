@@ -27,3 +27,20 @@ rules:
     threshold: 10000
     level: critical
     message: "人流饱和 ({value}/{threshold})"
+
+# 预测告警规则 (预测值超阈值时提前预警, 基于总人数预测)
+predict_rules:
+  - id: predict_total_warning
+    category: predict_saturate
+    metric: predicted_total
+    threshold: 500
+    level: warning
+    message: "预计 {predict_minutes} 分钟后总人数接近饱和 ({value}/{threshold})"
+
+  - id: predict_total_critical
+    category: predict_saturate
+    metric: predicted_total
+    threshold: 1000
+    level: critical
+    message: "预计 {predict_minutes} 分钟后总人数将饱和 ({value}/{threshold})"
+

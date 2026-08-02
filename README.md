@@ -170,12 +170,11 @@ docker compose -p smartcity up -d --build
 | GET | `/health` | 健康检查 |
 | POST | `/api/events` | 接收 AI 推送的事件 `{device_id, event_type, occurred_at}` |
 | GET | `/api/stats/realtime` | 实时统计（当前车辆/人员、今日累计、活跃设备）|
-| GET | `/api/stats/trend?hours=24` | 逐小时历史趋势（车辆/人员进出总量）|
 | GET | `/api/alerts?limit=100` | 告警列表（Redis 保留最近 1000 条）|
 | GET/POST/DELETE | `/api/devices` | 设备管理（含越线计数线配置）|
 | GET | `/api/prediction/health` | 预测服务健康 |
-| POST | `/api/prediction/predict` | 时序预测 `{metric, horizon}` |
-| GET | `/api/prediction/latest?metric=vehicle` | 最近一次定时预测缓存 |
+| POST | `/api/prediction/predict` | 时序预测（总人数，无需参数） |
+| GET | `/api/prediction/latest` | 最近一次定时预测缓存 |
 
 ### AI 分析服务（端口 8001）
 
