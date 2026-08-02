@@ -43,6 +43,20 @@ class Settings(BaseSettings):
     police_movement_ratio: float = 0.5  # 每轮最大移动比例 (占总警力)
     police_min_per_region: int = 1  # 每区域最少警力
 
+    # ---- 视频异常检测 ----
+    anomaly_check_interval: int = 30  # 每 N 帧检测一次 (≈1s@30fps)
+    anomaly_confirm_frames: int = 2  # 连续确认帧数 (去抖, 避免单帧误报)
+    anomaly_cooldown_seconds: int = 60  # 同设备同异常告警冷却 (后端去重, 秒)
+    anomaly_analysis_width: int = 480  # 分析帧宽度 (等比缩放, 阈值稳定)
+    black_screen_brightness: int = 20  # 灰度均值 < 此值 (黑屏条件1)
+    black_screen_ratio: float = 0.95  # 近黑像素占比 > 此值 (黑屏条件2)
+    black_pixel_value: int = 20  # 近黑像素亮度上限
+    flower_block_grid: int = 8  # 花屏分析块网格 (NxN)
+    flower_noise_std: float = 35.0  # 块均标准差 > 此值 (花屏: 高噪)
+    flower_uniformity: float = 0.6  # 噪声均匀度 1-CV > 此值 (花屏: 均匀)
+    flower_channel_corr: float = 0.5  # 通道相关性 < 此值 (花屏: 去相关)
+    flower_temporal_diff: float = 25.0  # 时域差分 > 此值 (花屏: 时域高噪, 有前帧时)
+
     # ---- 安全 ----
     cors_origins: str = "*"  # 允许的跨域来源, 逗号分隔; 生产环境应配置具体前端域名
 

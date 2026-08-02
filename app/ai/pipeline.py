@@ -9,6 +9,7 @@ import httpx
 from ..common.config import settings
 from ..common.logger import logger
 from ..schemas.events import EventIn, CrossingEvent
+from .anomaly import AnomalyEvent, AnomalyMonitor
 from .counter import LineCrossingCounter, Point
 from .stream import stream_frames
 from .tracker import ByteTracker
@@ -60,6 +61,7 @@ class DevicePipeline:
         self._stop = asyncio.Event()
         self._client = httpx.AsyncClient(timeout=10.0)
         self._frame_size: Optional[tuple[int, int]] = None  # 跟踪当前帧尺寸, 变化时更新 (含流重连)
+        self._anomaly_monitor = AnomalyMonitor()  # 视频异常监测 (黑屏/花屏)
 
     async def _run(self) -> None:
         logger.info(f"[{self.device_id}] 管道启动: {self.stream_url}")
@@ -74,6 +76,11 @@ class DevicePipeline:
                         self.counter.set_frame_size(w, h)
                         self._frame_size = (w, h)
                         logger.info(f"[{self.device_id}] 计数线帧尺寸: {w}x{h}")
+                    # 视频异常检测 (周期采样 + 去抖, 仅状态转移时上报)
+                    anomaly_ev = self._anomaly_monitor.check(frame)
+                    if anomaly_ev is not None:
+                        anomaly_ev.timestamp = datetime.now().isoformat()
+                        await self._handle_anomaly(anomaly_ev)
                 track_result = await asyncio.to_thread(self.tracker.track, frame)
 
                 events = self.counter.process_tracks(track_result, self.device_id)
@@ -123,6 +130,38 @@ class DevicePipeline:
             )
         except Exception as e:  # noqa: BLE001
             logger.error(f"[{self.device_id}] 推送失败: {e}")
+
+    async def _handle_anomaly(self, ev: AnomalyEvent) -> None:
+        """视频异常 (黑屏/花屏) 上报: AI WS 广播 + POST 后端告警端点.
+
+        onset -> 后端持久化 critical 告警; recovery -> info 告警 (后端冷却去重).
+        失败仅记日志, 不阻塞视频处理 (与 _push 一致).
+        """
+        # AI 服务 WebSocket 实时广播 (供前端画面层即时提示)
+        await broadcast_ws_message({
+            "type": "video_anomaly",
+            "device_id": self.device_id,
+            "anomaly_type": ev.anomaly_type,
+            "phase": ev.phase,
+            "scores": ev.scores,
+            "timestamp": ev.timestamp,
+        })
+        # 后端告警通道 (持久化到 Redis + 后端 WS 推送, 前端告警列表可见)
+        payload = {
+            "device_id": self.device_id,
+            "anomaly_type": ev.anomaly_type,
+            "phase": ev.phase,
+            "scores": ev.scores,
+        }
+        try:
+            resp = await self._client.post(
+                f"{settings.backend_url}/api/alerts/anomaly", json=payload
+            )
+            logger.info(
+                f"[{self.device_id}] 异常上报 {ev.anomaly_type}/{ev.phase} -> HTTP {resp.status_code}"
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"[{self.device_id}] 异常上报失败: {e}")
 
     async def _broadcast_ws(self, event: CrossingEvent) -> None:
         message = {

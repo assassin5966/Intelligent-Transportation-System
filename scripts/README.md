@@ -7,6 +7,8 @@
 | `scripts/cut_video.sh` | 视频切分（从长视频截取指定时长片段） |
 | `scripts/offline_test.sh` | 离线视频测试（使用 video_processor 处理本地视频） |
 | `scripts/stream_test.sh` | RTSP 流测试（启动 Docker 服务进行实时流测试） |
+| `scripts/anomaly_test.sh` | 视频异常识别端到端测试（黑屏 + 花屏，含合成视频生成） |
+| `scripts/gen_anomaly_video.py` | 生成视频异常识别测试用合成视频（正常/黑屏/花屏段） |
 | `scripts/run_video_processor.sh` | 旧版视频处理脚本（保留兼容） |
 | `scripts/smoke_test.sh` | 后端冒烟测试（验证核心 API） |
 
@@ -204,6 +206,37 @@ docker compose down
 - `GET /api/alerts` - 告警列表
 - `POST /api/devices` - 设备注册
 - `GET /api/devices` - 设备列表
+
+---
+
+## 5. 视频异常识别测试 (`anomaly_test.sh`)
+
+端到端验证黑屏与花屏检测：生成含正常/黑屏/花屏段的合成视频 → Docker 运行 `video_processor` 逐帧处理 → 校验异常 JSON。
+
+### 前置条件
+
+- Docker 已启动且 `smart-city-platform:latest` 镜像已构建。
+- 生成视频仅需宿主机 `python3 + numpy + opencv`（无需 YOLO）。
+
+### 用法
+
+```bash
+./scripts/anomaly_test.sh                    # 默认: 生成视频 + 逐帧处理 + 校验
+./scripts/anomaly_test.sh --no-annotated     # 不生成标注视频（更快）
+SEGMENT=120 ./scripts/anomaly_test.sh        # 自定义每段帧数
+```
+
+### 测试流程
+
+1. `gen_anomaly_video.py` 生成 `data/anomaly_test.mp4`（640x480 @ 25fps，450 帧，正常→黑屏→正常→花屏→正常 各 90 帧）。
+2. Docker 运行 `video_processor.py --frame_skip 1`，输出 `output/anomaly_test_anomalies.json`。
+3. 校验 JSON 包含 `black_screen` onset 与 `flower_screen` onset，打印 PASS/FAIL。
+
+### 仅生成测试视频
+
+```bash
+python3 scripts/gen_anomaly_video.py --output data/anomaly_test.mp4 --segment 90
+```
 
 ---
 

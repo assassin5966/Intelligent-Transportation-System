@@ -25,9 +25,9 @@ GB28181/RTSP 视频流
                     └──────────────────┘
 ```
 
-- **AI 分析服务**：YOLO11 检测 + ByteTrack 跟踪 + 越线计数，仅输出业务事件（不传视频），大幅降低通信压力。
-- **业务后端**：实时统计、规则告警、REST API、小时聚合、时序预测。
-- **时序预测**：接入 Chronos 大模型，基于逐小时历史序列预测未来 15/30/45/60 小时人流/车辆趋势。
+- **AI 分析服务**：YOLO11 检测 + BoT-SORT 跟踪 + 越线计数 + 视频异常识别（黑屏/花屏），仅输出业务事件（不传视频），大幅降低通信压力。
+- **业务后端**：实时统计、规则告警、REST API、时序预测、警力分配。
+- **时序预测**：接入 Chronos-2 本地模型，基于 N 分钟区间历史总人数序列预测未来 N 分钟总人数。
 
 ## 技术栈
 
@@ -171,6 +171,7 @@ docker compose -p smartcity up -d --build
 | POST | `/api/events` | 接收 AI 推送的事件 `{device_id, event_type, occurred_at}` |
 | GET | `/api/stats/realtime` | 实时统计（当前车辆/人员、今日累计、活跃设备）|
 | GET | `/api/alerts?limit=100` | 告警列表（Redis 保留最近 1000 条）|
+| POST | `/api/alerts/anomaly` | 视频异常上报（AI→后端，黑屏/花屏 onset/recovery）|
 | GET/POST/DELETE | `/api/devices` | 设备管理（含越线计数线配置）|
 | GET | `/api/prediction/health` | 预测服务健康 |
 | POST | `/api/prediction/predict` | 时序预测（总人数，无需参数） |
@@ -217,6 +218,8 @@ bash scripts/smoke_test.sh
 | AI 分析 | 检测、跟踪、越线计数、HTTP 推送 | ✅ |
 | 后端 | 统计、Redis、REST API、告警 | ✅ |
 | 预测 | Chronos 预测接口 | ✅ |
-| 展示大屏 | Vue3 + ECharts | ⏳ 待开发 |
+| 警力分配 | 区域需求估算 + 比例分配 + 贪心调度 | ✅ |
+| 视频异常识别 | 黑屏 + 花屏检测（在线/离线双路径，复用告警体系） | ✅ |
+| 展示大屏 | Vue3 + ECharts | ⏳ 待开发（前端同事） |
 | 联调 | 设备、AI、后端、大屏 | ⏳ |
 | 测试部署 | 性能测试、Docker 部署 | ✅ 镜像已验证 |

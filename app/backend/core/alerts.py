@@ -23,6 +23,21 @@ _ALERT_SEQ_KEY = f"{settings.redis_prefix}:alert:seq"
 _ALERT_MAX = 1000
 
 
+async def persist_alert(alert: dict) -> dict:
+    """持久化一条告警到 Redis List (分配自增 id, 保留最近 _ALERT_MAX 条).
+
+    供 evaluate / evaluate_prediction / 异常上报端点复用, 统一持久化逻辑.
+    """
+    redis = get_redis()
+    alert_id = await redis.incr(_ALERT_SEQ_KEY)
+    alert["id"] = alert_id
+    pipe = redis.pipeline()
+    pipe.lpush(_ALERTS_KEY, json.dumps(alert))
+    pipe.ltrim(_ALERTS_KEY, 0, _ALERT_MAX - 1)
+    await pipe.execute()
+    return alert
+
+
 def load_rules(path: Optional[str] = None) -> list[dict]:
     """加载告警规则 (带缓存, 文件修改后自动重载, 无需重启)."""
     global _rules_cache, _rules_mtime
@@ -81,12 +96,7 @@ async def evaluate() -> list[dict]:
             "threshold": threshold,
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
-        alert_id = await redis.incr(_ALERT_SEQ_KEY)
-        alert["id"] = alert_id
-        pipe = redis.pipeline()
-        pipe.lpush(_ALERTS_KEY, json.dumps(alert))
-        pipe.ltrim(_ALERTS_KEY, 0, _ALERT_MAX - 1)
-        await pipe.execute()
+        await persist_alert(alert)
         triggered.append(alert)
         logger.warning(f"[告警] [{r['level']}] {msg}")
 
@@ -138,12 +148,7 @@ async def evaluate_prediction(prediction: dict) -> list[dict]:
             "predict_minutes": predict_minutes,
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
-        alert_id = await redis.incr(_ALERT_SEQ_KEY)
-        alert["id"] = alert_id
-        pipe = redis.pipeline()
-        pipe.lpush(_ALERTS_KEY, json.dumps(alert))
-        pipe.ltrim(_ALERTS_KEY, 0, _ALERT_MAX - 1)
-        await pipe.execute()
+        await persist_alert(alert)
         triggered.append(alert)
         logger.warning(f"[预测告警] [{r['level']}] {msg}")
 
