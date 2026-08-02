@@ -1,7 +1,7 @@
 # 前端对接 API 文档
 
 > 智慧交管拥堵治理预警监控平台
-> 版本: 0.1.0 · 更新日期: 2026-07-30
+> 版本: 0.2.0 · 更新日期: 2026-08-02
 
 ---
 
@@ -11,9 +11,9 @@
 2. [通用约定](#2-通用约定)
 3. [设备管理 API](#3-设备管理-api)
 4. [实时统计 API](#4-实时统计-api)
-5. [历史趋势 API](#5-历史趋势-api)
-6. [告警 API](#6-告警-api)
-7. [时序预测 API](#7-时序预测-api)
+5. [告警 API](#5-告警-api)
+6. [时序预测 API](#6-时序预测-api)
+7. [警力分配 API](#7-警力分配-api)
 8. [事件接收 API（AI → 后端）](#8-事件接收-apiai--后端)
 9. [WebSocket 实时推送](#9-websocket-实时推送)
 10. [数据模型](#10-数据模型)
@@ -28,10 +28,10 @@
 
 | 服务 | 默认端口 | 说明 | 对前端是否暴露 |
 |------|---------|------|---------------|
-| 业务后端 (backend) | `8000` | 设备管理、统计、告警、预测、CORS | ✅ 是 |
-| AI 分析服务 (ai) | `8001` | 视频拉流、检测跟踪、越线计数、WebSocket 推送 | ⚠️ 仅 WebSocket |
+| 业务后端 (backend) | `8000` | 设备管理、统计、告警、预测、警力分配、WebSocket 推送、CORS | ✅ 是 |
+| AI 分析服务 (ai) | `8001` | 视频拉流、检测跟踪、越线计数、视频异常识别、WebSocket 推送 | ⚠️ 仅 WebSocket |
 
-> **建议**：前端 REST 请求全部发往后端 `8000`；实时画面/事件流连接 AI 服务 `8001` 的 WebSocket。
+> **建议**：前端 REST 请求全部发往后端 `8000`；实时画面/事件流连接 AI 服务 `8001` 的 WebSocket；统计/告警/预测/警力方案订阅后端 `8000` 的 WebSocket。
 
 ### 健康检查
 
@@ -408,7 +408,202 @@ GET /api/prediction/health
 
 ---
 
-## 7. 事件接收 API（AI → 后端）
+## 7. 警力分配 API
+
+基于「区域注册 + 总警力设置 + 三阶段分配算法」（需求计算 → 比例分配+最小保障 → 贪心最近优先调度），自动产出各区域目标警力与调动方案。所有接口挂载在 `/api/police` 下。
+
+### 7.1 注册警力区域
+
+```
+POST /api/police/regions
+```
+
+**请求体**
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `id` | string | ✅ | 区域唯一标识 |
+| `name` | string | ✅ | 区域名称 |
+| `center_x` | float | ✅ | 区域中心点 x（用于区域间距离计算） |
+| `center_y` | float | ✅ | 区域中心点 y |
+| `device_id` | string | ✅ | 关联设备 ID，用于读取该区域在场人数 |
+
+**请求示例**
+```json
+{
+  "id": "r1",
+  "name": "北广场",
+  "center_x": 0.3,
+  "center_y": 0.4,
+  "device_id": "cam-gate-north"
+}
+```
+
+**响应** `201 Created`
+```json
+{ "id": "r1", "status": "registered" }
+```
+
+### 7.2 查询区域列表
+
+```
+GET /api/police/regions
+```
+
+**响应** `200 OK`
+```json
+[
+  {
+    "id": "r1",
+    "name": "北广场",
+    "center_x": 0.3,
+    "center_y": 0.4,
+    "device_id": "cam-gate-north",
+    "current_officers": 6,
+    "current_persons": 156
+  }
+]
+```
+
+### 7.3 删除区域
+
+```
+DELETE /api/police/regions/{region_id}
+```
+
+**响应** `200 OK`
+```json
+{ "status": "deleted", "id": "r1" }
+```
+
+**错误** `404` 区域不存在：
+```json
+{ "detail": "region not found" }
+```
+
+### 7.4 设置总警力
+
+```
+POST /api/police/total
+```
+
+**请求体**
+```json
+{ "total": 20 }
+```
+
+**响应** `200 OK`
+```json
+{ "total": 20, "status": "ok" }
+```
+
+**错误** `400` `total` 为负数。
+
+### 7.5 查询当前分配状态
+
+```
+GET /api/police/allocation
+```
+
+**响应** `200 OK`
+```json
+{
+  "total_officers": 20,
+  "regions": [
+    {
+      "region_id": "r1",
+      "name": "北广场",
+      "current_officers": 6,
+      "current_persons": 156
+    }
+  ]
+}
+```
+
+### 7.6 触发分配优化
+
+```
+POST /api/police/optimize
+```
+
+**请求体**：无需参数。基于当前各区域人数、Chronos-2 预测总人数与已设置总警力执行三阶段分配算法。
+
+**响应** `200 OK`
+```json
+{
+  "total_officers": 20,
+  "regions": [
+    {
+      "region_id": "r1",
+      "name": "北广场",
+      "device_id": "cam-gate-north",
+      "current_crowd": 156,
+      "predicted_crowd": 180.5,
+      "demand": 168.2,
+      "current_officers": 6,
+      "target_officers": 9,
+      "delta": 3
+    }
+  ],
+  "movements": [
+    { "from_region": "r2", "to_region": "r1", "count": 3, "distance": 120.5 }
+  ],
+  "summary": {
+    "total_movements": 3,
+    "coverage_score": 0.912,
+    "efficiency_score": 0.845,
+    "overall_score": 0.887,
+    "generated_at": "2026-08-02T14:05:00+00:00"
+  }
+}
+```
+
+**regions 元素字段**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `current_crowd` | int | 该区域关联设备当前在场人数 |
+| `predicted_crowd` | float | 按占比分摊的预测人数 |
+| `demand` | float | 综合需求 = α × 当前 + β × 预测 |
+| `current_officers` | int | 优化前该区域警力 |
+| `target_officers` | int | 优化后目标警力 |
+| `delta` | int | 目标 - 当前（正=需调入，负=需调出） |
+
+**movements 元素字段**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `from_region` | string | 警力调出区域 |
+| `to_region` | string | 警力调入区域 |
+| `count` | int | 调动人数 |
+| `distance` | float | 两区域中心欧氏距离 |
+
+> **评分**：`coverage_score`（需求覆盖度）+ `efficiency_score`（调度效率）加权得 `overall_score`，均越接近 1 越优。
+> 优化后各区域 `current_officers` 自动更新为 `target_officers`，作为下一轮调度的"当前分配"。
+
+**错误** `400` 无注册区域或总警力为 0：
+```json
+{ "detail": "无注册区域或总警力为 0, 无法优化" }
+```
+
+### 7.7 查询最近一次分配方案
+
+```
+GET /api/police/plan
+```
+
+**响应** `200 OK`（格式同 7.6，返回最近一次自动/手动优化的缓存方案）
+
+**错误** `404` 暂无方案：
+```json
+{ "detail": "暂无分配方案, 请先调用 POST /api/police/optimize" }
+```
+
+> **自动调度**：后端按 `prediction_interval_minutes` 周期自动执行分配并缓存方案，同时通过后端 `/ws` 以 `police_plan` 消息推送（见 §9.2）。
+
+---
+
+## 8. 事件接收 API（AI → 后端）
 
 > 此接口由 AI 服务内部调用，**前端通常不直接使用**。列出仅供理解数据流。
 
@@ -442,11 +637,18 @@ POST /api/events
 
 ---
 
-## 8. WebSocket 实时推送
+## 9. WebSocket 实时推送
 
-AI 服务通过 WebSocket 向前端实时推送三类消息：**越线事件**、**跟踪轨迹**和**视频异常**。
+系统提供**两个** WebSocket 端点，前端按需连接：
 
-### 8.1 连接
+| 端点 | 地址 | 推送内容 |
+|------|------|---------|
+| AI 服务 | `ws://<ai-host>:8001/ws` | 越线事件 `crossing_event`、跟踪轨迹 `tracks`、视频异常 `video_anomaly` |
+| 业务后端 | `ws://<backend-host>:8000/ws` | 实时统计 `stats`、告警 `alert`、预测 `prediction`、警力方案 `police_plan` |
+
+两个端点均为服务端单向推送，前端无需上行消息（服务端会忽略客户端上行）。连接断开后需前端自行重连（建议指数退避，并在断连时提示用户）。
+
+### 9.1 AI 服务 WebSocket
 
 ```
 ws://<ai-host>:8001/ws
@@ -456,7 +658,7 @@ ws://<ai-host>:8001/ws
 
 > 建议前端实现自动重连机制（指数退避），并在断连时提示用户。
 
-### 8.2 消息类型一：越线事件 `crossing_event`
+#### 越线事件 `crossing_event`
 
 每当有目标跨过计数线并满足去重条件时推送。
 
@@ -488,7 +690,7 @@ ws://<ai-host>:8001/ws
 | `direction` | string | 方向：`enter`（进入内侧）/ `exit`（离开内侧） |
 | `confidence` | float | 检测置信度 0~1 |
 
-### 8.3 消息类型二：跟踪轨迹 `tracks`
+#### 跟踪轨迹 `tracks`
 
 每帧推送当前画面所有跟踪目标，用于前端实时渲染目标框。
 
@@ -534,7 +736,7 @@ ws://<ai-host>:8001/ws
 
 > ⚠️ `tracks` 消息中的 `bbox` / `center` 为**像素坐标**（非归一化），需按实际视频分辨率渲染。`crossing_event` 中的 `cross_point` 为**归一化坐标**。
 
-### 8.4 消息类型三：视频异常 `video_anomaly`
+#### 视频异常 `video_anomaly`
 
 检测到黑屏/花屏异常状态转移时推送（仅在 onset/recovery 时发送，非每帧）。异常同时会经后端 `POST /api/alerts/anomaly` 持久化为告警，后端 `/ws` 也会以 `{"type":"alert","data":{...}}` 推送同一告警。
 
@@ -566,19 +768,107 @@ ws://<ai-host>:8001/ws
 
 > 建议前端在 `onset` 时给对应摄像头画面叠加红色边框与异常标签，`recovery` 时移除。
 
-### 8.5 前端处理建议
+### 9.2 后端 WebSocket
 
-- 根据 `type` 字段分发处理。
-- `crossing_event`：用于实时事件流展示、弹窗告警、计数器动画。
-- `tracks`：用于在视频画面上叠加目标框（高频消息，建议用 `requestAnimationFrame` 节流渲染）。
-- `video_anomaly`：用于在摄像头画面层叠加异常提示（低频，仅在状态转移时推送）。
+```
+ws://<backend-host>:8000/ws
+```
+
+连接建立后立即推送一次当前统计，之后每 2 秒（无其他消息时）推送一次 `stats`；告警 / 预测 / 警力方案变化时即时推送对应消息。
+
+#### 实时统计 `stats`
+
+每 2 秒心跳推送（或无其他消息时填充），格式同 `GET /api/stats/realtime`。
+
+```json
+{
+  "type": "stats",
+  "data": {
+    "current_vehicles": 42,
+    "current_persons": 156,
+    "today_vehicle_in": 380,
+    "today_vehicle_out": 338,
+    "today_person_in": 2100,
+    "today_person_out": 1944,
+    "active_devices": 3,
+    "updated_at": "2026-08-02T14:05:00+00:00"
+  },
+  "timestamp": "2026-08-02T14:05:00+00:00"
+}
+```
+
+> 💡 前端大屏可优先订阅此后端 `stats` 推送，无需轮询 `GET /api/stats/realtime`。
+
+#### 告警 `alert`
+
+规则告警与视频异常告警触发时推送，`data` 格式同 `GET /api/alerts` 单条；视频异常告警额外含 `device_id` / `anomaly_type` / `phase` / `scores` 字段。
+
+```json
+{
+  "type": "alert",
+  "data": {
+    "id": 18,
+    "rule_id": "video_black_screen",
+    "level": "critical",
+    "category": "video_anomaly",
+    "message": "设备 CAM001 检测到黑屏异常",
+    "created_at": "2026-08-02T14:05:00+00:00"
+  }
+}
+```
+
+#### 预测 `prediction`
+
+定时预测完成时推送，`data` 格式同 `POST /api/prediction/predict`。
+
+```json
+{
+  "type": "prediction",
+  "data": {
+    "predicted_total": 505,
+    "interval_minutes": 15,
+    "series_length": 30,
+    "degraded": false,
+    "generated_at": "2026-08-02T14:05:00+00:00"
+  }
+}
+```
+
+#### 警力方案 `police_plan`
+
+自动警力分配完成时推送，`data` 格式同 `GET /api/police/plan`。
+
+```json
+{
+  "type": "police_plan",
+  "data": {
+    "total_officers": 20,
+    "regions": ["..."],
+    "movements": ["..."],
+    "summary": { "overall_score": 0.887, "generated_at": "2026-08-02T14:05:00+00:00" }
+  }
+}
+```
+
+### 9.3 前端处理建议
+
+- 根据 `type` 字段分发处理；建议同时连接 AI `/ws`（事件流）与后端 `/ws`（统计/告警/预测/警力）。
+- AI `/ws`：
+  - `crossing_event`：用于实时事件流展示、弹窗告警、计数器动画。
+  - `tracks`：用于在视频画面上叠加目标框（高频消息，建议用 `requestAnimationFrame` 节流渲染）。
+  - `video_anomaly`：用于在摄像头画面层叠加异常提示（低频，仅在状态转移时推送）。
+- 后端 `/ws`：
+  - `stats`：刷新大屏数字卡片（替代轮询）。
+  - `alert`：告警列表与弹窗（含视频异常告警）。
+  - `prediction`：更新预测趋势展示。
+  - `police_plan`：更新警力分配可视化。
 - 按 `device_id` 区分多路摄像头。
 
 ---
 
-## 9. 数据模型
+## 10. 数据模型
 
-### 9.1 检测类别
+### 10.1 检测类别
 
 AI 服务支持的目标检测类别（`_DETECTION_CLASSES`）：
 
@@ -591,7 +881,7 @@ AI 服务支持的目标检测类别（`_DETECTION_CLASSES`）：
 
 > `camera_type` 为 `null` 时检测全部类别。`person` 类型包含行人、电动车、自行车等非机动车。
 
-### 9.2 坐标系统说明
+### 10.2 坐标系统说明
 
 | 场景 | 坐标类型 | 取值 | 说明 |
 |------|---------|------|------|
@@ -599,7 +889,7 @@ AI 服务支持的目标检测类别（`_DETECTION_CLASSES`）：
 | WebSocket `cross_point` | 归一化 | [0, 1] | 直接按比例映射到画面尺寸 |
 | WebSocket `bbox` / `center` | 像素 | 实际像素 | 需按视频原始分辨率渲染 |
 
-### 9.3 方向判定逻辑
+### 10.3 方向判定逻辑
 
 - **内侧**：锚点（`anchor`）所在的一侧定义为内侧。
 - **enter**：目标从外侧跨越计数线进入内侧。
@@ -608,7 +898,7 @@ AI 服务支持的目标检测类别（`_DETECTION_CLASSES`）：
 
 ---
 
-## 10. 错误码
+## 11. 错误码
 
 | HTTP 状态码 | 含义 | 触发场景 |
 |------------|------|---------|
@@ -626,9 +916,9 @@ AI 服务支持的目标检测类别（`_DETECTION_CLASSES`）：
 
 ---
 
-## 11. 接入示例
+## 12. 接入示例
 
-### 11.1 JavaScript — 注册设备并监听事件
+### 12.1 JavaScript — 注册设备并监听事件
 
 ```javascript
 // 1. 注册设备
@@ -670,7 +960,7 @@ ws.onclose = () => {
 };
 ```
 
-### 11.2 轮询实时统计
+### 12.2 轮询实时统计
 
 ```javascript
 async function refreshStats() {
@@ -686,7 +976,7 @@ async function refreshStats() {
 setInterval(refreshStats, 5000);
 ```
 
-### 11.3 获取预测结果
+### 12.3 获取预测结果
 
 ```javascript
 async function getForecast() {
@@ -708,13 +998,44 @@ async function getLatestForecast() {
 }
 ```
 
+### 12.4 订阅后端 WebSocket（统计/告警/预测/警力）
+
+```javascript
+// 后端 /ws: 连接后自动每 2 秒推送 stats，并按事件推送 alert/prediction/police_plan
+const ws = new WebSocket('ws://backend:8000/ws');
+
+ws.onmessage = (event) => {
+  const msg = JSON.parse(event.data);
+  switch (msg.type) {
+    case 'stats':
+      // 刷新数字卡片 (替代轮询 GET /api/stats/realtime)
+      updateDashboard(msg.data);
+      break;
+    case 'alert':
+      // 新告警 (含视频异常告警) -> 弹窗 + 列表
+      showAlert(msg.data);
+      break;
+    case 'prediction':
+      // 预测更新 -> 趋势图
+      updateForecast(msg.data);
+      break;
+    case 'police_plan':
+      // 警力分配方案 -> 可视化
+      updatePolicePlan(msg.data);
+      break;
+  }
+};
+
+ws.onclose = () => setTimeout(connectBackendWs, 3000); // 自动重连
+```
+
 ---
 
 ## 附录：服务部署端口速查
 
 | 服务 | 端口 | 关键路径 |
 |------|------|---------|
-| 业务后端 | 8000 | `/health`, `/api/devices`, `/api/stats/*`, `/api/alerts`, `/api/prediction/*`, `/api/events` |
+| 业务后端 | 8000 | `/health`, `/api/devices`, `/api/stats/*`, `/api/alerts`, `/api/alerts/anomaly`, `/api/prediction/*`, `/api/police/*`, `/api/events`, `/ws` |
 | AI 分析服务 | 8001 | `/health`, `/devices`, `/ws` |
 | Redis | 6379 | 内部使用，前端无需访问 |
 
