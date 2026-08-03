@@ -183,6 +183,71 @@ DELETE /api/devices/{device_id}
 { "detail": "device not found" }
 ```
 
+### 3.4 WVP 设备同步
+
+手动触发一次 WVP 设备同步（与后台 `wvp_sync` 定时任务同一逻辑，需 `WVP_ENABLED=true`）。
+新增通道入表 `status=synced`（不自动启流）；WVP 侧离线则停 AI pipeline 并标 `offline`；恢复则重新启流。
+
+```
+POST /api/devices/sync
+```
+
+**响应** `200 OK`
+```json
+{ "added": 1, "started": 0, "stopped": 0, "recovered": 0 }
+```
+
+**错误** `503` WVP 未启用 (`wvp_enabled=false`)。
+
+### 3.5 刷新流地址
+
+AI 服务断流重连时调用，后端转调 WVP `play/start` 返回新的 HTTP-FLV/RTSP 地址。仅 WVP 同步设备可用。
+
+```
+GET /api/devices/{device_id}/stream
+```
+
+**响应** `200 OK`
+```json
+{ "device_id": "GB-34020000001320000001-34020000001320000002", "stream_url": "http://zlm/live/xxx.flv", "stream_id": "xxx" }
+```
+
+**错误** `503` WVP 未启用 / `404` 设备不存在 / `400` 非 WVP 同步设备 / `502` WVP 点播失败。
+
+### 3.6 启用 WVP 同步设备
+
+为 `wvp_sync` 自动入表（`status=synced`/`offline`）的设备配置计数线并启流（`status -> online`）。手动注册设备请直接用 `POST /api/devices`。
+
+```
+POST /api/devices/{device_id}/enable
+```
+
+**请求体**
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `line_coords` | string | ✅ | `"x1,y1,x2,y2"` 归一化 0-1 |
+| `anchor_coords` | string | ❌ | `"x,y"` 内侧锚点 |
+| `count_only` | string | ❌ | `enter`/`exit` 单向过滤 |
+| `camera_type` | string | ❌ | `vehicle`/`person` |
+| `roi_coords` | string | ❌ | ROI 多边形 `"x1,y1,x2,y2,..."` |
+
+**响应** `200 OK`
+```json
+{ "device_id": "GB-...", "status": "online", "stream_url": "http://zlm/live/xxx.flv" }
+```
+
+### 3.7 WVP Webhook（预留）
+
+接收 WVP 定制回调（设备上下线等），透传后触发一次同步。WVP 默认无对外 HTTP webhook，此端点供定制对接（如在 WVP 侧配置事件转发）。
+
+```
+POST /api/devices/wvp-webhook
+```
+
+**请求体** 任意 JSON（透传记录日志）。
+**响应** 同步结果（同 3.4）；WVP 未启用时返回 `{"status":"skipped","reason":"wvp_disabled"}`。
+
 ---
 
 ## 4. 实时统计 API

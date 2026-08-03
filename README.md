@@ -6,27 +6,29 @@ AI 与后端均采用 Python，**共用一个 Docker 镜像**，以不同启动�
 ## 系统架构
 
 ```
-GB28181/RTSP 视频流
-      │
+IPC 摄像头 (GB28181/H.264)
+      │ ① SIP INVITE + RTP
       ▼
-┌─────────────────┐   HTTP POST 事件    ┌─────────────────┐
-│  AI 分析服务     │ ───────────────────▶│  业务后端        │
-│  (YOLO11+ByteTrack│  VehicleEnter/Exit │  (FastAPI)       │
-│   +越线计数)      │  PersonEnter/Exit   │                  │
-│  端口 8001       │                     │  端口 8000       │
-└─────────────────┘                     └────────┬────────┘
-                                                 │
-                          ┌──────────────────────┴──────────────────┐
-                          ▼                                         ▼
-                    ┌──────────────────┐                    ┌──────────┐
-                    │      Redis       │                    │  Chronos  │
-                    │ 实时状态 / 告警  │                    │ 时序预测 │
-                    │ 小时聚合 / 趋势  │                    └──────────┘
-                    └──────────────────┘
+┌──────────────────────┐  ⑤ HTTP-FLV/RTSP  ┌─────────────────┐  ④ HTTP POST 事件  ┌─────────────────┐
+│  WVP + ZLMediaKit    │ ─────────────────▶│  AI 分析服务     │ ──────────────────▶│  业务后端        │
+│  信令 + 流媒体        │                   │  YOLO11+BoT-SORT │  VehicleEnter/Exit │  (FastAPI)       │
+│  18080 / 80 / 5060   │                   │  +越线计数        │  PersonEnter/Exit  │  端口 8000       │
+└──────────▲───────────┘                   └─────────────────┘                    └────────┬────────┘
+           │                                                                            │
+           │ ② REST 设备同步 / play/start / 流地址刷新                                  │
+           └────────────────────────────────────────────────────────────────────────────┘
+                                  │
+                      ┌───────────┴───────────┐
+                      ▼                       ▼
+                ┌──────────┐            ┌──────────┐
+                │  Redis   │            │ Chronos  │
+                │ 状态/告警 │            │ 时序预测 │
+                └──────────┘            └──────────┘
 ```
 
-- **AI 分析服务**：YOLO11 检测 + BoT-SORT 跟踪 + 越线计数 + 视频异常识别（黑屏/花屏），仅输出业务事件（不传视频），大幅降低通信压力。
-- **业务后端**：实时统计、规则告警、REST API、时序预测、警力分配。
+- **WVP + ZLMediaKit**：GB28181 信令平台 + 流媒体。IPC 经 SIP 注册到 WVP，点播时 WVP 向 IPC 发 INVITE，ZLM 收 RTP 重组 H.264 并转封装为 HTTP-FLV 供 AI 拉流。后端通过 WVP REST API 自动同步设备、获取/刷新流地址（`WVP_ENABLED=true` 时启用）。
+- **AI 分析服务**：YOLO11 检测 + BoT-SORT 跟踪 + 越线计数 + 视频异常识别（黑屏/花屏），仅输出业务事件（不传视频），大幅降低通信压力。断流时回调后端 `/api/devices/{id}/stream` 刷新 FLV 地址。
+- **业务后端**：实时统计、规则告警、REST API、时序预测、警力分配，并作为 WVP 唯一对接点（设备同步、点播、流地址刷新）。
 - **时序预测**：接入 Chronos-2 本地模型，基于 N 分钟区间历史总人数序列预测未来 N 分钟总人数。
 
 ## 技术栈
@@ -113,9 +115,23 @@ docker compose -p smartcity down
 - 后端 API：`8000`
 - AI 分析服务：`8001`
 - Redis：`16379`（主机映射，避免与宿主机 6379 冲突）
+- WVP 管理后台：`18080` / SIP：`5060`
+- ZLMediaKit HTTP-FLV：`80` / RTP 收包：`30000-30500/udp`
 
 > 注：docker-compose.yml 未固定 container_name，使用 `-p smartcity` 项目名隔离，
 > 适合在共享服务器上运行，避免与其他项目冲突。
+
+### 启用 GB28181/WVP 接入（可选）
+
+默认 `WVP_ENABLED=false`，设备靠手填 `stream_url` 注册（兼容旧流程）。启用 WVP 自动同步：
+
+1. `.env` 设 `WVP_ENABLED=true`（并可调 `WVP_USERNAME`/`WVP_PASSWORD`/`WVP_SYNC_INTERVAL` 等）。
+2. 启动 WVP 全家桶：`docker compose -p smartcity up -d mysql zlm wvp`，再（重）启 `backend`。
+3. 在 IPC 侧配置 GB28181 指向 WVP（SIP 域 `3402000000`、SIP ID `34020000002000000001`、端口 `5060`、密码 `12345678`，见 `configs/wvp/application.yml`），建议拉子码流降低推理压力。
+4. IPC 在 WVP 后台显示在线后，`POST /api/devices/sync` 同步入表 → `POST /api/devices/{id}/enable` 配计数线启流。
+5. 之后设备上下线/断流由后台 `wvp_sync`（每 30s）与 AI 断流刷新自动维护。
+
+> 跨网部署：`configs/wvp/application.yml` 的 `media.stream-ip`/`sdp-ip` 需改为 IPC 可达的宿主机/公网 IP（默认 `zlm` 仅容器内可达）。
 
 ## 部署到新机器（跨机器构建指南）
 

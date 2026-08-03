@@ -6,7 +6,7 @@ AI 服务不可达时仅告警, 不阻塞配置落库.
 from typing import Optional
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Body, HTTPException
 from pydantic import BaseModel
 
 from ...common.config import settings
@@ -46,6 +46,8 @@ class DeviceIn(BaseModel):
     count_only: Optional[str] = None  # None=双向, "enter"=只计Enter, "exit"=只计Exit
     camera_type: Optional[str] = None  # None=全部检测, "vehicle"=只检测机动车, "person"=只检测人流(含非机动车)
     roi_coords: Optional[str] = None  # "x1,y1,x2,y2,..." 归一化 0-1, >=3 顶点
+    gb_device_id: Optional[str] = None  # 国标设备ID (WVP 同步设备填写, 手动注册留空)
+    gb_channel_id: Optional[str] = None  # 国标通道ID (WVP 同步设备填写, 手动注册留空)
 
 
 class DeviceOut(BaseModel):
@@ -57,6 +59,8 @@ class DeviceOut(BaseModel):
     count_only: Optional[str] = None
     camera_type: Optional[str] = None
     roi_coords: Optional[str] = None
+    gb_device_id: Optional[str] = None
+    gb_channel_id: Optional[str] = None
     status: str = "registered"
     last_heartbeat: Optional[str] = None
 
@@ -146,6 +150,8 @@ async def register(dev: DeviceIn):
             "count_only": dev.count_only or "",
             "camera_type": dev.camera_type or "",
             "roi_coords": dev.roi_coords or "",
+            "gb_device_id": dev.gb_device_id or "",
+            "gb_channel_id": dev.gb_channel_id or "",
             "status": "registered",
         },
     )
@@ -161,6 +167,10 @@ async def register(dev: DeviceIn):
         payload["camera_type"] = dev.camera_type
     if roi is not None:
         payload["roi"] = roi
+    if dev.gb_device_id is not None:
+        payload["gb_device_id"] = dev.gb_device_id
+    if dev.gb_channel_id is not None:
+        payload["gb_channel_id"] = dev.gb_channel_id
     await _forward_to_ai("POST", "/devices", payload)
     return {"id": dev.id, "status": "registered"}
 
@@ -192,3 +202,113 @@ async def heartbeat(device_id: str):
         "status": "online",
     })
     return {"device_id": device_id, "heartbeat": now_iso}
+
+
+# ---- WVP-GB28181 对接 (设备同步 / 流地址刷新 / 启用 / webhook) ----
+
+
+@router.post("/sync", status_code=200)
+async def sync_wvp():
+    """手动触发一次 WVP 设备同步 (与后台 wvp_sync 同一逻辑)."""
+    if not settings.wvp_enabled:
+        raise HTTPException(503, "WVP 同步未启用 (wvp_enabled=false)")
+    from ..core.wvp_sync import sync_once
+
+    return await sync_once()
+
+
+@router.post("/wvp-webhook", status_code=200)
+async def wvp_webhook(body: dict = Body(...)):
+    """接收 WVP 定制回调 (设备上下线等), 透传后触发一次同步.
+
+    WVP 默认无对外 HTTP webhook, 此端点供定制对接 (如在 WVP 侧配置事件转发).
+    """
+    if not settings.wvp_enabled:
+        return {"status": "skipped", "reason": "wvp_disabled"}
+    from ..core.wvp_sync import sync_once
+
+    logger.info(f"[WVP webhook] 收到回调: {body}")
+    return await sync_once()
+
+
+@router.get("/{device_id}/stream")
+async def refresh_stream(device_id: str):
+    """刷新并返回设备流地址. AI 服务断流重连时调用此端点拿新地址."""
+    if not settings.wvp_enabled:
+        raise HTTPException(503, "WVP 未启用 (wvp_enabled=false)")
+    redis = get_redis()
+    data = await redis.hgetall(_DEVICE_KEY_PREFIX + device_id)
+    if not data:
+        raise HTTPException(404, "device not found")
+    gb_dev = data.get("gb_device_id", "")
+    gb_ch = data.get("gb_channel_id", "")
+    if not gb_dev or not gb_ch:
+        raise HTTPException(400, "非 WVP 同步设备, 无可刷新流地址")
+    from ..core.wvp_client import get_wvp_client
+
+    wvp = get_wvp_client()
+    play = await wvp.start_play(gb_dev, gb_ch)
+    stream_url = wvp.select_stream_url(play)
+    if not stream_url:
+        raise HTTPException(502, f"WVP 点播失败, 无法获取流地址 (gb_dev={gb_dev}, gb_ch={gb_ch})")
+    return {
+        "device_id": device_id,
+        "stream_url": stream_url,
+        "stream_id": play.get("stream_id") if play else None,
+    }
+
+
+class DeviceEnableIn(BaseModel):
+    line_coords: str  # "x1,y1,x2,y2" 归一化 0-1 (必填, 启流必需)
+    anchor_coords: Optional[str] = None
+    count_only: Optional[str] = None
+    camera_type: Optional[str] = None
+    roi_coords: Optional[str] = None
+
+
+@router.post("/{device_id}/enable", status_code=200)
+async def enable_device(device_id: str, body: DeviceEnableIn):
+    """为 WVP 同步设备配置计数线并启流 (status: synced -> online).
+
+    仅适用于 wvp_sync 自动入表 (status=synced/offline) 的设备; 手动注册设备请直接
+    用 POST /api/devices.
+    """
+    if not settings.wvp_enabled:
+        raise HTTPException(503, "WVP 未启用 (wvp_enabled=false)")
+    redis = get_redis()
+    key = _DEVICE_KEY_PREFIX + device_id
+    data = await redis.hgetall(key)
+    if not data:
+        raise HTTPException(404, "device not found")
+    gb_dev = data.get("gb_device_id", "")
+    gb_ch = data.get("gb_channel_id", "")
+    if not gb_dev or not gb_ch:
+        raise HTTPException(400, "非 WVP 同步设备, 请直接用 POST /api/devices 注册")
+
+    # 落库计数线配置
+    await redis.hset(
+        key,
+        mapping={
+            "line_coords": body.line_coords,
+            "anchor_coords": body.anchor_coords or "",
+            "count_only": body.count_only or "",
+            "camera_type": body.camera_type or "",
+            "roi_coords": body.roi_coords or "",
+        },
+    )
+
+    # 调 WVP 拿流地址并启流
+    from ..core.wvp_client import get_wvp_client
+    from ..core.wvp_sync import _start_ai_pipeline
+
+    wvp = get_wvp_client()
+    play = await wvp.start_play(gb_dev, gb_ch)
+    stream_url = wvp.select_stream_url(play)
+    if not stream_url:
+        raise HTTPException(502, f"WVP 点播失败, 无法获取流地址 (gb_dev={gb_dev}, gb_ch={gb_ch})")
+
+    updated = await redis.hgetall(key)
+    await _start_ai_pipeline(updated, stream_url)
+    await redis.hset(key, "status", "online")
+    logger.info(f"[WVP] 设备 {device_id} 已启用并启流")
+    return {"device_id": device_id, "status": "online", "stream_url": stream_url}

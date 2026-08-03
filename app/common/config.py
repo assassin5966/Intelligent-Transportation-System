@@ -60,5 +60,14 @@ class Settings(BaseSettings):
     # ---- 安全 ----
     cors_origins: str = "*"  # 允许的跨域来源, 逗号分隔; 生产环境应配置具体前端域名
 
+    # ---- WVP-GB28181 对接 ----
+    wvp_enabled: bool = False  # 总开关; False 时跳过自动同步与流地址刷新
+    wvp_api_url: str = "http://wvp:18080"  # WVP 管理后台地址 (REST API)
+    wvp_username: str = "admin"
+    wvp_password: str = "admin"
+    wvp_sync_interval: int = 30  # 设备轮询同步间隔 (秒)
+    wvp_play_protocol: str = "flv"  # AI 拉流协议: flv | rtsp
+    wvp_stream_sub: bool = True  # 拉子码流降低推理压力 (False=主码流)
+
 
 settings = Settings()

@@ -1,6 +1,5 @@
 """单设备处理管道: 拉流 -> 跟踪 -> 越线计数 -> 推送事件到后端 + WebSocket推送."""
 import asyncio
-import json
 from datetime import datetime
 from typing import List, Optional
 
@@ -46,10 +45,10 @@ class DevicePipeline:
         count_only: Optional[str] = None,
         camera_type: Optional[str] = None,
         roi: Optional[List[Point]] = None,
+        enable_url_refresh: bool = False,
     ):
         self.device_id = device_id
         self.stream_url = stream_url
-        self.line = line
         self.tracker = ByteTracker(camera_type=camera_type)
         self.counter = LineCrossingCounter(line, anchor)
         if count_only is not None:
@@ -62,13 +61,18 @@ class DevicePipeline:
         self._client = httpx.AsyncClient(timeout=10.0)
         self._frame_size: Optional[tuple[int, int]] = None  # 跟踪当前帧尺寸, 变化时更新 (含流重连)
         self._anomaly_monitor = AnomalyMonitor()  # 视频异常监测 (黑屏/花屏)
+        # WVP 同步设备启用流地址刷新: 断流重连失败时回调后端 /api/devices/{id}/stream 拿新地址
+        self.enable_url_refresh = enable_url_refresh
 
     async def _run(self) -> None:
         logger.info(f"[{self.device_id}] 管道启动: {self.stream_url}")
         # 启动心跳任务 (每 30 秒向后端发送心跳)
         heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         try:
-            async for frame, _idx in stream_frames(self.stream_url, self._stop):
+            url_provider = self._refresh_stream_url if self.enable_url_refresh else None
+            async for frame, _idx in stream_frames(
+                self.stream_url, self._stop, url_provider=url_provider
+            ):
                 if frame is not None:
                     h, w = frame.shape[:2]
                     if self._frame_size != (w, h):
@@ -113,6 +117,24 @@ class DevicePipeline:
             except Exception:  # noqa: BLE001
                 pass  # 心跳失败不影响视频处理
             await asyncio.sleep(30)
+
+    async def _refresh_stream_url(self) -> str:
+        """WVP 流地址刷新回调: 调后端 /api/devices/{id}/stream 取新 flv 地址.
+
+        后端内部转调 WVP play/start. 返回空串表示刷新失败 (stream_frames 会放弃重连).
+        """
+        try:
+            resp = await self._client.get(
+                f"{settings.backend_url}/api/devices/{self.device_id}/stream"
+            )
+            if resp.status_code == 200:
+                url = resp.json().get("stream_url", "")
+                logger.info(f"[{self.device_id}] 流地址已刷新: {url}")
+                return url
+            logger.warning(f"[{self.device_id}] 流地址刷新返回 HTTP {resp.status_code}")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[{self.device_id}] 流地址刷新失败: {e}")
+        return ""
 
     async def _push(self, event: CrossingEvent) -> None:
         payload = EventIn(

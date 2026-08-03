@@ -45,8 +45,24 @@ async def lifespan(app: FastAPI):
     except Exception as e:  # noqa: BLE001
         logger.warning(f"警力分配调度器未启动: {e}")
 
+    wvp_started = False
+    try:
+        from .core.wvp_sync import start_syncer as start_wvp
+
+        await start_wvp()
+        wvp_started = True
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"WVP 同步未启动: {e}")
+
     yield
 
+    if wvp_started:
+        try:
+            from .core.wvp_sync import stop_syncer as stop_wvp
+
+            await stop_wvp()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"停止 WVP 同步失败: {e}")
     if police_started:
         try:
             from .core.police_scheduler import stop_scheduler as stop_police
@@ -68,6 +84,12 @@ async def lifespan(app: FastAPI):
             await stop_scheduler()
         except Exception as e:  # noqa: BLE001
             logger.warning(f"停止预测调度器失败: {e}")
+    try:
+        from .core.wvp_client import close_wvp_client
+
+        await close_wvp_client()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"关闭 WVP 客户端失败: {e}")
     await close_redis()
     logger.info("业务后端关闭")
 

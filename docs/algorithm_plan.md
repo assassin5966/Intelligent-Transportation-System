@@ -67,6 +67,17 @@
 | 实时状态 | Redis (redis.asyncio) |
 | 通信 | HTTPX (事件推送) + WebSocket (实时轨迹) |
 
+### 1.4 视频接入：GB28181 / WVP 自动同步
+
+IPC 经 GB28181 SIP 注册到 WVP-GB28181-pro 平台；点播时 WVP 向 IPC 发 INVITE，ZLMediaKit 接收 RTP（RFC 6184 重组 H.264 NALU）并转封装为 HTTP-FLV，AI 服务用 OpenCV（FFmpeg）拉流解码出 BGR 帧送 YOLO11 推理。
+
+**后端为 WVP 唯一对接点**（AI 服务不持有 WVP token）：
+- **设备自动同步**（`app/backend/core/wvp_sync.py`）：每 30s 轮询 WVP 设备/通道，按 `gb_device_id`+`gb_channel_id` 与本地 Redis 设备表比对。新增通道入表 `status=synced`（不自动启流，缺计数线）；WVP 侧离线则停 AI pipeline 标 `offline`；恢复则重新启流。`camera_type` 从通道名启发式推断（含「车」→vehicle、含「人」→person）。
+- **流地址自动刷新**：AI 断流重连失败时回调后端 `GET /api/devices/{id}/stream`，后端转调 WVP `play/start` 返回新 FLV 地址；`stream_frames` 的 `url_provider` 回调带 10s 冷却防频繁打 WVP。
+- **webhook 预留**：`POST /api/devices/wvp-webhook` 供 WVP 定制回调（WVP 默认无对外 HTTP webhook，主力靠轮询）。
+
+**关键配置**：`stream-on-demand=false`（AI 持续拉即持续推，避免 ZLM 无人观看断流）、默认拉子码流降推理压力、`mediaServerId`/`secret` 在 ZLM `config.ini` 与 WVP `application.yml` 间保持一致。手动注册（直填 `stream_url`）路径向后兼容，`url_provider=None` 时离线 `video_processor` 行为不变。
+
 ***
 
 ## 二、目标检测算法（YOLO11）
