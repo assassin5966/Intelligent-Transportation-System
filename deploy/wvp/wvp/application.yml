@@ -1,0 +1,60 @@
+# ============================================================
+# WVP-GB28181-pro 2.7.4 配置 (基于 application-docker.yml 改写)
+# 所有参数通过环境变量注入 (docker-compose environment 配置)
+# 挂载到 /app/config/application.yml, Spring Boot 外部配置优先加载
+# ============================================================
+spring:
+    servlet:
+        multipart:
+            max-file-size: 10MB
+            max-request-size: 100MB
+    cache:
+        type: redis
+    data:
+        redis:
+            host: ${REDIS_HOST:127.0.0.1}
+            port: ${REDIS_PORT:6379}
+            database: ${REDIS_DB:6}
+            password: ${REDIS_PWD:}
+            timeout: 10000
+    datasource:
+        type: com.zaxxer.hikari.HikariDataSource
+        driver-class-name: com.mysql.cj.jdbc.Driver
+        url: ${SPRING_DATASOURCE_URL:jdbc:mysql://127.0.0.1:3306/wvp2?useUnicode=true&characterEncoding=UTF8&serverTimezone=PRC&useSSL=false&allowMultiQueries=true}
+        username: ${SPRING_DATASOURCE_USERNAME:root}
+        password: ${SPRING_DATASOURCE_PASSWORD:root123}
+
+server:
+    port: 18080
+
+# SIP 信令服务器 (摄像头注册到这里)
+sip:
+    ip: ${WVP_HOST:127.0.0.1}
+    port: ${WVP_PORT:5060}
+    domain: ${WVP_DOMAIN:4401020049}
+    id: ${WVP_ID:44010200492000000001}
+    password: ${WVP_PWD:admin123}
+
+# ZLMediaKit 联动
+media:
+    id: ${MEDIA_ID:FQ3TF8yT83wh5Wvz}
+    ip: ${ZLM_HOST:127.0.0.1}
+    http-port: ${ZLM_PORT:80}
+    secret: 2gsBhsuK5Jz1eI00YoXHXR0LTlyGikoA
+    rtp:
+        enable: true
+        port-range: 30000,30500
+        send-port-range: 30000,30500
+    record-assist-port: 18081
+    sdp-ip: ${WVP_HOST:127.0.0.1}
+    stream-ip: ${WVP_HOST:127.0.0.1}
+    hook-ip: ${WVP_HOST:127.0.0.1}    # ZLM调用WVP hook的地址 (ZLM在容器内, 用宿主IP访问WVP)
+
+user-settings:
+    record-push-live: true
+    auto-apply-play: true
+    interface-authentication: false    # 关闭接口鉴权 (ZLM的hook请求不带token, 否则被401拦截)
+    device-register-time-max-count: 100
+    device-register-time-ttl-hours: 3
+    device-keepalive-time-max-count: 100
+    device-keepalive-time-ttl-hours: 1

@@ -1,0 +1,105 @@
+# ============================================================
+# WVP-GB28181-pro 信令平台 Docker 编排 (arm64 自建镜像)
+#
+# 关键: WVP 用 host 网络模式 (SIP 必须 bind 摄像头可达的IP 172.16.168.9,
+#       容器内没有该IP, 只能用 host 网络直接用宿主网卡)
+#       MySQL/Redis 映射端口到宿主, WVP 用 127.0.0.1 连
+#
+# 前置: docker build -t wvp:2.7.4 -f deploy/wvp/wvp/Dockerfile /tmp/wvp-src
+# 启动: docker compose -p wvp -f docker-compose.wvp.yml up -d
+# 停止: docker compose -p wvp -f docker-compose.wvp.yml down
+# ============================================================
+
+services:
+  # ---------- 1. WVP 专用 MySQL (映射3307避宿主3306冲突) ----------
+  wvp-mysql:
+    image: mysql:8.0
+    container_name: wvp-mysql
+    restart: unless-stopped
+    ports:
+      - "3307:3306"          # 映射到宿主3307 (宿主3306已被占用), WVP用127.0.0.1:3307连
+    environment:
+      MYSQL_ROOT_PASSWORD: wvp123456
+      MYSQL_DATABASE: wvp2
+      TZ: Asia/Shanghai
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci --default-authentication-plugin=mysql_native_password --lower-case-table-names=1
+    volumes:
+      - wvp-mysql-data:/var/lib/mysql
+      - ./deploy/wvp/mysql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - wvp-net
+
+  # ---------- 2. WVP 专用 Redis (映射6380) ----------
+  wvp-redis:
+    image: redis:7-alpine
+    container_name: wvp-redis
+    restart: unless-stopped
+    ports:
+      - "6380:6379"          # 映射到宿主6380, WVP用127.0.0.1:6380连
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - wvp-redis-data:/data
+    networks:
+      - wvp-net
+
+  # ---------- 3. ZLMediaKit 流媒体引擎 ----------
+  # 收摄像头RTP流 -> 重组H.264 -> 转HTTP-FLV (AI通过 http://ip/flv?... 拉流)
+  zlmediakit:
+    image: zlmediakit/zlmediakit:master
+    container_name: wvp-zlmediakit
+    restart: unless-stopped
+    ports:
+      - "80:80"              # HTTP-FLV 拉流端口 (AI用)
+      - "554:554"            # RTSP
+      - "1935:1935"          # RTMP
+      - "10000:10000"        # RTP单端口 (TCP)
+      - "10000:10000/udp"    # RTP单端口 (UDP)
+      - "30000-30500:30000-30500"        # RTP多端口 (TCP)
+      - "30000-30500:30000-30500/udp"    # RTP多端口 (UDP, 摄像头发流用)
+    volumes:
+      - ./deploy/wvp/zlmediakit/config.ini:/opt/media/conf/config.ini:ro
+      - wvp-zlm-data:/opt/media/www
+      - wvp-zlm-logs:/opt/media/log
+    networks:
+      - wvp-net
+
+  # ---------- 4. WVP 信令平台 (host网络, SIP直接bind宿主IP) ----------
+  wvp:
+    image: wvp:2.7.4
+    container_name: wvp-server
+    restart: unless-stopped
+    network_mode: host       # [关键] host网络: SIP能bind 172.16.168.9, 用127.0.0.1连MySQL/Redis/ZLM
+    volumes:
+      - ./deploy/wvp/wvp/application.yml:/app/config/application.yml:ro
+    command: ["java", "-Xms512m", "-Xmx1024m", "-jar", "/app/wvp.jar", "--spring.config.location=optional:classpath:/,file:/app/config/application.yml"]
+    environment:
+      TZ: Asia/Shanghai
+      # ---- 数据库 (host网络, 用127.0.0.1:3307连MySQL) ----
+      SPRING_DATASOURCE_URL: jdbc:mysql://127.0.0.1:3307/wvp2?useUnicode=true&characterEncoding=UTF8&serverTimezone=PRC&useSSL=false&allowMultiQueries=true&allowPublicKeyRetrieval=true
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD: wvp123456
+      # ---- Redis (127.0.0.1:6380) ----
+      REDIS_HOST: 127.0.0.1
+      REDIS_PORT: 6380
+      REDIS_DB: 6
+      REDIS_PWD: ""
+      # ---- SIP 信令 (host网络能bind 172.16.168.9) ----
+      WVP_HOST: 172.16.168.9
+      WVP_PORT: 5060
+      WVP_DOMAIN: 3402000000
+      WVP_ID: 34020000002000000001
+      WVP_PWD: 12345678
+      # ---- ZLMediaKit (127.0.0.1:80) ----
+      ZLM_HOST: 127.0.0.1
+      ZLM_PORT: 80
+      MEDIA_ID: FQ3TF8yT83wh5Wvz
+
+volumes:
+  wvp-mysql-data:
+  wvp-redis-data:
+  wvp-zlm-data:
+  wvp-zlm-logs:
+
+networks:
+  wvp-net:
+    driver: bridge
