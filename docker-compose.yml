@@ -47,6 +47,14 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - AI_SERVICE_URL=http://ai:8001
       - PYTHONUNBUFFERED=1
+      # WVP-GB28181 对接 (默认关闭; 启用需 WVP_ENABLED=true 且 wvp/zlm/mysql 已起)
+      - WVP_ENABLED=${WVP_ENABLED:-false}
+      - WVP_API_URL=http://wvp:18080
+      - WVP_USERNAME=${WVP_USERNAME:-admin}
+      - WVP_PASSWORD=${WVP_PASSWORD:-admin}
+      - WVP_SYNC_INTERVAL=${WVP_SYNC_INTERVAL:-30}
+      - WVP_PLAY_PROTOCOL=${WVP_PLAY_PROTOCOL:-flv}
+      - WVP_STREAM_SUB=${WVP_STREAM_SUB:-true}
     volumes:
       - ./app:/app/app:cached
       - ./models:/app/models:cached
@@ -65,6 +73,97 @@ services:
     volumes:
       - redis-data:/data
 
+  # ---------- MySQL: 仅供 WVP 使用 (设备/通道/录像; 与本项目事件存储隔离) ----------
+  mysql:
+    image: mysql:8.0
+    container_name: smart-city-mysql
+    restart: unless-stopped
+    environment:
+      - MYSQL_ROOT_PASSWORD=${WVP_MYSQL_PASSWORD:-wvp123456}
+      - MYSQL_DATABASE=wvp
+      - TZ=Asia/Shanghai
+    # 调试可取消注释映射 3306; 正常仅 WVP 容器内访问
+    # ports:
+    #   - "3306:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+
+  # ---------- ZLMediaKit: 流媒体服务 (收 RTP 重组 H.264, 转 HTTP-FLV) ----------
+  # IPC 经 WVP INVITE 后把 RTP 推给 ZLM, ZLM 转封装为 HTTP-FLV 供 AI 拉流
+  zlm:
+    image: zlmediakit/zlmediakit:master
+    container_name: smart-city-zlm
+    restart: unless-stopped
+    ports:
+      - "80:80"                          # HTTP-FLV / HLS (前端预览 + AI 拉流)
+      - "30000-30500:30000-30500/udp"    # RTP 收包端口段 (IPC 推流, 需与 config.ini 一致)
+    volumes:
+      - ./configs/zlm/config.ini:/opt/media/conf/config.ini
+      - zlm-data:/opt/media/www
+
+  # ---------- WVP-GB28181: 信令平台 (SIP 注册/INVITE 点播, 管理后台) ----------
+  # IPC 注册到此; 后端通过 WVP REST API 同步设备并获取 FLV 地址
+  wvp:
+    image: 648540858/wvp_pro:latest
+    container_name: smart-city-wvp
+    restart: unless-stopped
+    ports:
+      - "18080:18080"    # WVP 管理后台 + REST API
+      - "5060:5060"      # SIP TCP
+      - "5060:5060/udp"  # SIP UDP (IPC 注册)
+    environment:
+      - SPRING_CONFIG_LOCATION=/app/application.yml
+    volumes:
+      - ./configs/wvp/application.yml:/app/application.yml
+    depends_on:
+      - mysql
+      - redis
+      - zlm
+
+  # ---------- MediaMTX: RTSP 服务器 (测试用) ----------
+  # 接收 FFmpeg 推流, AI 服务通过 RTSP 地址拉流
+  # 参考: https://github.com/bluenviron/mediamtx
+  rtsp-server:
+    image: bluenviron/mediamtx:latest
+    container_name: traffic-rtsp-server
+    ports:
+      - "8554:8554"    # RTSP
+      - "1935:1935"    # RTMP
+      - "8888:8888"    # HTTP
+    volumes:
+      - ./data:/data/video:ro
+    # 默认配置即可接收 publisher 模式推流
+
+  # ---------- RTSP 推流服务 - 车辆识别 (用 FFmpeg 推送本地视频到 MediaMTX) ----------
+  rtsp-streamer-vehicle:
+    image: smart-city-platform:latest
+    container_name: traffic-rtsp-streamer-vehicle
+    depends_on:
+      - rtsp-server
+    volumes:
+      - ./data:/data/video:ro
+    environment:
+      - PYTHONUNBUFFERED=1
+    command: >
+      ffmpeg -re -stream_loop -1 -i /data/video/车辆识别20s.mp4
+      -c:v libx264 -preset ultrafast -tune zerolatency
+      -f rtsp -rtsp_transport tcp rtsp://rtsp-server:8554/vehicle
+
+  # ---------- RTSP 推流服务 - 人流识别 (用 FFmpeg 推送本地视频到 MediaMTX) ----------
+  rtsp-streamer-person:
+    image: smart-city-platform:latest
+    container_name: traffic-rtsp-streamer-person
+    depends_on:
+      - rtsp-server
+    volumes:
+      - ./data:/data/video:ro
+    environment:
+      - PYTHONUNBUFFERED=1
+    command: >
+      ffmpeg -re -stream_loop -1 -i /data/video/人流识别20s.mp4
+      -c:v libx264 -preset ultrafast -tune zerolatency
+      -f rtsp -rtsp_transport tcp rtsp://rtsp-server:8554/person
+
   # ---------- 视频处理器 (本地测试用) ----------
   ai-processor:
     image: smart-city-platform:latest
@@ -73,6 +172,8 @@ services:
       - ./output:/data/video:ro
       - ./output:/data/output
       - ./models:/app/models:ro
+      - ./tool:/app/tool:ro
+      - ./app:/app/app:ro
     environment:
       - PYTHONPATH=/app
     command: >
@@ -85,3 +186,5 @@ services:
 volumes:
   redis-data:
   model-cache:
+  mysql-data:
+  zlm-data:

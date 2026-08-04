@@ -64,12 +64,19 @@ class LineCrossingCounter:
         self.line_name = "line_a"
 
         self.anti_jitter = True
-        self.min_distance_ratio = 0.05  # 距线最小距离占帧短边比例
+        self.min_distance_ratio = 0.02  # 距线最小距离占帧短边比例
         self.min_distance_threshold = 50  # set_frame_size 重算
         self.endpoint_sensitivity = 0.05
         self.hold_frames = 3  # 滞留确认帧数 (跨线后需在新侧连续保持)
-        self.min_motion = 3  # 最小位移(像素), 小于此值视为抖动
+        self.min_motion = 2  # 最小位移(像素), 小于此值视为抖动
         self.count_only: Optional[str] = None  # None=双向, "enter"=只计Enter, "exit"=只计Exit
+
+        # 滞回防抖: 侧别反转需超过此距离 (像素), 带内抖动不触发反转
+        # 解决单向车流因线附近抖动误产 Exit, 人流误产 Enter 的问题
+        self.hysteresis_ratio = 0.04  # 占帧短边比例
+        self.hysteresis_threshold = 30  # set_frame_size 重算
+        # 反向跨线冷却 (秒): 同一轨迹反向事件需间隔此时长, 防止瞬时进出
+        self.reverse_crossing_cooldown = 3.0
 
         # ID 切换检测参数 (可配置, 适配不同帧率/分辨率)
         self.id_switch_speed_ratio = 3.0  # 速度超过历史平均 N 倍视为 ID 切换
@@ -77,8 +84,8 @@ class LineCrossingCounter:
         self.id_switch_min_avg_speed = 5.0  # 历史平均速度低于此值不判 (静止误判)
         self.id_switch_history_window = 5  # 方向一致性验证的历史窗口
 
-        # 已计数轨迹的去重保留时长 (秒); 超时后淘汰, 避免内存泄漏与流重连 ID 重用漏计
-        self.counted_tracks_ttl = 3600
+        # 已计数去重保留时长 (秒); 超时后淘汰, 避免内存泄漏与流重连 ID 重用漏计
+        self.counted_tracks_ttl = 300
 
         # 轨迹状态
         self.track_crossing_history: Dict[str, List[Tuple[float, str, str]]] = {}
@@ -86,7 +93,14 @@ class LineCrossingCounter:
         self.track_crossing_start_pos: Dict[str, List[float]] = {}  # 跨线前位置
         self.track_confirm_side: Dict[str, int] = {}  # 滞留确认侧 (+1/-1)
         self.track_hold_count: Dict[str, int] = {}  # 滞留已确认帧数
-        self.counted_tracks: Dict[str, float] = {}  # track_id -> 计数时间戳 (TTL 淘汰)
+        # 双向计数: track_id+direction 维度去重, 允许同一轨迹来回各计一次
+        # key: "track_id|direction", value: 计数时间戳
+        self.counted_tracks: Dict[str, float] = {}
+
+        # ROI 感兴趣区域多边形 (归一化坐标 [x1,y1,x2,y2,...], >=6 个值即 >=3 个顶点).
+        # 仅 ROI 内 (中心点在多边形内) 的轨迹参与越线计数;
+        # None 表示不启用 ROI, 全画面计数 (向后兼容).
+        self.roi_polygon: Optional[List[Point]] = None
 
         self.frame_width = 1920
         self.frame_height = 1080
@@ -99,6 +113,14 @@ class LineCrossingCounter:
         self._line_len_sq: float = 1.0
         self._n_inner: List[float] = [0.0, 0.0]
         self._n_unit: List[float] = [0.0, 0.0]  # 归一化法向 (朝向锚点)
+        self._hysteresis_offset: float = 0.0  # 滞回 offset 阈值 (hysteresis_threshold * 线长)
+        self._roi_px: Optional[List[List[float]]] = None  # ROI 像素多边形顶点
+        # 计数线裁剪到 ROI 内的有效区间 [t0, t1] (线段参数 t∈[0,1]); ROI 关闭时 [0,1]
+        self._clip_t0: float = 0.0
+        self._clip_t1: float = 1.0
+        # 裁剪后红线端点像素坐标 (供可视化区分有效段); ROI 关闭时等于 _p1/_p2
+        self._clip_p0: List[float] = [0.0, 0.0]
+        self._clip_p1: List[float] = [0.0, 0.0]
         self._precompute()
 
     def set_frame_size(self, width: int, height: int):
@@ -106,6 +128,9 @@ class LineCrossingCounter:
         self.frame_height = height
         self.min_distance_threshold = max(
             20, int(self.min_distance_ratio * min(width, height))
+        )
+        self.hysteresis_threshold = max(
+            20, int(self.hysteresis_ratio * min(width, height))
         )
         self._precompute()
 
@@ -152,6 +177,108 @@ class LineCrossingCounter:
             logger.warning("计数线退化为点 (P1==P2), 越线计数将不触发, 请检查 line_coords")
         elif abs(anchor_off) < 1e-6:
             logger.warning("内侧锚点落在计数线上, 法向方向不确定, 请调整 anchor_coords")
+        # 滞回 offset 阈值 = 像素阈值 × 线长 (offset 量纲 = 距离 × 线长)
+        self._hysteresis_offset = self.hysteresis_threshold * line_len
+        # ROI 像素多边形随帧尺寸/线变化重算 (归一化 -> 像素)
+        self._recompute_roi_px()
+        # 计数线裁剪到 ROI 内的有效区间 (ROI 关闭时整段有效)
+        self._recompute_clip()
+
+    def _recompute_roi_px(self):
+        """将归一化 ROI 多边形转像素坐标 (None 时禁用)."""
+        if self.roi_polygon is None or len(self.roi_polygon) < 3:
+            self._roi_px = None
+            return
+        self._roi_px = [self._normalize_to_pixel(list(p)) for p in self.roi_polygon]
+
+    def _recompute_clip(self):
+        """将计数线 P1->P2 裁剪到 ROI 多边形内, 得到有效参数区间 [t0,t1] 与端点像素.
+
+        线段参数 t: P(t) = P1 + t*(P2-P1), t∈[0,1] 为原线段.
+        算法: 收集线段与 ROI 所有边的交点 t + 端点 t=0/1, 排序后扫描相邻 t 的中点,
+        中点在 ROI 内 -> 该子段有效; 合并所有有效子段取最长者作为 [_clip_t0,_clip_t1].
+        ROI 关闭时整段有效 [0,1]; 线完全在 ROI 外时 t0>t1 (整段失效).
+        """
+        # 默认整段有效; 端点像素用于可视化
+        self._clip_t0 = 0.0
+        self._clip_t1 = 1.0
+        self._clip_p0 = list(self._p1)
+        self._clip_p1 = list(self._p2)
+        if self._roi_px is None or self._line_len_sq < 1e-6:
+            return
+        p1x, p1y = self._p1
+        dx, dy = self._line_vec
+        # 候选参数点: 端点 + 线段与 ROI 每条边的交点
+        ts = [0.0, 1.0]
+        n = len(self._roi_px)
+        for i in range(n):
+            ax, ay = self._roi_px[i]
+            bx, by = self._roi_px[(i + 1) % n]
+            ex, ey = bx - ax, by - ay
+            # 求解 P1 + t*(dx,dy) = (ax,ay) + s*(ex,ey), t∈[0,1], s∈[0,1]
+            denom = dx * (-ey) + dy * ex
+            if abs(denom) < 1e-9:
+                continue  # 线段与边平行/重合, 跳过
+            t = ((ax - p1x) * (-ey) + (ay - p1y) * ex) / denom
+            s = (dx * (ay - p1y) - dy * (ax - p1x)) / denom
+            if 0.0 <= t <= 1.0 and 0.0 <= s <= 1.0:
+                ts.append(t)
+        ts = sorted(set(ts))
+        # 扫描相邻 t 区间, 中点在 ROI 内则为有效子段; 取最长有效段
+        best_t0, best_t1, best_len = 1.0, 0.0, -1.0
+        for i in range(len(ts) - 1):
+            t0, t1 = ts[i], ts[i + 1]
+            if t1 - t0 < 1e-9:
+                continue
+            mid_t = (t0 + t1) / 2
+            mx = p1x + mid_t * dx
+            my = p1y + mid_t * dy
+            if self._point_in_roi([mx, my]):
+                if (t1 - t0) > best_len:
+                    best_t0, best_t1, best_len = t0, t1, t1 - t0
+        if best_len < 0:
+            # 线段完全在 ROI 外, 标记整段失效 (t0>t1)
+            self._clip_t0 = 1.0
+            self._clip_t1 = 0.0
+            return
+        self._clip_t0 = best_t0
+        self._clip_t1 = best_t1
+        self._clip_p0 = [p1x + best_t0 * dx, p1y + best_t0 * dy]
+        self._clip_p1 = [p1x + best_t1 * dx, p1y + best_t1 * dy]
+
+    def set_roi(self, polygon: Optional[List[Point]]):
+        """设置 ROI 感兴趣区域多边形 (归一化 [x,y] 顶点列表, >=3 个顶点).
+
+        仅 ROI 内轨迹参与越线计数; 传 None 关闭 ROI (全画面计数).
+        """
+        if polygon is None or len(polygon) < 3:
+            self.roi_polygon = None
+            self._roi_px = None
+            self._recompute_clip()
+            logger.info("ROI 已关闭, 全画面计数")
+            return
+        self.roi_polygon = [list(p) for p in polygon]
+        self._recompute_roi_px()
+        self._recompute_clip()
+        logger.info(f"已设置 ROI 多边形 ({len(self.roi_polygon)} 顶点)")
+
+    def _point_in_roi(self, point) -> bool:
+        """点是否在 ROI 多边形内 (射线法); ROI 未启用时恒返回 True."""
+        if self._roi_px is None:
+            return True
+        n = len(self._roi_px)
+        inside = False
+        j = n - 1
+        for i in range(n):
+            xi, yi = self._roi_px[i]
+            xj, yj = self._roi_px[j]
+            # 射线法: point 与多边形边的交点奇偶性判断内外
+            if (yi > point[1]) != (yj > point[1]):
+                x_int = (xj - xi) * (point[1] - yi) / (yj - yi) + xi
+                if point[0] < x_int:
+                    inside = not inside
+            j = i
+        return inside
 
     def _normalize_to_pixel(self, point: List[float]) -> List[float]:
         return [point[0] * self.frame_width, point[1] * self.frame_height]
@@ -198,14 +325,18 @@ class LineCrossingCounter:
         return dist >= self.min_distance_threshold
 
     def _in_segment(self, point) -> bool:
-        """跨线点投影落在线段内 (t∈[0,1]), 排除延长线上的误判."""
+        """跨线点投影落在计数线有效段内 (裁剪到 ROI 后的 t∈[_clip_t0,_clip_t1]).
+
+        ROI 关闭时有效段为整条线 [0,1]; ROI 启用时仅 ROI 内部分有效,
+        越过 ROI 外线段不触发计数 (避免失效区误计).
+        """
         if self._line_len_sq == 0:
             return False
         t = (
             (point[0] - self._p1[0]) * self._line_vec[0]
             + (point[1] - self._p1[1]) * self._line_vec[1]
         ) / self._line_len_sq
-        return 0.0 <= t <= 1.0
+        return self._clip_t0 <= t <= self._clip_t1
 
     def _angle_filter(self, prev_point, curr_point) -> bool:
         """夹角过滤: 运动向量在法向方向的投影 >= min_motion.
@@ -246,7 +377,13 @@ class LineCrossingCounter:
                 return False
         return True
 
-    def process_tracks(self, track_result, camera_id: str = "CAM001") -> List[CrossingEvent]:
+    def process_tracks(self, track_result, camera_id: str = "CAM001", current_time: Optional[float] = None) -> List[CrossingEvent]:
+        """处理一批跟踪轨迹, 返回越线事件.
+
+        current_time: 当前时间戳 (秒); 离线处理传视频时间, 实时流默认 datetime.now().
+        """
+        if current_time is None:
+            current_time = datetime.now().timestamp()
         events: List[CrossingEvent] = []
 
         for track in track_result.tracks:
@@ -262,6 +399,10 @@ class LineCrossingCounter:
 
             prev_point = track.history[-2]
             curr_point = track.center
+
+            # ROI 过滤: 中心点不在多边形内的轨迹跳过计数 (减算力 / 过滤画面边缘干扰)
+            if not self._point_in_roi(curr_point):
+                continue
 
             # 轨迹连续性验证: 速度突变检测 (过滤 ByteTrack ID 切换)
             # ID 切换时 prev_point 与 curr_point 来自不同车辆, 位移远超历史速度
@@ -301,7 +442,6 @@ class LineCrossingCounter:
                 if not self._in_segment(curr_point):
                     continue
 
-                current_time = datetime.now().timestamp()
                 # 方向标签 (基于 offset, 绝对语义)
                 if prev_off < 0 and curr_off > 0:
                     direction = "outer_to_inner"
@@ -330,11 +470,19 @@ class LineCrossingCounter:
                     continue
 
             # 4. 滞留确认: 连续 hold_frames 帧保持在跨线后侧
-            curr_side_now = self._side(curr_point)
-            if curr_side_now != self.track_confirm_side.get(track_id, 0):
-                # 侧别反转 (抖动跨回), 重新等待
+            #    滞回防抖: 侧别反转需超过 hysteresis_threshold, 带内抖动不触发反转
+            #    解决单向车流因线附近抖动误产 Exit, 人流误产 Enter
+            curr_off = self._offset(curr_point)
+            confirm_side = self.track_confirm_side.get(track_id, 0)
+            if curr_off * confirm_side < 0:
+                # 目标在确认侧的对侧
+                if abs(curr_off) < self._hysteresis_offset:
+                    # 滞回带内: 线附近抖动, 跳过本帧 (不重置也不递增)
+                    continue
+                # 超过滞回阈值: 真实侧别反转, 更新跨线起点允许反向计数
                 self.track_hold_count[track_id] = 0
-                self.track_confirm_side[track_id] = curr_side_now
+                self.track_confirm_side[track_id] = 1 if curr_off > 0 else -1
+                self.track_crossing_start_pos[track_id] = list(prev_point)
                 continue
             self.track_hold_count[track_id] = self.track_hold_count.get(track_id, 0) + 1
             if self.track_hold_count[track_id] < self.hold_frames:
@@ -357,34 +505,47 @@ class LineCrossingCounter:
 
             # 方向一致性验证: 跨线方向应与最近运动方向一致 (过滤 ID 切换)
             # ID 切换时 start_pos 来自前一辆车, 与当前车辆运动方向矛盾
-            # 用 offset 变化判断, 适用于任意角度计数线
+            # 注意: 双向场景下来回运动也会方向反转, 需结合跨线幅度判断
             h = track.history
             win = self.id_switch_history_window
             if len(h) >= win:
                 recent_start_off = self._offset(h[-win])
                 recent_end_off = self._offset(h[-1])
                 recent_cross_inner = recent_end_off - recent_start_off  # >0 向内, <0 向外
-                if entry_exit == "exit" and recent_cross_inner > 0:
-                    # 判定 Exit(内->外) 但最近向内移动 -> start_pos 可能有误
-                    self.track_states[track_id] = "TRACKING"
-                    continue
-                if entry_exit == "enter" and recent_cross_inner < 0:
-                    # 判定 Enter(外->内) 但最近向外移动 -> start_pos 可能有误
-                    self.track_states[track_id] = "TRACKING"
-                    continue
+                # 仅当矛盾幅度较大时才判定为 ID 切换 (避免慢速来回运动被误杀)
+                recent_cross_mag = abs(recent_cross_inner)
+                line_span = math.sqrt(self._line_len_sq)
+                if line_span > 0 and recent_cross_mag > line_span * 0.5:
+                    if entry_exit == "exit" and recent_cross_inner > 0:
+                        self.track_states[track_id] = "TRACKING"
+                        continue
+                    if entry_exit == "enter" and recent_cross_inner < 0:
+                        self.track_states[track_id] = "TRACKING"
+                        continue
 
-            # 6. 单向流动: 每条轨迹只计一次
-            if track_id in self.counted_tracks:
+            # 6. 双向去重: track_id+direction 维度, 允许同一轨迹来回各计一次
+            dedup_key = f"{track_id}|{entry_exit}"
+            if dedup_key in self.counted_tracks:
                 self.track_states[track_id] = "TRACKING"
                 continue
+
+            # 反向跨线冷却: 同一轨迹反向事件需间隔冷却时间
+            # 防止线附近抖动导致的瞬时进出 (如 1 秒内 Enter+Exit)
+            opposite_dir = "exit" if entry_exit == "enter" else "enter"
+            opposite_key = f"{track_id}|{opposite_dir}"
+            if opposite_key in self.counted_tracks:
+                time_since_opposite = current_time - self.counted_tracks[opposite_key]
+                if time_since_opposite < self.reverse_crossing_cooldown:
+                    self.track_states[track_id] = "TRACKING"
+                    continue
 
             # 单向计数模式: 只产出指定方向事件, 反向跨线忽略 (不标记 counted, 允许后续正向再计)
             if self.count_only is not None and entry_exit != self.count_only:
                 self.track_states[track_id] = "TRACKING"
                 continue
 
-            # 7. 生成事件
-            if track.class_name == "person":
+            # 7. 生成事件 (person/bicycle/motorcycle 归为人流, car/truck/bus 归为车流)
+            if track.class_name in ("person", "bicycle", "motorcycle"):
                 event_type = PERSON_ENTER if entry_exit == "enter" else PERSON_EXIT
             else:
                 event_type = VEHICLE_ENTER if entry_exit == "enter" else VEHICLE_EXIT
@@ -401,15 +562,17 @@ class LineCrossingCounter:
                 confidence=track.confidence,
             )
             events.append(event)
-            self.counted_tracks[track_id] = datetime.now().timestamp()
+            # 双向计数: 记录 track_id+direction, 允许反方向再计一次
+            self.counted_tracks[dedup_key] = current_time
             self.track_states[track_id] = "TRACKING"
 
-        self._cleanup_old_tracks()
+        self._cleanup_old_tracks(current_time)
         return events
 
-    def _cleanup_old_tracks(self):
+    def _cleanup_old_tracks(self, current_time: Optional[float] = None):
         """清理长时间无跨线的轨迹状态; 按 TTL 淘汰已计数轨迹 (防内存泄漏与流重连 ID 重用漏计)."""
-        current_time = datetime.now().timestamp()
+        if current_time is None:
+            current_time = datetime.now().timestamp()
         to_remove = []
         for track_id, history in self.track_crossing_history.items():
             if not history:

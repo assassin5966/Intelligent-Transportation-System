@@ -20,17 +20,20 @@
 import argparse
 import csv
 import json
+import math
 import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import cv2
+import numpy as np
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = SCRIPT_DIR.parent
 sys.path.insert(0, str(PROJECT_DIR))
 
+from app.ai.anomaly import AnomalyMonitor
 from app.ai.counter import LineCrossingCounter
 
 
@@ -124,21 +127,62 @@ def parse_args():
     parser.add_argument("--no-annotated", action="store_true", help="不生成标注视频")
     parser.add_argument("--line", default="0.5,0.1,0.5,0.9", help="计数线坐标（归一化 x1,y1,x2,y2, 默认垂直线）")
     parser.add_argument("--anchor", default="0.9,0.5", help="内侧锚点（归一化 x,y, 标识Enter方向所在侧）")
+    parser.add_argument("--roi", default=None, help="ROI 感兴趣区域多边形（归一化 x1,y1,x2,y2,... 至少3个顶点；仅ROI内轨迹计数，不填则全画面计数）")
     parser.add_argument("--count-only", default=None, choices=["enter", "exit"], help="单向计数模式: enter=只计进入, exit=只计离开")
+    parser.add_argument("--camera-type", default=None, choices=["vehicle", "person"], help="摄像头类型: vehicle=只检测机动车, person=只检测人流(含非机动车)")
+    parser.add_argument("--no-anomaly", action="store_true", help="禁用视频异常检测 (黑屏/花屏)")
     return parser.parse_args()
 
 
-def draw_annotations(frame, track_result, events, statistics, counter):
+def _draw_dashed_line(img, pt1, pt2, color, thickness, dash=8):
+    """画虚线 (沿线段方向交替画/空 dash 像素)."""
+    x1, y1 = pt1
+    x2, y2 = pt2
+    dist = math.hypot(x2 - x1, y2 - y1)
+    if dist < 1:
+        return
+    n = max(1, int(dist // dash))
+    for i in range(n):
+        if i % 2 == 0:
+            t0 = i * dash / dist
+            t1 = min(1.0, (i + 1) * dash / dist)
+            cv2.line(img,
+                     (int(x1 + t0 * (x2 - x1)), int(y1 + t0 * (y2 - y1))),
+                     (int(x1 + t1 * (x2 - x1)), int(y1 + t1 * (y2 - y1))),
+                     color, thickness)
+
+
+def draw_annotations(frame, track_result, events, statistics, counter, anomaly_state=None):
     annotated = frame.copy()
+
+    # 视频异常叠加: 异常状态下红色边框 + 提示文字
+    if anomaly_state:
+        anomaly_label = {"black_screen": "BLACK SCREEN", "flower_screen": "FLOWER SCREEN"}.get(
+            anomaly_state, anomaly_state.upper()
+        )
+        cv2.rectangle(annotated, (0, 0),
+                      (frame.shape[1] - 1, frame.shape[0] - 1), (0, 0, 255), 8)
+        cv2.rectangle(annotated, (5, frame.shape[0] - 45),
+                      (420, frame.shape[0] - 5), (0, 0, 0), -1)
+        cv2.putText(annotated, f"ANOMALY: {anomaly_label}",
+                    (15, frame.shape[0] - 18),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
     line_start = counter._normalize_to_pixel(counter.line_points[0])
     line_end = counter._normalize_to_pixel(counter.line_points[1])
 
+    # 原计数线: 暗红虚线 (表示用户原始线, ROI 外部分为失效段)
+    _draw_dashed_line(annotated,
+                      (int(line_start[0]), int(line_start[1])),
+                      (int(line_end[0]), int(line_end[1])),
+                      (128, 0, 128), 1, dash=8)
+
+    # 裁剪后有效段: 亮红粗实线 (ROI 内, 实际触发计数的部分)
     cv2.line(annotated,
-             (int(line_start[0]), int(line_start[1])),
-             (int(line_end[0]), int(line_end[1])),
-             (0, 0, 255), 2)
-    cv2.putText(annotated, "counting line", (int(line_start[0]), int(line_start[1]) - 10),
+             (int(counter._clip_p0[0]), int(counter._clip_p0[1])),
+             (int(counter._clip_p1[0]), int(counter._clip_p1[1])),
+             (0, 0, 255), 3)
+    cv2.putText(annotated, "counting line", (int(counter._clip_p0[0]), int(counter._clip_p0[1]) - 10),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
     # 内侧锚点 (标识Enter方向所在侧)
@@ -147,6 +191,16 @@ def draw_annotations(frame, track_result, events, statistics, counter):
                    (255, 0, 0), cv2.MARKER_CROSS, 20, 2)
     cv2.putText(annotated, "inner(anchor)", (int(anchor_px[0]) + 12, int(anchor_px[1])),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
+
+    # ROI 多边形 (半透明绿色填充 + 边界, 标识计数有效区域)
+    if counter._roi_px is not None and len(counter._roi_px) >= 3:
+        roi_int = [[int(p[0]), int(p[1])] for p in counter._roi_px]
+        overlay = annotated.copy()
+        cv2.fillPoly(overlay, [np.array(roi_int, dtype=np.int32)], (0, 255, 0))
+        cv2.addWeighted(overlay, 0.15, annotated, 0.85, 0, annotated)
+        cv2.polylines(annotated, [np.array(roi_int, dtype=np.int32)], True, (0, 255, 0), 2)
+        cv2.putText(annotated, "ROI", (roi_int[0][0], roi_int[0][1] - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
     colors = {
         "car": (0, 255, 0),
@@ -231,7 +285,7 @@ def process_video(args):
 
     try:
         from app.ai.tracker import ByteTracker
-        tracker = ByteTracker()
+        tracker = ByteTracker(camera_type=args.camera_type)
         print("  [OK] 跟踪模块 (ByteTracker)")
     except Exception as e:
         print(f"  [FAIL] 跟踪模块: {e}")
@@ -245,6 +299,13 @@ def process_video(args):
                          anchor=(anchor_parts[0], anchor_parts[1]))
         if args.count_only:
             counter.count_only = args.count_only
+        if args.roi:
+            roi_parts = [float(x) for x in args.roi.split(",")]
+            if len(roi_parts) % 2 == 0 and len(roi_parts) >= 6:
+                roi_polygon = [[roi_parts[i], roi_parts[i + 1]] for i in range(0, len(roi_parts), 2)]
+                counter.set_roi(roi_polygon)
+            else:
+                print(f"  [WARN] --roi 参数需为偶数个值且至少3个顶点, 已忽略: {args.roi}")
         print("  [OK] 越线计数模块 (LineCrossingCounter)")
     except Exception as e:
         print(f"  [FAIL] 越线计数模块: {e}")
@@ -264,10 +325,16 @@ def process_video(args):
     rules = load_rules()
     prev_alarming: set = set()
 
+    # 视频异常监测器 (黑屏/花屏), --no-anomaly 时禁用
+    anomaly_monitor = None if args.no_anomaly else AnomalyMonitor()
+    if anomaly_monitor is not None:
+        print("  [OK] 视频异常检测 (AnomalyMonitor)")
+
     video_name = Path(video_path).stem
     events_json_path = output_dir / f"{video_name}_events.json"
     stats_csv_path = output_dir / f"{video_name}_statistics.csv"
     alarms_json_path = output_dir / f"{video_name}_alarms.json"
+    anomalies_json_path = output_dir / f"{video_name}_anomalies.json"
     summary_json_path = output_dir / f"{video_name}_summary.json"
 
     if not args.no_annotated:
@@ -283,6 +350,7 @@ def process_video(args):
 
     all_events = []
     all_alarms = []
+    all_anomalies = []
     stats_timeline = []
 
     frame_idx = 0
@@ -307,9 +375,24 @@ def process_video(args):
         video_time_sec = frame_idx / fps
         current_video_time = video_start_time + timedelta(seconds=video_time_sec)
 
+        # 视频异常检测 (黑屏/花屏): 周期采样 + 去抖, 仅状态转移时记录事件
+        if anomaly_monitor is not None:
+            anomaly_ev = anomaly_monitor.check(frame)
+            if anomaly_ev is not None:
+                anomaly_ev.timestamp = current_video_time.isoformat()
+                all_anomalies.append({
+                    "anomaly_type": anomaly_ev.anomaly_type,
+                    "phase": anomaly_ev.phase,
+                    "timestamp": anomaly_ev.timestamp,
+                    "video_second": video_time_sec,
+                    "frame": frame_idx,
+                    "scores": anomaly_ev.scores,
+                })
+                print(f"  [异常] {anomaly_ev.anomaly_type} {anomaly_ev.phase} @ {current_video_time.strftime('%H:%M:%S')}")
+
         track_result = tracker.track(frame)
 
-        events = counter.process_tracks(track_result, camera_id=args.camera_id)
+        events = counter.process_tracks(track_result, camera_id=args.camera_id, current_time=current_video_time.timestamp())
 
         for event in events:
             event.timestamp = current_video_time.isoformat()
@@ -361,7 +444,8 @@ def process_video(args):
 
         if out_writer is not None:
             annotated = draw_annotations(
-                frame, track_result, events, current_stats, counter
+                frame, track_result, events, current_stats, counter,
+                anomaly_state=anomaly_monitor.state if anomaly_monitor is not None else None,
             )
 
             time_str = current_video_time.strftime("%Y-%m-%d %H:%M:%S")
@@ -381,6 +465,7 @@ def process_video(args):
                   f"已处理: {processed_idx}帧 | "
                   f"速度: {speed:.1f}fps | "
                   f"事件: {len(all_events)} | "
+                  f"异常: {len(all_anomalies)} | "
                   f"车辆: {current_stats.current_vehicles} | "
                   f"人员: {current_stats.current_persons}")
             last_progress_time = current_time
@@ -415,6 +500,10 @@ def process_video(args):
             "vehicle_exit": sum(1 for e in all_events if e["event_type"] == "VehicleExit"),
             "person_enter": sum(1 for e in all_events if e["event_type"] == "PersonEnter"),
             "person_exit": sum(1 for e in all_events if e["event_type"] == "PersonExit"),
+            "anomaly_onset": sum(1 for a in all_anomalies if a["phase"] == "onset"),
+            "anomaly_recovery": sum(1 for a in all_anomalies if a["phase"] == "recovery"),
+            "black_screen_events": sum(1 for a in all_anomalies if a["anomaly_type"] == "black_screen"),
+            "flower_screen_events": sum(1 for a in all_anomalies if a["anomaly_type"] == "flower_screen"),
         }
     }
 
@@ -425,6 +514,10 @@ def process_video(args):
     with open(alarms_json_path, "w", encoding="utf-8") as f:
         json.dump(all_alarms, f, ensure_ascii=False, indent=2)
     print(f"告警数据已保存: {alarms_json_path} ({len(all_alarms)}条)")
+
+    with open(anomalies_json_path, "w", encoding="utf-8") as f:
+        json.dump(all_anomalies, f, ensure_ascii=False, indent=2)
+    print(f"异常数据已保存: {anomalies_json_path} ({len(all_anomalies)}条)")
 
     with open(summary_json_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
@@ -450,6 +543,8 @@ def process_video(args):
     print(f"    - 人员进入: {summary['totals']['person_enter']}")
     print(f"    - 人员离开: {summary['totals']['person_exit']}")
     print(f"  告警数量: {len(all_alarms)}条")
+    print(f"  视频异常: {len(all_anomalies)}条 (黑屏 {summary['totals']['black_screen_events']}, "
+          f"花屏 {summary['totals']['flower_screen_events']})")
     if final_stats:
         print(f"  最终在场车辆: {final_stats.current_vehicles}")
         print(f"  最终在场人员: {final_stats.current_persons}")

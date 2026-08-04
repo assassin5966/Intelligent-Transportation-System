@@ -4,6 +4,7 @@
 决定 (当前为 botsort). 支持 car/truck/bus/person 四类细分跟踪, 含轨迹历史与速度.
 """
 from pathlib import Path
+from typing import Optional
 import numpy as np
 from collections import OrderedDict
 from ultralytics import YOLO
@@ -12,6 +13,7 @@ from ..common.config import settings
 from ..common.logger import logger
 
 from . import DETECTION_CLASSES as _DETECTION_CLASSES
+from . import CAMERA_TYPE_CLASSES as _CAMERA_TYPE_CLASSES
 
 # 自定义跟踪配置路径 (文件名沿用 bytetrack, 实际算法由其中 tracker_type 决定)
 _TRACKER_CFG = str(Path(__file__).resolve().parents[2] / "configs" / "bytetrack.yaml")
@@ -36,13 +38,17 @@ class TrackResult:
 
 
 class ByteTracker:
-    def __init__(self):
+    def __init__(self, camera_type: Optional[str] = None):
         self._model = None
         self.track_history = OrderedDict()
         self.max_history_length = settings.track_buffer
-        self._miss_grace = 5  # 连续丢失多少帧后才清除轨迹历史
+        self._miss_grace = 5
         self._miss_count: dict = {}
         self.frame_id = 0
+        self._camera_type = camera_type
+        self._allowed_classes = None
+        if camera_type and camera_type in _CAMERA_TYPE_CLASSES:
+            self._allowed_classes = _CAMERA_TYPE_CLASSES[camera_type]
 
     def _ensure_loaded(self):
         if self._model is None:
@@ -76,6 +82,10 @@ class ByteTracker:
                     continue
                 
                 class_name = _DETECTION_CLASSES[class_id]
+                
+                if self._allowed_classes and class_name not in self._allowed_classes:
+                    continue
+                
                 confidence = box.conf[0].item()
                 
                 bbox = box.xyxy[0].cpu().numpy().tolist()
