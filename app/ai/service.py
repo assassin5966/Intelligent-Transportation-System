@@ -37,7 +37,11 @@ class DeviceRegister(BaseModel):
     stream_url: str
     line: list[list[float]]
     anchor: Optional[list[float]] = None
+    count_only: Optional[str] = None  # None=双向, "enter"=只计Enter, "exit"=只计Exit
+    camera_type: Optional[str] = None  # None=全部检测, "vehicle"=只检测机动车, "person"=只检测人流(含非机动车)
     roi: Optional[list[list[float]]] = None  # ROI 多边形顶点 [[x,y],...], >=3 个, 归一化
+    gb_device_id: Optional[str] = None  # 国标设备ID (WVP 同步设备填写, 启用流地址自动刷新)
+    gb_channel_id: Optional[str] = None  # 国标通道ID (WVP 同步设备填写)
 
 
 @app.get("/health", tags=["system"])
@@ -71,7 +75,16 @@ async def register(dev: DeviceRegister):
         if len(dev.roi) < 3:
             raise HTTPException(400, "roi must have >=3 points [[x,y],...]")
         roi = [(float(p[0]), float(p[1])) for p in dev.roi]
-    p = DevicePipeline(dev.device_id, dev.stream_url, line, anchor, roi)
+    p = DevicePipeline(
+        dev.device_id,
+        dev.stream_url,
+        line,
+        anchor,
+        dev.count_only,
+        dev.camera_type,
+        roi,
+        enable_url_refresh=bool(dev.gb_device_id),
+    )
     p.start()
     _pipelines[dev.device_id] = p
     return {"device_id": dev.device_id, "status": "started"}

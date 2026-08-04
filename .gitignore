@@ -10,7 +10,8 @@ env/
 *.egg-info/
 dist/
 build/
-.trae/
+.trae/*
+!.trae/documents/
 models/
 
 # ---- 测试 / 类型 / 缓存 ----
@@ -52,6 +53,7 @@ Thumbs.db
 # ---- 文档 (开发方案等不入库) ----
 *.docx
 *.doc
+~$*
 
 # ---- 其他 ----
 CLAUDE.md

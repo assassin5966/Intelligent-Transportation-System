@@ -1,4 +1,4 @@
-"""预测数据访问: 从 Redis 读取逐小时历史序列."""
+"""预测数据访问: 从 Redis 读取 N 分钟区间历史序列."""
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -6,29 +6,45 @@ from ..common.config import settings
 from ..common.redis_client import get_redis
 
 
-async def load_history(metric: str, hours: Optional[int] = None) -> list[float]:
-    """读取近 hours 小时的逐小时序列 (供 Chronos 时序预测).
+def _interval_key(dt: datetime) -> str:
+    """N 分钟区间 key (向下取整到区间起点)."""
+    interval = settings.prediction_interval_minutes
+    minute = (dt.minute // interval) * interval
+    interval_start = dt.replace(minute=minute, second=0, microsecond=0)
+    return f"{settings.redis_prefix}:realtime:interval:{interval_start.strftime('%Y%m%d%H%M')}"
 
-    metric: "vehicle" -> 车辆进出总量, "person" -> 人员进出总量.
-    返回按时间升序的每小时总量列表 (空小时补 0, 保持规则采样便于模型识别周期).
+
+async def load_interval_history(
+    series_length: Optional[int] = None,
+) -> tuple[list[float], list[float], list[str]]:
+    """读取近 series_length 个 N 分钟区间的人流/车流序列.
+
+    返回 (person_series, vehicle_series, timestamps), 按时间升序.
+    每个元素为该 N 分钟区间内的进出总量 (in + out).
+    空区间补 0, 保持规则采样.
     """
-    if hours is None:
-        hours = settings.prediction_history_hours
+    interval = settings.prediction_interval_minutes
+    if series_length is None:
+        series_length = settings.prediction_series_length
     redis = get_redis()
     now = datetime.now()
     pipe = redis.pipeline()
-    for h in range(hours):
-        t = now - timedelta(hours=h)
-        key = f"{settings.redis_prefix}:realtime:hourly:{t.strftime('%Y%m%d%H')}"
+    for i in range(series_length):
+        t = now - timedelta(minutes=interval * i)
+        key = _interval_key(t)
         pipe.hgetall(key)
     results = await pipe.execute()
 
-    history: list[float] = []
-    # results[0] = 最近一小时, results[-1] = hours 小时前; 反转为时间升序
-    for data in reversed(results):
-        if metric == "vehicle":
-            total = int(data.get("vehicle_in", 0)) + int(data.get("vehicle_out", 0))
-        else:
-            total = int(data.get("person_in", 0)) + int(data.get("person_out", 0))
-        history.append(float(total))
-    return history
+    person_series: list[float] = []
+    vehicle_series: list[float] = []
+    timestamps: list[str] = []
+    # results[0] = 最近区间, results[-1] = 最早; 反转为时间升序
+    for i, data in enumerate(reversed(results)):
+        person_total = int(data.get("person_in", 0)) + int(data.get("person_out", 0))
+        vehicle_total = int(data.get("vehicle_in", 0)) + int(data.get("vehicle_out", 0))
+        person_series.append(float(person_total))
+        vehicle_series.append(float(vehicle_total))
+        # 计算对应的时间戳
+        t = now - timedelta(minutes=interval * (series_length - 1 - i))
+        timestamps.append(_interval_key(t).split(":")[-1])
+    return person_series, vehicle_series, timestamps

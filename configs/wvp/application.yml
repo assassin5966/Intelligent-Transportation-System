@@ -1,0 +1,74 @@
+# ============================================================
+# WVP-GB28181-pro 配置
+# 关键: media.id / media.secret 必须与 configs/zlm/config.ini 的 mediaServerId / api.secret 一致
+#       media.stream-ip / sdp-ip 默认 zlm (容器内); 真实 IPC 跨网访问需改为宿主机/公网 IP
+# ============================================================
+
+spring:
+  redis:
+    host: redis
+    port: 6379
+    database: 6
+    timeout: 10000
+  datasource:
+    type: com.zaxxer.hikari.HikariDataSource
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://mysql:3306/wvp?useUnicode=true&characterEncoding=UTF8&serverTimezone=PRC&useSSL=false&allowMultiQueries=true&rewriteBatchedStatements=true
+    username: root
+    password: ${WVP_MYSQL_PASSWORD:wvp123456}
+    hikari:
+      connection-timeout: 20000
+      maximum-pool-size: 50
+      minimum-idle: 5
+      idle-timeout: 300000
+      max-lifetime: 1200000
+  mvc:
+    async:
+      request-timeout: 20000
+
+# 作为 28181 信令服务器
+sip:
+  ip: 0.0.0.0
+  port: 5060
+  # 国标域 (前 10 位); 3402000000 为示例
+  domain: 3402000000
+  # 本平台 SIP ID (20 位)
+  id: 34020000002000000001
+  # IPC 认证密码 (IPC 侧需配置相同)
+  password: 12345678
+  alarm: true
+
+# ZLM 流媒体服务器
+media:
+  id: smart_city_zlm
+  ip: zlm
+  http-port: 80
+  # hook 回调地址 (ZLM -> WVP), 用 WVP 容器名
+  hook-ip: wvp
+  # 返回给前端的流地址 IP (容器内 zlm; 跨网部署改为宿主机/公网 IP)
+  stream-ip: zlm
+  # SDP 协商 IP (IPC 推 RTP 目标; 跨网部署改为 IPC 可达的 IP)
+  sdp-ip: zlm
+  secret: 035c73f7-bb6b-4889-a715-d9eb2d1925cc
+  rtp:
+    enable: true
+    port-range: 30000-30500
+
+user-settings:
+  # 点播自动应用 (无需手动触发)
+  auto-apply-play: true
+  # 关闭按需推流: AI 持续拉即持续推, 避免 ZLM 无人观看就断流
+  stream-on-demand: false
+  # 推流/播放等待超时 (秒)
+  play-timeout: 18000
+  wait-track-ready-time: 3000
+  # 是否记录播放日志
+  record-sip: true
+
+server:
+  port: 18080
+
+logging:
+  level:
+    root: INFO
+    com.genersoft.iot: INFO

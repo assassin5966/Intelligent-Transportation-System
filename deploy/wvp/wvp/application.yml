@@ -40,7 +40,7 @@ media:
     id: ${MEDIA_ID:FQ3TF8yT83wh5Wvz}
     ip: ${ZLM_HOST:127.0.0.1}
     http-port: ${ZLM_PORT:80}
-    secret: 2gsBhsuK5Jz1eI00YoXHXR0LTlyGikoA
+    secret: ${ZLM_SECRET:035c73f7-bb6b-4889-a715-d9eb2d1925cc}    # ZLM的api.secret (ZLM重启会变, 用环境变量ZLM_SECRET覆盖)
     rtp:
         enable: true
         port-range: 30000,30500

@@ -26,8 +26,10 @@ class Settings(BaseSettings):
 
     # ---- 时序预测 ----
     chronos_model: str = "models"  # 本地 Chronos-2 模型目录
-    prediction_horizon: int = 60
-    prediction_history_hours: int = 168
+    prediction_interval_minutes: int = 15  # N 分钟预测间隔
+    prediction_series_length: int = 30  # 历史序列长度 (30 个 N 分钟区间)
+    vehicle_person_min: int = 2  # 每车最少人数 (车流转人流)
+    vehicle_person_max: int = 5  # 每车最多人数 (车流转人流)
 
     # ---- 告警 ----
     rules_file: str = "configs/rules.yaml"
@@ -35,8 +37,37 @@ class Settings(BaseSettings):
     # ---- Redis 实时状态 key 前缀 ----
     redis_prefix: str = "sc"
 
+    # ---- 警力分配 ----
+    police_demand_weight_current: float = 0.3  # 需求计算: 当前人数权重 α
+    police_demand_weight_predict: float = 0.7  # 需求计算: 预测人数权重 β
+    police_movement_ratio: float = 0.5  # 每轮最大移动比例 (占总警力)
+    police_min_per_region: int = 1  # 每区域最少警力
+
+    # ---- 视频异常检测 ----
+    anomaly_check_interval: int = 30  # 每 N 帧检测一次 (≈1s@30fps)
+    anomaly_confirm_frames: int = 2  # 连续确认帧数 (去抖, 避免单帧误报)
+    anomaly_cooldown_seconds: int = 60  # 同设备同异常告警冷却 (后端去重, 秒)
+    anomaly_analysis_width: int = 480  # 分析帧宽度 (等比缩放, 阈值稳定)
+    black_screen_brightness: int = 20  # 灰度均值 < 此值 (黑屏条件1)
+    black_screen_ratio: float = 0.95  # 近黑像素占比 > 此值 (黑屏条件2)
+    black_pixel_value: int = 20  # 近黑像素亮度上限
+    flower_block_grid: int = 8  # 花屏分析块网格 (NxN)
+    flower_noise_std: float = 35.0  # 块均标准差 > 此值 (花屏: 高噪)
+    flower_uniformity: float = 0.6  # 噪声均匀度 1-CV > 此值 (花屏: 均匀)
+    flower_channel_corr: float = 0.5  # 通道相关性 < 此值 (花屏: 去相关)
+    flower_temporal_diff: float = 25.0  # 时域差分 > 此值 (花屏: 时域高噪, 有前帧时)
+
     # ---- 安全 ----
     cors_origins: str = "*"  # 允许的跨域来源, 逗号分隔; 生产环境应配置具体前端域名
+
+    # ---- WVP-GB28181 对接 ----
+    wvp_enabled: bool = False  # 总开关; False 时跳过自动同步与流地址刷新
+    wvp_api_url: str = "http://wvp:18080"  # WVP 管理后台地址 (REST API)
+    wvp_username: str = "admin"
+    wvp_password: str = "admin"
+    wvp_sync_interval: int = 30  # 设备轮询同步间隔 (秒)
+    wvp_play_protocol: str = "flv"  # AI 拉流协议: flv | rtsp
+    wvp_stream_sub: bool = True  # 拉子码流降低推理压力 (False=主码流)
 
 
 settings = Settings()
