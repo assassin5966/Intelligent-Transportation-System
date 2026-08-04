@@ -31,6 +31,91 @@ IPC 摄像头 (GB28181/H.264)
 - **业务后端**：实时统计、规则告警、REST API、时序预测、警力分配，并作为 WVP 唯一对接点（设备同步、点播、流地址刷新）。
 - **时序预测**：接入 Chronos-2 本地模型，基于 N 分钟区间历史总人数序列预测未来 N 分钟总人数。
 
+## 程序流程
+
+### 后端启动（main.py lifespan）
+
+后端启动时按顺序拉起 4 个后台调度器，任一失败不影响其余：
+
+| 调度器 | 频率 | 作用 |
+|--------|------|------|
+| 时序预测 | 15 分钟 | 读 hourly 序列 → Chronos 预测 → 缓存 Redis（模型缺失降级线性外推）|
+| 离线检测 | 30 秒 | 检查 AI 心跳，90s 无心跳标记设备离线 |
+| 警力分配 | 15 分钟 | 按区域人流/车流估算需求 → 比例分配警力 → 输出 allocation 计划 |
+| WVP 同步 | 30 秒 | `WVP_ENABLED=true` 时同步 WVP 设备/通道，启停 AI 管道 |
+
+### 端到端数据流
+
+```
+GB28181 摄像头 --SIP注册--> WVP + ZLMediaKit
+                                │ 后端每30s同步设备/通道
+                                ▼
+业务后端(8000) ── /api/devices/{id}/stream ──▶ AI 拉流(FLV)
+  ▲                                              │
+  │ ④ 越线事件 POST /api/events                  │ ⑤ 异常事件 POST /api/alerts/anomaly
+  │    心跳   POST /api/devices/{id}/heartbeat   │    轨迹   WebSocket /ws 实时推送
+  │                                              ▼
+  └── apply_event 写Redis ◀── 实时统计/日/小时聚合
+       + alerts.evaluate(告警评估, 5分钟去重)
+       + WebSocket /ws 推送前端大屏
+```
+
+### AI 管道（DevicePipeline._run）
+
+每路摄像头的处理流水线：
+
+1. **拉流** `stream_frames(url, url_provider)` — 支持 WVP FLV 地址刷新回调
+2. **首帧** `counter.set_frame_size()` — 重算 ROI 像素坐标 + 计数线裁剪区间
+3. **异常检测** `AnomalyMonitor.check(frame)` — 黑屏/花屏，状态转移(onset/recovery)时上报
+4. **检测跟踪** `tracker.track(frame)` — YOLO11 + BoT-SORT（`asyncio.to_thread` 不阻塞事件循环）
+5. **越线计数** `counter.process_tracks()` — ROI 过滤 + 计数线裁剪 + 双向计数 + 防抖链
+6. **事件输出** 越线事件 → POST `/api/events` + WebSocket；异常事件 → POST `/api/alerts/anomaly` + WebSocket
+7. **心跳** 每 30s POST `/api/devices/{id}/heartbeat`（供离线检测）
+
+### 越线计数（counter.py）
+
+单计数线 + 内侧锚点方案，Enter/Exit 为绝对语义（与线绘制方向无关）：
+
+- **ROI 过滤**：轨迹中心点不在多边形内 → 跳过（减算力、过滤画面边缘干扰）
+- **计数线裁剪**：ROI 启用时自动裁剪线段到 ROI 内，ROI 外线段不触发计数
+- **双向计数**：同一轨迹来回跨线独立计数（不因单向去重漏计反向跨线）
+- **防抖链**：跨线检测(offset异号) → 夹角过滤 → 投影落在线段内 → 远离线 → 端点过滤 → 滞留确认(3帧) → 方向判定 → ID 切换检测 → 去重(TTL 3600s)
+
+### 断流重连（stream.py）
+
+```
+读流失败
+  ├─ 第1级: 当前 url 重连 (tenacity 5次指数退避 2-30s)
+  ├─ 第2级: url_provider 回调后端 /api/devices/{id}/stream (WVP 重新 play/start)
+  │         刷新冷却 10s 防频繁打 WVP
+  └─ 新地址重连 → 成功继续 / 失败放弃
+```
+
+### WVP 同步（wvp_sync.py，每 30s）
+
+`WVP_ENABLED=true` 时，后端作为 WVP 唯一对接点：
+
+- 拉取 WVP 设备/通道 → 与 Redis 按 `gb_device_id + gb_channel_id` 比对
+- **新通道**：入表（status=synced），不启流（缺计数线，等用户 `POST /enable` 配置）
+- **已配置 + WVP 在线**：AI 管道未运行 → 重新启流
+- **WVP 离线**：停 AI 管道，标记 offline
+- **WVP 恢复**：重新启流
+- 启发式推断 camera_type（名含"车"→vehicle，"人"→person）
+
+### 事件处理（events.py → realtime.py → alerts.py）
+
+```
+POST /api/events {device_id, event_type, occurred_at}
+  ├─ apply_event() 写 Redis:
+  │    ├─ sc:realtime:current            当前车辆/人员数（负值钳位）
+  │    ├─ sc:realtime:daily:YYYYMMDD      当日累计（90天TTL）
+  │    └─ sc:realtime:hourly:YYYYMMDDHH   小时聚合（8天TTL，供预测读取）
+  └─ BackgroundTask: alerts.evaluate()
+       ├─ rules.yaml 热加载（按 mtime，改规则无需重启）
+       ├─ 评估指标 vs 阈值
+       └─ 触发告警（SET NX EX 300 去重）→ sc:alerts（保留最近1000条）
+```
+
 ## 技术栈
 
 | 层 | 技术 |
@@ -48,16 +133,25 @@ IPC 摄像头 (GB28181/H.264)
 ├── app/
 │   ├── common/        # 配置·日志·Redis (基础层)
 │   ├── schemas/       # 事件/统计 Pydantic 契约
-│   ├── ai/            # YOLO11 检测·ByteTrack 跟踪·越线计数·RTSP 拉流·管道·服务入口
-│   ├── backend/       # FastAPI: 事件接收·实时统计·告警·趋势·设备·小时聚合
+│   ├── ai/            # YOLO11检测·BoT-SORT跟踪·越线计数(ROI+双向)·异常识别·拉流·管道·服务入口
+│   ├── backend/       # FastAPI: 事件·统计·告警·设备·警力·WebSocket·WVP同步·离线检测
 │   └── prediction/    # Chronos 时序预测·路由·定时调度
-├── configs/rules.yaml # 告警规则 (车辆>300红警 / 游客>10000饱和)
-├── scripts/
-│   ├── run_video_processor.sh  # 离线视频处理 (Docker 一键运行)
-│   └── smoke_test.sh           # 冒烟测试
-├── tool/              # 离线视频处理器 (独立组件)
+├── configs/
+│   ├── rules.yaml     # 告警规则 (车辆>300红警 / 游客>10000饱和)
+│   ├── bytetrack.yaml # BoT-SORT 跟踪配置
+│   ├── wvp/           # WVP 信令平台配置 (application.yml)
+│   └── zlm/           # ZLMediaKit 流媒体配置 (config.ini)
+├── deploy/wvp/        # WVP arm64 自建镜像部署 (gitee源码maven编译)
+│   ├── wvp/Dockerfile # WVP 2.7.4 多阶段构建镜像
+│   ├── wvp/application.yml
+│   ├── zlmediakit/config.ini
+│   └── mysql/init.sql # WVP 数据库初始化 SQL
+├── scripts/           # 离线处理·冒烟测试·异常视频生成
+├── tool/              # 离线视频处理器 (独立组件, 不依赖 Redis)
+├── tests/             # WVP客户端·异常识别 单元测试
 ├── Dockerfile         # 统一镜像 (AI + 后端)
-├── docker-compose.yml # 编排: ai + backend + redis + ai-processor
+├── docker-compose.yml # 主编排: ai + backend + redis (+ wvp/zlm/mysql 可选)
+├── docker-compose.wvp.yml # WVP 信令平台独立编排 (arm64 自建镜像, host网络)
 ├── requirements.txt
 └── .env.example
 ```
@@ -188,10 +282,20 @@ docker compose -p smartcity up -d --build
 | GET | `/api/stats/realtime` | 实时统计（当前车辆/人员、今日累计、活跃设备）|
 | GET | `/api/alerts?limit=100` | 告警列表（Redis 保留最近 1000 条）|
 | POST | `/api/alerts/anomaly` | 视频异常上报（AI→后端，黑屏/花屏 onset/recovery）|
-| GET/POST/DELETE | `/api/devices` | 设备管理（含越线计数线配置）|
-| GET | `/api/prediction/health` | 预测服务健康 |
-| POST | `/api/prediction/predict` | 时序预测（总人数，无需参数） |
+| GET/POST/DELETE | `/api/devices` | 设备管理（含计数线/anchor/ROI 配置）|
+| POST | `/api/devices/sync` | 手动触发 WVP 设备同步 |
+| POST | `/api/devices/{id}/enable` | 配置计数线/ROI 并启动 AI 管道 |
+| POST | `/api/devices/{id}/heartbeat` | AI 心跳上报（供离线检测，90s 超时标离线）|
+| GET | `/api/devices/{id}/stream` | 获取/刷新 FLV 流地址（WVP play/start，AI 断流刷新用）|
+| POST | `/api/devices/wvp-webhook` | WVP 设备上下线 webhook 回调 |
+| GET/POST/DELETE | `/api/police/regions` | 警力区域管理 |
+| GET | `/api/police/allocation` | 当前警力分配结果 |
+| POST | `/api/police/optimize` | 触发警力优化分配 |
+| GET | `/api/police/plan` | 警力调度计划 |
+| GET | `/api/prediction/health` | 预测服务健康（含降级状态）|
+| POST | `/api/prediction/predict` | 时序预测（总人数）|
 | GET | `/api/prediction/latest` | 最近一次定时预测缓存 |
+| WS | `/ws` | WebSocket 实时推送（tracks / crossing_event / video_anomaly）|
 
 ### AI 分析服务（端口 8001）
 
@@ -214,6 +318,12 @@ docker compose -p smartcity up -d --build
 | `PREDICTION_HORIZON` | `60` | 预测步长（小时）|
 | `PREDICTION_HISTORY_HOURS` | `168` | 预测历史窗口（小时）|
 | `RULES_FILE` | `configs/rules.yaml` | 告警规则文件 |
+| `WVP_ENABLED` | `false` | 启用 WVP 自动同步（false 时设备靠手填 stream_url）|
+| `WVP_API_URL` | `http://wvp:18080` | WVP REST API 地址 |
+| `WVP_USERNAME` | `admin` | WVP 管理账号 |
+| `WVP_PASSWORD` | `admin` | WVP 管理密码 |
+| `WVP_SYNC_INTERVAL` | `30` | WVP 设备同步间隔（秒）|
+| `WVP_PLAY_PROTOCOL` | `flv` | 点播流协议（flv/rtsp）|
 
 ## 开发指南
 
