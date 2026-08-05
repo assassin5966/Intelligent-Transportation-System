@@ -56,7 +56,6 @@ COPY app /app/app
 COPY configs /app/configs
 COPY scripts /app/scripts
 COPY tool /app/tool
-COPY models /app/models
 
 # ---------- 4. 环境配置 ----------
 ENV TZ=Asia/Shanghai \
@@ -65,8 +64,8 @@ ENV TZ=Asia/Shanghai \
     LANG=C.UTF-8
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
-# 校验 YOLO11 权重可加载 (models/yolo11n.pt 已随 COPY 进入镜像).
-# 文件缺失时联网下载, 下载失败则构建中断, 避免静默产出无权重镜像.
+# 校验 YOLO11 权重可加载 (models/yolo11n.pt).
+# models/ 被 gitignore 且不入构建上下文, 此处联网下载; 下载失败则构建中断, 避免静默产出无权重镜像.
 RUN python -c "from ultralytics import YOLO; YOLO('models/yolo11n.pt')"
 
 # ---------- 5. 端口 ----------

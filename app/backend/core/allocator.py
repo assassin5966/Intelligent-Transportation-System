@@ -80,7 +80,8 @@ def _compute_targets(
             targets[sorted_ids[i]] = 1
         return targets
 
-    base = min_per_region
+    # 钳制 base: 确保 m * base <= total_officers, 避免 remaining<0 时取整修正死循环
+    base = min(min_per_region, total_officers // m)
     remaining = total_officers - m * base
     total_demand = sum(demands.values())
 

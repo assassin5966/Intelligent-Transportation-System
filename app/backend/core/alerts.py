@@ -55,19 +55,21 @@ def load_rules(path: Optional[str] = None) -> list[dict]:
 
 
 _predict_rules_cache: Optional[list[dict]] = None
+_predict_rules_mtime: Optional[float] = None
 
 
 def load_predict_rules(path: Optional[str] = None) -> list[dict]:
-    """加载预测告警规则 (带缓存, 与 load_rules 共享 mtime)."""
-    global _predict_rules_cache
+    """加载预测告警规则 (带缓存, 文件修改后自动重载, 无需重启)."""
+    global _predict_rules_cache, _predict_rules_mtime
     p = Path(path or settings.rules_file)
     try:
         mtime = p.stat().st_mtime
     except OSError:
         mtime = None
-    if _predict_rules_cache is None or (mtime is not None and _rules_mtime != mtime):
+    if _predict_rules_cache is None or (mtime is not None and _predict_rules_mtime != mtime):
         data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
         _predict_rules_cache = data.get("predict_rules", [])
+        _predict_rules_mtime = mtime
     return _predict_rules_cache
 
 

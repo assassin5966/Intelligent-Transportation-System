@@ -419,14 +419,8 @@ def process_video(args):
                         print(f"  [告警] [{a['level']}] {a['message']}")
                 prev_alarming = current_alarming
         else:
-            current_stats = Statistics(
-                current_vehicles=0, current_persons=0,
-                today_vehicle_enter=0, today_vehicle_exit=0,
-                today_person_enter=0, today_person_exit=0,
-                vehicle_flow_in=0, vehicle_flow_out=0,
-                person_flow_in=0, person_flow_out=0,
-                timestamp=current_video_time.isoformat()
-            )
+            current_stats = Statistics()
+            current_stats.timestamp = current_video_time.isoformat()
 
         for event in events:
             event_dict = {

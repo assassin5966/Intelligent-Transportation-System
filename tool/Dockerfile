@@ -26,7 +26,6 @@ RUN ARCH=$(dpkg --print-architecture) && \
 
 COPY app /app/app
 COPY tool /app/tool
-COPY models /app/models
 
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
