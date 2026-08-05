@@ -1,0 +1,64 @@
+# ============================================================
+# WVP-GB28181-pro 配置 - 上级平台 (upper)
+# 关键: media.id / media.secret 必须与 config.ini 的 mediaServerId / api.secret 一致
+# ⚠️ 必改: media.stream-ip / media.sdp-ip -> 本机网卡 IP (容器外 IPC / 前端需访问)
+# ============================================================
+
+spring:
+  redis:
+    host: redis
+    port: 6379
+    database: 6
+    timeout: 10000
+  datasource:
+    type: com.zaxxer.hikari.HikariDataSource
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://mysql:3306/wvp?useUnicode=true&characterEncoding=UTF8&serverTimezone=Asia/Shanghai&useSSL=false&allowMultiQueries=true&rewriteBatchedStatements=true
+    username: wvp
+    password: Wvp@123456
+    hikari:
+      connection-timeout: 20000
+      maximum-pool-size: 50
+      minimum-idle: 5
+      idle-timeout: 300000
+      max-lifetime: 1200000
+  mvc:
+    async:
+      request-timeout: 20000
+
+# 作为 28181 信令服务器
+sip:
+  ip: 0.0.0.0
+  port: 5060
+  domain: 1401000099
+  id: 14010000991187000002
+  password: Gb@202608
+  alarm: true
+
+# ZLM 流媒体服务器
+media:
+  id: zlm-upper-02
+  ip: zlm
+  http-port: 80
+  hook-ip: wvp
+  stream-ip: 192.168.1.200   # ⚠️ 改为本机网卡 IP (前端拉流地址用)
+  sdp-ip: 192.168.1.200      # ⚠️ 改为本机网卡 IP (IPC 推 RTP 目标地址)
+  secret: zlm_upper_secret_2026
+  rtp:
+    enable: true
+    port-range: 30000-30500
+
+user-settings:
+  auto-apply-play: true
+  stream-on-demand: false
+  play-timeout: 18000
+  wait-track-ready-time: 3000
+  record-sip: true
+
+server:
+  port: 18080
+
+logging:
+  level:
+    root: INFO
+    com.genersoft.iot: INFO

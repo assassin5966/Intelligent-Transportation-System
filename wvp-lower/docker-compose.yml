@@ -1,0 +1,78 @@
+# ============================================================
+# 下级平台 (lower): 接入摄像头, 经 GB28181 级联向上级共享通道
+#
+# 部署:  cd wvp-lower && docker compose up -d
+# 后台:  http://服务器IP:18080  (默认 admin/admin)
+# 级联:  后台【国标级联】->【添加上级平台】, 填上级 SIP ID + 勾选共享通道
+#
+# ⚠️ 必改: application.yml 中 media.stream-ip / media.sdp-ip -> 本机网卡 IP
+# ⚠️ 上下级 sip.password 必须一致
+# ⚠️ 防火墙放行: 5060 UDP+TCP, 30000-30500 UDP, 80 TCP
+# ⚠️ 与 wvp-upper 端口相同, 须部署到不同服务器
+# ============================================================
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: wvp-lower-mysql
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: Root@123456
+      MYSQL_DATABASE: wvp
+      MYSQL_USER: wvp
+      MYSQL_PASSWORD: Wvp@123456
+      TZ: Asia/Shanghai
+    volumes:
+      - mysql_data:/var/lib/mysql
+    command:
+      --character-set-server=utf8mb4
+      --collation-server=utf8mb4_unicode_ci
+    # ports:
+    #   - "3306:3306"  # 调试时取消注释
+
+  redis:
+    image: redis:7-alpine
+    container_name: wvp-lower-redis
+    restart: always
+    volumes:
+      - redis_data:/data
+    # ports:
+    #   - "6379:6379"  # 调试时取消注释
+
+  zlm:
+    image: zlmediakit/zlmediakit:master
+    container_name: wvp-lower-zlm
+    restart: always
+    volumes:
+      - ./config.ini:/opt/media/conf/config.ini
+      - zlm_record:/opt/media/bin/www/record
+    ports:
+      - "80:80"                            # HTTP-FLV / HLS (前端预览 + AI 拉流)
+      - "1935:1935"                        # RTMP
+      - "554:554"                          # RTSP
+      - "30000-30500:30000-30500/udp"      # RTP 收包端口段 (需与 config.ini [rtp] port_range 一致)
+    environment:
+      - TZ=Asia/Shanghai
+
+  wvp:
+    image: 648540858/wvp_pro:latest
+    container_name: wvp-lower-wvp
+    restart: always
+    depends_on:
+      - mysql
+      - redis
+      - zlm
+    ports:
+      - "18080:18080"    # WVP 管理后台 + REST API
+      - "5060:5060/udp"  # SIP UDP (IPC 注册)
+      - "5060:5060/tcp"  # SIP TCP
+    environment:
+      - SPRING_CONFIG_LOCATION=/app/application.yml
+      - TZ=Asia/Shanghai
+    volumes:
+      - ./application.yml:/app/application.yml
+
+volumes:
+  mysql_data:
+  redis_data:
+  zlm_record:
