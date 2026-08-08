@@ -1,7 +1,7 @@
 # 前端对接 API 文档
 
 > 智慧交管拥堵治理预警监控平台
-> 版本: 0.3.0 · 更新日期: 2026-08-08
+> 版本: 0.4.0 · 更新日期: 2026-08-09
 
 ---
 
@@ -32,6 +32,16 @@
 | AI 分析服务 (ai) | `8001` | 视频拉流、检测跟踪、越线计数、视频异常识别、WebSocket 推送 | ⚠️ 仅 WebSocket |
 
 > **建议**：前端 REST 请求全部发往后端 `8000`；实时画面/事件流连接 AI 服务 `8001` 的 WebSocket；统计/告警/预测/警力方案订阅后端 `8000` 的 WebSocket。
+
+### 运维工具
+
+后端提供静态文件服务，前端可直接访问内置的运维工具页面（设备计数线配置）：
+
+```
+http://<backend-host>:8000/static/device-config.html
+```
+
+该页面用于 WVP 同步设备的计数线配置：同步设备 → 截帧 → 画计数线和锚点 → 启流计数。详见 §3.4 / §3.8 / §3.6。
 
 ### 健康检查
 
@@ -1189,8 +1199,8 @@ ws.onclose = () => setTimeout(connectBackendWs, 3000); // 自动重连
 
 | 服务 | 端口 | 关键路径 |
 |------|------|---------|
-| 业务后端 | 8000 | `/health`, `/api/devices`, `/api/stats/*`, `/api/alerts`, `/api/alerts/anomaly`, `/api/prediction/*`, `/api/police/*`, `/api/events`, `/ws` |
+| 业务后端 | 8000 | `/health`, `/api/devices`, `/api/stats/*`, `/api/alerts`, `/api/alerts/anomaly`, `/api/prediction/*`, `/api/police/*`, `/api/events`, `/ws`, `/static/*` |
 | AI 分析服务 | 8001 | `/health`, `/devices`, `/ws` |
-| Redis | 6379 | 内部使用，前端无需访问 |
+| Redis | 16379 (宿主) | 内部使用，前端无需访问 |
 
 > 配置可通过环境变量覆盖，详见 `app/common/config.py`。关键变量：`BACKEND_PORT`、`AI_PORT`、`CORS_ORIGINS`、`REDIS_URL`。
