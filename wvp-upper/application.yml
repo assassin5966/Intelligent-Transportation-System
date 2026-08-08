@@ -30,8 +30,8 @@ spring:
 sip:
   ip: 0.0.0.0
   port: 5060
-  domain: 1401000099
-  id: 14010000991187000002
+  domain: 1402001402
+  id: 14020014021300000001
   password: Gb@202608
   alarm: true
 

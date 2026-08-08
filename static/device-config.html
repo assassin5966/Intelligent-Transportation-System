@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>设备计数配置 - 运维工具</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: system-ui, sans-serif; background: #1a1a2e; color: #e0e0e0; padding: 20px; }
+  h1 { font-size: 18px; margin-bottom: 16px; color: #8be9fd; }
+  .row { display: flex; gap: 12px; margin-bottom: 16px; align-items: center; flex-wrap: wrap; }
+  input, select, button {
+    padding: 6px 12px; border: 1px solid #444; border-radius: 4px;
+    background: #2a2a4e; color: #e0e0e0; font-size: 14px;
+  }
+  button { cursor: pointer; background: #0d7377; border: none; }
+  button:hover { background: #14a085; }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  button.danger { background: #c0392b; }
+  button.danger:hover { background: #e74c3c; }
+  #deviceList { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
+  .dev-btn { background: #2a2a4e; }
+  .dev-btn.active { background: #0d7377; }
+  .dev-btn.synced { border-color: #f39c12; }
+  .dev-btn.online { border-color: #27ae60; }
+  #canvasWrap { position: relative; display: inline-block; max-width: 100%; }
+  canvas { display: block; max-width: 100%; border: 1px solid #444; background: #000; }
+  #status { margin-top: 12px; font-size: 13px; color: #aaa; min-height: 20px; }
+  .hint { font-size: 12px; color: #888; margin-top: 8px; line-height: 1.6; }
+  .coords { font-size: 13px; color: #8be9fd; margin-top: 8px; font-family: monospace; }
+  .error { color: #e74c3c; }
+  .ok { color: #27ae60; }
+  label { font-size: 13px; color: #aaa; }
+</style>
+</head>
+<body>
+
+<h1>设备计数配置工具</h1>
+
+<div class="row">
+  <label>后端地址</label>
+  <input id="baseUrl" value="http://localhost:8000" style="width:240px">
+  <button onclick="doSync()">同步设备</button>
+  <button onclick="loadDevices()">刷新列表</button>
+</div>
+
+<div id="deviceList"></div>
+
+<div class="row">
+  <label>类型</label>
+  <select id="cameraType">
+    <option value="">全部检测</option>
+    <option value="vehicle">只检车</option>
+    <option value="person">只检人</option>
+  </select>
+  <label>方向</label>
+  <select id="countOnly">
+    <option value="">双向计数</option>
+    <option value="enter">只计进入</option>
+    <option value="exit">只计离开</option>
+  </select>
+  <button id="enableBtn" disabled onclick="doEnable()">启流计数</button>
+  <button id="clearBtn" disabled onclick="clearCanvas()">清除画线</button>
+</div>
+
+<div id="canvasWrap">
+  <canvas id="canvas" width="960" height="540"></canvas>
+</div>
+
+<div id="status"></div>
+<div class="coords" id="coords"></div>
+
+<div class="hint">
+  操作：① 选择设备 -> 自动截帧 ② 在画面上点击两个点画计数线 ③ 再点一个点作为锚点（锚点所在侧=内侧=Enter方向）<br>
+  画完后点「启流计数」提交配置并启动 AI 推理管道。
+</div>
+
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const statusEl = document.getElementById('status');
+const coordsEl = document.getElementById('coords');
+
+let baseUrl = '';
+let currentDevice = null;
+let img = null;
+let clicks = []; // [{x, y}] 前两个=线端点, 第三个=锚点
+
+function api(path, options = {}) {
+  return fetch(baseUrl + path, options).then(async r => {
+    if (r.ok && r.headers.get('content-type')?.includes('image/')) return r;
+    const text = await r.text();
+    let body;
+    try { body = JSON.parse(text); } catch { body = text; }
+    if (!r.ok) throw new Error(typeof body === 'string' ? body : body.detail || r.statusText);
+    return { ok: true, json: body };
+  });
+}
+
+function setStatus(msg, cls = '') {
+  statusEl.textContent = msg;
+  statusEl.className = cls;
+}
+
+async function doSync() {
+  baseUrl = document.getElementById('baseUrl').value;
+  setStatus('正在同步设备...');
+  try {
+    const res = await api('/api/devices/sync', { method: 'POST' });
+    setStatus(`同步完成: 新增 ${res.json.added}, 启动 ${res.json.started}, 停止 ${res.json.stopped}, 恢复 ${res.json.recovered}`, 'ok');
+    await loadDevices();
+  } catch (e) { setStatus('同步失败: ' + e.message, 'error'); }
+}
+
+async function loadDevices() {
+  baseUrl = document.getElementById('baseUrl').value;
+  setStatus('加载设备列表...');
+  try {
+    const res = await api('/api/devices');
+    const devices = res.json;
+    const list = document.getElementById('deviceList');
+    list.innerHTML = '';
+    if (!devices.length) { setStatus('暂无设备'); return; }
+    devices.forEach(d => {
+      const btn = document.createElement('button');
+      btn.className = 'dev-btn ' + (d.status || '');
+      btn.textContent = `${d.id} [${d.status || '?'}]`;
+      if (d.status === 'synced' || d.status === 'online') {
+        btn.onclick = () => selectDevice(d);
+      } else {
+        btn.disabled = true;
+      }
+      list.appendChild(btn);
+    });
+    setStatus(`共 ${devices.length} 台设备，点击 synced/online 设备进行配置`);
+  } catch (e) { setStatus('加载失败: ' + e.message, 'error'); }
+}
+
+async function selectDevice(d) {
+  currentDevice = d;
+  document.querySelectorAll('.dev-btn').forEach(b => b.classList.remove('active'));
+  event.target.classList.add('active');
+  clicks = [];
+  coordsEl.textContent = '';
+  document.getElementById('enableBtn').disabled = true;
+  document.getElementById('clearBtn').disabled = true;
+
+  setStatus(`正在截取 ${d.id} 画面... (约3-8秒)`);
+  try {
+    const res = await api(`/api/devices/${d.id}/snapshot`);
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    img = new Image();
+    img.onload = () => {
+      canvas.width = img.naturalWidth;
+      canvas.height = img.naturalHeight;
+      redraw();
+      setStatus(`截帧成功 ${img.naturalWidth}x${img.naturalHeight}，请点击画面画线`, 'ok');
+      document.getElementById('clearBtn').disabled = false;
+    };
+    img.src = url;
+  } catch (e) { setStatus('截帧失败: ' + e.message + ' (设备可能离线)', 'error'); }
+}
+
+canvas.addEventListener('click', (e) => {
+  if (!img) return;
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height / rect.height;
+  const x = (e.clientX - rect.left) * scaleX;
+  const y = (e.clientY - rect.top) * scaleY;
+
+  if (clicks.length >= 3) clicks = []; // 重新开始
+
+  clicks.push({ x, y });
+  redraw();
+
+  if (clicks.length === 2) {
+    coordsEl.textContent = `计数线: (${(clicks[0].x/canvas.width).toFixed(3)},${(clicks[0].y/canvas.height).toFixed(3)}) -> (${(clicks[1].x/canvas.width).toFixed(3)},${(clicks[1].y/canvas.height).toFixed(3)})  请再点一个锚点`;
+  } else if (clicks.length === 3) {
+    const line = `${(clicks[0].x/canvas.width).toFixed(4)},${(clicks[0].y/canvas.height).toFixed(4)},${(clicks[1].x/canvas.width).toFixed(4)},${(clicks[1].y/canvas.height).toFixed(4)}`;
+    const anchor = `${(clicks[2].x/canvas.width).toFixed(4)},${(clicks[2].y/canvas.height).toFixed(4)}`;
+    coordsEl.textContent = `计数线: ${line}\n锚点: ${anchor}`;
+    document.getElementById('enableBtn').disabled = false;
+    setStatus('配置就绪，点「启流计数」提交', 'ok');
+  } else {
+    coordsEl.textContent = `点 ${clicks.length}/3: (${(x/canvas.width).toFixed(3)}, ${(y/canvas.height).toFixed(3)})`;
+  }
+});
+
+function redraw() {
+  if (!img) return;
+  ctx.drawImage(img, 0, 0);
+  if (clicks.length >= 1) {
+    // 画已点击的点
+    clicks.forEach((c, i) => {
+      ctx.beginPath();
+      ctx.arc(c.x, c.y, 6, 0, Math.PI * 2);
+      ctx.fillStyle = i < 2 ? '#00ff00' : '#ff0000';
+      ctx.fill();
+    });
+    // 画线
+    if (clicks.length >= 2) {
+      ctx.beginPath();
+      ctx.moveTo(clicks[0].x, clicks[0].y);
+      ctx.lineTo(clicks[1].x, clicks[1].y);
+      ctx.strokeStyle = '#00ff00';
+      ctx.lineWidth = 3;
+      ctx.stroke();
+    }
+    // 锚点连线（虚线）
+    if (clicks.length >= 3) {
+      ctx.beginPath();
+      const midX = (clicks[0].x + clicks[1].x) / 2;
+      const midY = (clicks[0].y + clicks[1].y) / 2;
+      ctx.moveTo(midX, midY);
+      ctx.lineTo(clicks[2].x, clicks[2].y);
+      ctx.strokeStyle = '#ff0000';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([8, 4]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }
+}
+
+function clearCanvas() {
+  clicks = [];
+  coordsEl.textContent = '';
+  document.getElementById('enableBtn').disabled = true;
+  redraw();
+  setStatus('已清除，请重新画线');
+}
+
+async function doEnable() {
+  if (!currentDevice || clicks.length < 3) return;
+  const line = `${(clicks[0].x/canvas.width).toFixed(4)},${(clicks[0].y/canvas.height).toFixed(4)},${(clicks[1].x/canvas.width).toFixed(4)},${(clicks[1].y/canvas.height).toFixed(4)}`;
+  const anchor = `${(clicks[2].x/canvas.width).toFixed(4)},${(clicks[2].y/canvas.height).toFixed(4)}`;
+  const cameraType = document.getElementById('cameraType').value;
+  const countOnly = document.getElementById('countOnly').value;
+
+  setStatus('正在启流...');
+  const body = { line_coords: line, anchor_coords: anchor };
+  if (cameraType) body.camera_type = cameraType;
+  if (countOnly) body.count_only = countOnly;
+
+  try {
+    const res = await api(`/api/devices/${currentDevice.id}/enable`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    setStatus(`启流成功! 设备 ${currentDevice.id} 已上线，AI 开始计数`, 'ok');
+    await loadDevices();
+  } catch (e) { setStatus('启流失败: ' + e.message, 'error'); }
+}
+
+// 初始加载
+loadDevices();
+</script>
+</body>
+</html>

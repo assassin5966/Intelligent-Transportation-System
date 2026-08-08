@@ -3,10 +3,11 @@
 注册/删除时转发到 AI 分析服务启停视频处理管道, 同时在 Redis 保存配置.
 AI 服务不可达时仅告警, 不阻塞配置落库.
 """
+import asyncio
 from typing import Optional
 
 import httpx
-from fastapi import APIRouter, Body, HTTPException
+from fastapi import APIRouter, Body, HTTPException, Response
 from pydantic import BaseModel
 
 from ...common.config import settings
@@ -124,6 +125,28 @@ async def _forward_to_ai(method: str, path: str, json_body: Optional[dict] = Non
         logger.warning(f"AI 服务不可达 {method} {url}: {e}")
 
 
+def _capture_frame_sync(url: str, max_frames: int = 30) -> Optional[bytes]:
+    """同步拉流截一帧, 返回 JPEG bytes. 失败返回 None.
+
+    网络流开头可能有空帧, 最多读 max_frames 帧找有效帧.
+    """
+    import cv2  # 后端与 AI 共用镜像含 opencv; 惰性导入避免启动依赖
+
+    cap = cv2.VideoCapture(url)
+    if not cap.isOpened():
+        return None
+    try:
+        for _ in range(max_frames):
+            ret, frame = cap.read()
+            if ret and frame is not None and frame.size > 0:
+                ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                if ok:
+                    return buf.tobytes()
+        return None
+    finally:
+        cap.release()
+
+
 @router.get("")
 async def list_():
     redis = get_redis()
@@ -229,6 +252,47 @@ async def wvp_webhook(body: dict = Body(...)):
 
     logger.info(f"[WVP webhook] 收到回调: {body}")
     return await sync_once()
+
+
+@router.get("/{device_id}/snapshot")
+async def snapshot(device_id: str):
+    """截取一帧画面供前端绘制计数线/锚点.
+
+    仅 WVP 同步设备可用: play/start 拿 FLV → cv2 拉一帧 → 返回 JPEG.
+    截完自动 stop_play 释放 ZLM 资源.
+    """
+    if not settings.wvp_enabled:
+        raise HTTPException(503, "WVP 未启用 (wvp_enabled=false)")
+    redis = get_redis()
+    key = _DEVICE_KEY_PREFIX + device_id
+    data = await redis.hgetall(key)
+    if not data:
+        raise HTTPException(404, "device not found")
+    gb_dev = data.get("gb_device_id", "")
+    gb_ch = data.get("gb_channel_id", "")
+    if not gb_dev or not gb_ch:
+        raise HTTPException(400, "非 WVP 同步设备, 无法截帧")
+
+    from ..core.wvp_client import get_wvp_client
+    wvp = get_wvp_client()
+    play = await wvp.start_play(gb_dev, gb_ch)
+    try:
+        stream_url = wvp.select_stream_url(play)
+        if not stream_url:
+            raise HTTPException(502, "WVP 点播失败, 无法获取流地址")
+        jpeg = await asyncio.wait_for(
+            asyncio.to_thread(_capture_frame_sync, stream_url),
+            timeout=15.0,
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(504, "截帧超时 (流可能未就绪, 请重试)")
+    finally:
+        await wvp.stop_play(gb_dev, gb_ch)
+
+    if jpeg is None:
+        raise HTTPException(502, "截帧失败 (无法读取视频流, 检查设备是否在线)")
+
+    return Response(content=jpeg, media_type="image/jpeg")
 
 
 @router.get("/{device_id}/stream")

@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from ..common.config import settings
 from ..common.logger import logger
@@ -130,3 +131,11 @@ except Exception as e:  # noqa: BLE001
 @app.get("/health", tags=["system"])
 async def health():
     return {"status": "ok", "service": "backend"}
+
+
+# ---------- 静态文件 (运维工具页面) ----------
+import os  # noqa: E402
+
+_static_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "static")
+if os.path.isdir(_static_dir):
+    app.mount("/static", StaticFiles(directory=_static_dir), name="static")

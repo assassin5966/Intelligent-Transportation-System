@@ -1,7 +1,7 @@
 # 前端对接 API 文档
 
 > 智慧交管拥堵治理预警监控平台
-> 版本: 0.2.0 · 更新日期: 2026-08-02
+> 版本: 0.3.0 · 更新日期: 2026-08-08
 
 ---
 
@@ -115,6 +115,10 @@ POST /api/devices
 | `count_only` | string | ❌ | 计数方向过滤：`null`=双向计数，`"enter"`=只计 Enter，`"exit"`=只计 Exit |
 | `camera_type` | string | ❌ | 摄像头类型：`null`=全部检测，`"vehicle"`=只检测机动车，`"person"`=只检测人流（含非机动车） |
 | `roi_coords` | string | ❌ | ROI 多边形 `"x1,y1,x2,y2,..."`，归一化 0-1，至少 3 个顶点。仅在多边形内的目标参与计数 |
+| `gb_device_id` | string | ❌ | 国标设备 ID（WVP 同步设备自动填写，手动注册留空）|
+| `gb_channel_id` | string | ❌ | 国标通道 ID（WVP 同步设备自动填写，手动注册留空）|
+
+> `gb_device_id` / `gb_channel_id` 仅 WVP 自动同步设备才有值，手动注册时留空即可。前端可通过这两个字段是否非空判断设备来源（WVP 同步 vs 手动注册）。
 
 **请求示例**
 ```json
@@ -156,7 +160,10 @@ GET /api/devices
     "count_only": "",
     "camera_type": "vehicle",
     "roi_coords": "0.05,0.6,0.95,0.6,0.95,0.95,0.05,0.95",
-    "status": "registered"
+    "gb_device_id": "",
+    "gb_channel_id": "",
+    "status": "registered",
+    "last_heartbeat": "2026-08-08T10:00:00+00:00"
   }
 ]
 ```
@@ -247,6 +254,86 @@ POST /api/devices/wvp-webhook
 
 **请求体** 任意 JSON（透传记录日志）。
 **响应** 同步结果（同 3.4）；WVP 未启用时返回 `{"status":"skipped","reason":"wvp_disabled"}`。
+
+### 3.8 截取设备画面（配置计数线用）
+
+对未配置计数线的 WVP 同步设备（`status=synced`），截取一帧画面返回 JPEG 图片，供前端绘制计数线和锚点。
+
+```
+GET /api/devices/{device_id}/snapshot
+```
+
+**响应** `200 OK` — 直接返回 `image/jpeg` 二进制图片，前端可用 `<img src="...">` 直接加载。
+
+**错误**
+
+| 状态码 | 说明 |
+|--------|------|
+| `503` | WVP 未启用 |
+| `404` | 设备不存在 |
+| `400` | 非 WVP 同步设备（无 gb_device_id）|
+| `502` | WVP 点播失败或截帧失败（设备可能离线）|
+| `504` | 截帧超时（流未就绪，建议重试）|
+
+> 截帧过程：后端调 WVP `play/start` 拿 FLV → cv2 拉一帧 → 编码 JPEG → `play/stop` 释放资源。整个过程约 3-8 秒。
+
+#### 前端画线交互流程
+
+WVP 同步设备的完整配置流程为 **同步(§3.4) → 截帧(§3.8) → 画线 → 启用(§3.6)**：
+
+```
+1. POST /api/devices/sync              → 设备入表 status=synced
+2. GET  /api/devices/{id}/snapshot     → 返回一帧 JPEG 图片
+3. 前端在图片上绘制计数线（2个端点）+ 点击锚点（1个点）
+4. 像素坐标 → 归一化坐标（÷ 图片宽高）
+5. POST /api/devices/{id}/enable       → 传 line_coords + anchor_coords → 启流计数
+```
+
+#### 坐标转换
+
+前端拿到的图片尺寸即为视频分辨率。用户在图片上操作的像素坐标按以下公式转为归一化坐标：
+
+```
+归一化x = 像素x / 图片宽度
+归一化y = 像素y / 图片高度
+
+例: 图片 1920×1080, 用户在 (960, 810) 画了一个点
+   → 归一化 = (960/1920, 810/1080) = (0.5, 0.75)
+```
+
+- **计数线**：用户画一条线（拖拽或点击两个端点），取两个端点的归一化坐标 → `"x1,y1,x2,y2"`
+- **锚点**：用户在计数线某一侧点击一个点，取归一化坐标 → `"x,y"`。锚点所在侧 = 内侧 = Enter 方向
+
+#### 前端实现示例
+
+```javascript
+// 1. 加载截图
+const img = document.getElementById('snapshot');
+img.src = `http://backend:8000/api/devices/${deviceId}/snapshot`;
+
+// 2. 图片加载完成后获取实际显示尺寸
+img.onload = () => {
+  const rect = img.getBoundingClientRect();
+  // rect.width / rect.height = 图片在页面上的显示尺寸
+};
+
+// 3. 用户在图片上画线（两个端点）+ 点击锚点
+//    点击坐标转归一化: x / rect.width, y / rect.height
+
+// 4. 提交配置启流
+await fetch(`http://backend:8000/api/devices/${deviceId}/enable`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    line_coords: `${x1},${y1},${x2},${y2}`,   // 归一化 0-1
+    anchor_coords: `${ax},${ay}`,               // 归一化 0-1
+    camera_type: 'vehicle',                      // 可选
+    count_only: 'enter'                          // 可选
+  })
+});
+```
+
+> ⚠️ 计数线应画在车流/人流**必经的截面**上（如门口、路口横截面），锚点点击在你想计为"Enter（进）"的那一侧。详见 §10.3 方向判定逻辑。
 
 ---
 
@@ -671,6 +758,8 @@ GET /api/police/plan
 ## 8. 事件接收 API（AI → 后端）
 
 > 此接口由 AI 服务内部调用，**前端通常不直接使用**。列出仅供理解数据流。
+>
+> 此外 AI 服务每 30 秒调用 `POST /api/devices/{device_id}/heartbeat` 上报心跳，后端据此更新设备列表的 `last_heartbeat` 字段（前端只读，无需调用）。
 
 AI 检测到越线事件后，将事件推送到后端以更新实时统计并触发告警评估。
 
