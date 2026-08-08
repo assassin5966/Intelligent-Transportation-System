@@ -56,6 +56,7 @@ COPY app /app/app
 COPY configs /app/configs
 COPY scripts /app/scripts
 COPY tool /app/tool
+COPY static /app/static
 
 # ---------- 4. 环境配置 ----------
 ENV TZ=Asia/Shanghai \

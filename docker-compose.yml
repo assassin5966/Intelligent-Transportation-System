@@ -59,6 +59,8 @@ services:
       - ./app:/app/app:cached
       - ./models:/app/models:cached
       - ./configs:/app/configs:cached
+      - ./static:/app/static:cached
+      - ./data:/app/data:cached
       - ./logs:/app/logs
     depends_on:
       - redis
