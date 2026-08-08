@@ -1,7 +1,7 @@
 # 前端对接 API 文档
 
 > 智慧交管拥堵治理预警监控平台
-> 版本: 0.4.0 · 更新日期: 2026-08-09
+> 版本: 0.5.0 · 更新日期: 2026-08-09
 
 ---
 
@@ -384,6 +384,96 @@ GET /api/stats/realtime
 ```
 
 > 💡 前端大屏可每隔 5~10 秒轮询此接口刷新数字。
+
+### 4.2 各设备分别计数
+
+返回所有注册设备的分别计数（当前在场 + 今日累计），含设备名称和状态。
+
+```
+GET /api/stats/devices
+```
+
+**响应** `200 OK`（数组，每个元素一个设备）
+
+```json
+[
+  {
+    "device_id": "cam-gate-north",
+    "name": "北门摄像头",
+    "camera_type": "vehicle",
+    "status": "online",
+    "current_vehicles": 12,
+    "current_persons": 0,
+    "today_vehicle_in": 85,
+    "today_vehicle_out": 73,
+    "today_person_in": 0,
+    "today_person_out": 0
+  },
+  {
+    "device_id": "cam-square-south",
+    "name": "南广场人流",
+    "camera_type": "person",
+    "status": "online",
+    "current_vehicles": 0,
+    "current_persons": 156,
+    "today_vehicle_in": 0,
+    "today_vehicle_out": 0,
+    "today_person_in": 2100,
+    "today_person_out": 1944
+  }
+]
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `device_id` | string | 设备 ID |
+| `name` | string | 设备名称 |
+| `camera_type` | string | 摄像头类型（`vehicle`/`person`/空）|
+| `status` | string | 设备状态（`online`/`offline`/`synced`/`registered`）|
+| `current_vehicles` | int | 该设备当前在场车辆数 |
+| `current_persons` | int | 该设备当前在场人员数 |
+| `today_vehicle_in` | int | 该设备今日车辆进入累计 |
+| `today_vehicle_out` | int | 该设备今日车辆离开累计 |
+| `today_person_in` | int | 该设备今日人员进入累计 |
+| `today_person_out` | int | 该设备今日人员离开累计 |
+
+> 未产生过事件的注册设备也会返回，计数为 0。各设备今日累计按天隔离，跨天自动清零。
+
+### 4.3 单个设备计数
+
+返回指定设备的分别计数。
+
+```
+GET /api/stats/devices/{device_id}
+```
+
+**路径参数**
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `device_id` | string | 设备 ID |
+
+**响应** `200 OK`
+
+```json
+{
+  "device_id": "cam-gate-north",
+  "name": "北门摄像头",
+  "camera_type": "vehicle",
+  "status": "online",
+  "current_vehicles": 12,
+  "current_persons": 0,
+  "today_vehicle_in": 85,
+  "today_vehicle_out": 73,
+  "today_person_in": 0,
+  "today_person_out": 0
+}
+```
+
+**错误** `404` 设备不存在：
+```json
+{ "detail": "device not found" }
+```
 
 ---
 

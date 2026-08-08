@@ -18,6 +18,11 @@ def _device_key(device_id: str) -> str:
     """逐设备在場人数 key (供警力分配按区域读取)."""
     return f"{settings.redis_prefix}:realtime:device:{device_id}"
 
+
+def _device_daily_key(device_id: str, d: date) -> str:
+    """逐设备今日累计 key (按天隔离, 跨天自动清零)."""
+    return f"{settings.redis_prefix}:realtime:device:{device_id}:daily:{d.strftime('%Y%m%d')}"
+
 # 当前态字段 (可正可负, 会做下限钳位)
 _CURRENT_FIELDS = ("current_vehicles", "current_persons")
 # 今日累计字段 (只增)
@@ -67,12 +72,14 @@ async def apply_event(
     interval_key = _interval_key(event_time)
     pipe = redis.pipeline()
     device_key = _device_key(device_id)
+    device_daily_key = _device_daily_key(device_id, event_time.date())
     for field, d in delta.items():
         if field in _CURRENT_FIELDS:
             pipe.hincrby(_CUR_KEY, field, d)
             pipe.hincrby(device_key, field, d)  # 逐设备在場人数 (供警力分配)
         else:
             pipe.hincrby(daily_key, field, d)
+            pipe.hincrby(device_daily_key, field, d)  # 逐设备今日累计
             interval_field = _FIELD_MAP.get(field)
             if interval_field is not None:
                 # N 分钟区间计数 (供 Chronos-2 总人数预测)
@@ -81,6 +88,7 @@ async def apply_event(
     pipe.sadd(_DEVICES_KEY, device_id)
     pipe.expire(daily_key, 90 * 24 * 3600)  # 日累计保留 90 天, 防止内存泄漏
     pipe.expire(device_key, 24 * 3600)  # 逐设备在場人数保留 24 小时
+    pipe.expire(device_daily_key, 90 * 24 * 3600)  # 逐设备日累计保留 90 天
     # N 分钟区间保留 (序列长度 + 余量) × 区间分钟 × 60 秒
     interval_ttl = (settings.prediction_series_length + 10) * settings.prediction_interval_minutes * 60
     pipe.expire(interval_key, interval_ttl)
@@ -178,4 +186,65 @@ async def get_all_device_crowds() -> dict[str, dict]:
             "current_persons": max(0, persons),
             "current_vehicles": max(0, vehicles),
         }
+    return output
+
+
+async def get_device_stats(device_id: str) -> dict:
+    """读取单个设备的实时统计 (当前在场 + 今日累计)."""
+    redis = get_redis()
+    today = date.today()
+    pipe = redis.pipeline()
+    pipe.hgetall(_device_key(device_id))
+    pipe.hgetall(_device_daily_key(device_id, today))
+    cur, daily = await pipe.execute()
+
+    def _i(v) -> int:
+        return int(v) if v else 0
+
+    return {
+        "device_id": device_id,
+        "current_vehicles": max(0, _i(cur.get("current_vehicles"))),
+        "current_persons": max(0, _i(cur.get("current_persons"))),
+        "today_vehicle_in": _i(daily.get("today_vehicle_in")),
+        "today_vehicle_out": _i(daily.get("today_vehicle_out")),
+        "today_person_in": _i(daily.get("today_person_in")),
+        "today_person_out": _i(daily.get("today_person_out")),
+    }
+
+
+async def get_all_device_stats() -> list[dict]:
+    """读取所有活跃设备的实时统计 (当前在场 + 今日累计).
+
+    仅返回产生过事件的设备 (_DEVICES_KEY); 未产生事件的设备不在此列.
+    """
+    redis = get_redis()
+    device_ids = await redis.smembers(_DEVICES_KEY)
+    if not device_ids:
+        return []
+    today = date.today()
+    pipe = redis.pipeline()
+    id_list: list[str] = []
+    for did in device_ids:
+        did_str = did if isinstance(did, str) else did.decode()
+        id_list.append(did_str)
+        pipe.hgetall(_device_key(did_str))
+        pipe.hgetall(_device_daily_key(did_str, today))
+    results = await pipe.execute()
+
+    def _i(v) -> int:
+        return int(v) if v else 0
+
+    output: list[dict] = []
+    for i, did_str in enumerate(id_list):
+        cur = results[i * 2]
+        daily = results[i * 2 + 1]
+        output.append({
+            "device_id": did_str,
+            "current_vehicles": max(0, _i(cur.get("current_vehicles"))),
+            "current_persons": max(0, _i(cur.get("current_persons"))),
+            "today_vehicle_in": _i(daily.get("today_vehicle_in")),
+            "today_vehicle_out": _i(daily.get("today_vehicle_out")),
+            "today_person_in": _i(daily.get("today_person_in")),
+            "today_person_out": _i(daily.get("today_person_out")),
+        })
     return output
