@@ -28,8 +28,8 @@ class Settings(BaseSettings):
     chronos_model: str = "models"  # 本地 Chronos-2 模型目录
     prediction_interval_minutes: int = 15  # N 分钟预测间隔
     prediction_series_length: int = 30  # 历史序列长度 (30 个 N 分钟区间)
-    vehicle_person_min: int = 2  # 每车最少人数 (车流转人流)
-    vehicle_person_max: int = 5  # 每车最多人数 (车流转人流)
+    vehicle_person_min: int = 2  # 每车最少人数 (车流转人流随机采样下界)
+    vehicle_person_max: int = 5  # 每车最多人数 (车流转人流随机采样上界)
 
     # ---- 告警 ----
     rules_file: str = "configs/rules.yaml"

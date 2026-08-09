@@ -23,6 +23,7 @@ import json
 import math
 import sys
 import time
+from collections import deque
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -35,6 +36,9 @@ sys.path.insert(0, str(PROJECT_DIR))
 
 from app.ai.anomaly import AnomalyMonitor
 from app.ai.counter import LineCrossingCounter
+
+# 流量统计滑动窗口 (秒): 仅统计最近 N 秒事件, 计算每分钟流量
+_FLOW_WINDOW_SECONDS = 60.0
 
 
 class Statistics:
@@ -50,6 +54,13 @@ class Statistics:
         self.person_flow_in = 0.0
         self.person_flow_out = 0.0
         self.timestamp = ""
+        # 各方向事件时间戳队列 (视频时间秒), 用于滑动窗口流量计算
+        self._flow_times: dict[str, deque] = {
+            "vehicle_in": deque(),
+            "vehicle_out": deque(),
+            "person_in": deque(),
+            "person_out": deque(),
+        }
 
     def update_from_tracks(self, track_result):
         vehicle_count = sum(1 for t in track_result.tracks if t.class_name in ["car", "truck", "bus"])
@@ -57,18 +68,47 @@ class Statistics:
         self.current_vehicles = vehicle_count
         self.current_persons = person_count
 
-    def update_from_events(self, events):
+    def update_from_events(self, events, video_time_sec: float):
+        """累加事件并记录时间戳供流量计算. video_time_sec: 当前视频时间 (秒)."""
         for event in events:
             if event.event_type == "VehicleEnter":
                 self.today_vehicle_enter += 1
+                self._flow_times["vehicle_in"].append(video_time_sec)
             elif event.event_type == "VehicleExit":
                 self.today_vehicle_exit += 1
+                self._flow_times["vehicle_out"].append(video_time_sec)
             elif event.event_type == "PersonEnter":
                 self.today_person_enter += 1
+                self._flow_times["person_in"].append(video_time_sec)
             elif event.event_type == "PersonExit":
                 self.today_person_exit += 1
+                self._flow_times["person_out"].append(video_time_sec)
+        self._refresh_flows(video_time_sec)
 
-    def model_dump(self):
+    def _refresh_flows(self, current_video_time_sec: float) -> None:
+        """基于滑动窗口重算各方向每分钟流量.
+
+        流量 = 最近 _FLOW_WINDOW_SECONDS 秒内事件数 × (60 / 窗口秒数).
+        窗口=60s 时即直接为每分钟事件数.
+        """
+        scale = 60.0 / _FLOW_WINDOW_SECONDS
+        for key, dq in self._flow_times.items():
+            # 弹出窗口外的时间戳
+            cutoff = current_video_time_sec - _FLOW_WINDOW_SECONDS
+            while dq and dq[0] < cutoff:
+                dq.popleft()
+            flow = len(dq) * scale
+            if key == "vehicle_in":
+                self.vehicle_flow_in = flow
+            elif key == "vehicle_out":
+                self.vehicle_flow_out = flow
+            elif key == "person_in":
+                self.person_flow_in = flow
+            elif key == "person_out":
+                self.person_flow_out = flow
+
+    def model_dump(self, current_video_time_sec: float = 0.0):
+        self._refresh_flows(current_video_time_sec)
         return {
             "current_vehicles": self.current_vehicles,
             "current_persons": self.current_persons,
@@ -76,10 +116,10 @@ class Statistics:
             "today_vehicle_exit": self.today_vehicle_exit,
             "today_person_enter": self.today_person_enter,
             "today_person_exit": self.today_person_exit,
-            "vehicle_flow_in": self.vehicle_flow_in,
-            "vehicle_flow_out": self.vehicle_flow_out,
-            "person_flow_in": self.person_flow_in,
-            "person_flow_out": self.person_flow_out,
+            "vehicle_flow_in": round(self.vehicle_flow_in, 2),
+            "vehicle_flow_out": round(self.vehicle_flow_out, 2),
+            "person_flow_in": round(self.person_flow_in, 2),
+            "person_flow_out": round(self.person_flow_out, 2),
             "timestamp": self.timestamp,
         }
 
@@ -399,7 +439,7 @@ def process_video(args):
 
         if statistics is not None:
             statistics.update_from_tracks(track_result)
-            statistics.update_from_events(events)
+            statistics.update_from_events(events, video_time_sec)
             current_stats = statistics
             current_stats.timestamp = current_video_time.isoformat()
 
@@ -408,7 +448,7 @@ def process_video(args):
                     "video_time": current_video_time.isoformat(),
                     "video_second": video_time_sec,
                     "frame": frame_idx,
-                    **current_stats.model_dump()
+                    **current_stats.model_dump(video_time_sec)
                 })
                 # 告警边沿评估: 仅记录状态从正常->告警的时刻, 避免重复刷屏
                 new_alarms = evaluate_alarms(current_stats, rules)
@@ -486,7 +526,7 @@ def process_video(args):
             "frames_processed": processed_idx,
             "processing_date": datetime.now().isoformat()
         },
-        "final_statistics": final_stats.model_dump() if final_stats else None,
+        "final_statistics": final_stats.model_dump(duration_sec) if final_stats else None,
         "totals": {
             "total_events": len(all_events),
             "total_alarms": len(all_alarms),

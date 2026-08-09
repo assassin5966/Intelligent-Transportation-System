@@ -1,7 +1,7 @@
 # 前端对接 API 文档
 
 > 智慧交管拥堵治理预警监控平台
-> 版本: 0.5.0 · 更新日期: 2026-08-09
+> 版本: 0.6.0 · 更新日期: 2026-08-09
 
 ---
 
@@ -122,8 +122,8 @@ POST /api/devices
 | `stream_url` | string | ✅ | 视频流地址（RTSP / 本地文件） |
 | `line_coords` | string | ❌ | 计数线 `"x1,y1,x2,y2"`，归一化 0-1，默认 `"0.5,0.1,0.5,0.9"` |
 | `anchor_coords` | string | ❌ | 内侧锚点 `"x,y"`，归一化 0-1。锚点所在侧为"内侧"，用于判定 Enter/Exit 方向 |
-| `count_only` | string | ❌ | 计数方向过滤：`null`=双向计数，`"enter"`=只计 Enter，`"exit"`=只计 Exit |
-| `camera_type` | string | ❌ | 摄像头类型：`null`=全部检测，`"vehicle"`=只检测机动车，`"person"`=只检测人流（含非机动车） |
+| `count_only` | string | ❌ | 计数方向过滤：`null`=双向计数，`"enter"`=只计 Enter，`"exit"`=只计 Exit（仅接受小写枚举值，Pydantic 校验拒绝 `Enter`/`in`/`both` 等） |
+| `camera_type` | string | ❌ | 摄像头类型：`null`=全部检测，`"vehicle"`=只检测机动车，`"person"`=只检测人流（含非机动车）（仅接受小写枚举值） |
 | `roi_coords` | string | ❌ | ROI 多边形 `"x1,y1,x2,y2,..."`，归一化 0-1，至少 3 个顶点。仅在多边形内的目标参与计数 |
 | `gb_device_id` | string | ❌ | 国标设备 ID（WVP 同步设备自动填写，手动注册留空）|
 | `gb_channel_id` | string | ❌ | 国标通道 ID（WVP 同步设备自动填写，手动注册留空）|
@@ -150,6 +150,8 @@ POST /api/devices
 ```
 
 > ⚠️ AI 服务不可达时不会阻塞配置落库，但视频管道不会启动。前端可通过 AI 服务的 `/devices` 接口或 `/health` 的 `active_devices` 确认管道是否运行。
+
+> 📌 **`count_only` 与 `current_*` 语义**：`count_only` 仅过滤「是否生成事件」，不改变事件对实时统计的影响。车流单向车道（`count_only="enter"`）只产生 `VehicleEnter`，`current_vehicles` 即累计进入数（无 `Exit` 事件对冲，为单向场景的预期语义）；人流摄像头恒为双向计数（`count_only=null`），`Enter`/`Exit` 自然对冲 `current_persons`。今日累计 `today_*` 同样按实际产生的事件累加。
 
 ### 3.2 查询设备列表
 
@@ -888,6 +890,52 @@ POST /api/events
 ```json
 { "status": "ok", "event_type": "VehicleEnter" }
 ```
+
+> 每条越线事件同时持久化到 Redis List `{prefix}:events`（保留最近 2000 条），可通过下方 §8.1 查询接口回溯。
+
+### 8.1 事件历史查询
+
+查询最近 N 条越线事件历史（AI 推送的全部 `VehicleEnter/Exit`、`PersonEnter/Exit` 事件均会落库）。前端大屏「最近事件」滚动列表、审计回溯均使用此接口。
+
+```
+GET /api/events?limit={limit}
+```
+
+**查询参数**
+
+| 参数 | 类型 | 必填 | 默认 | 范围 | 说明 |
+|------|------|------|------|------|------|
+| `limit` | int | ❌ | 100 | 1~2000 | 返回最近 N 条事件（按时间倒序） |
+
+**响应** `200 OK`（数组，按时间倒序，最新事件在前）
+
+```json
+[
+  {
+    "device_id": "cam-gate-north",
+    "event_type": "VehicleEnter",
+    "occurred_at": "2026-08-09T08:21:07+00:00",
+    "created_at": "2026-08-09T08:21:07.123456+00:00"
+  },
+  {
+    "device_id": "cam-square-south",
+    "event_type": "PersonExit",
+    "occurred_at": "2026-08-09T08:21:05+00:00",
+    "created_at": "2026-08-09T08:21:05.789012+00:00"
+  }
+]
+```
+
+**字段说明**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `device_id` | string | 产生事件的设备 ID |
+| `event_type` | string | `VehicleEnter` / `VehicleExit` / `PersonEnter` / `PersonExit` |
+| `occurred_at` | string | 事件实际发生时间（ISO 8601，由 AI 推送时携带；离线回放为视频时间） |
+| `created_at` | string | 后端落库时间（ISO 8601，UTC） |
+
+> 💡 存储介质为 Redis List，`LPUSH` 头插 + `LTRIM 0 1999` 保留最近 2000 条，超过自动淘汰最早记录。实时统计与今日累计不受历史淘汰影响（分别存于独立 Hash）。
 
 ---
 

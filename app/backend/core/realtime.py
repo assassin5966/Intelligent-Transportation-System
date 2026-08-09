@@ -2,7 +2,9 @@
 
 当前车辆/人员数量 (持久) + 今日累计进出 (按日 key, 自然按天切换).
 N 分钟区间计数 (供 Chronos-2 总人数预测). 逐设备在場人数 (供警力分配).
+越线事件历史 (Redis List, 供前端"最近事件"与审计回溯).
 """
+import json
 from datetime import date, datetime, timezone
 from typing import Optional
 
@@ -12,6 +14,9 @@ from ...schemas.events import EVENT_DELTA
 
 _CUR_KEY = f"{settings.redis_prefix}:realtime:current"
 _DEVICES_KEY = f"{settings.redis_prefix}:devices:active"
+# 越线事件历史 (Redis List, lpush 头插, 保留最近 _EVENT_MAX 条)
+_EVENTS_KEY = f"{settings.redis_prefix}:events"
+_EVENT_MAX = 2000
 
 
 def _device_key(device_id: str) -> str:
@@ -60,6 +65,9 @@ async def apply_event(
     """应用一个业务事件到 Redis 实时状态, 返回更新后的统计.
 
     occurred_at: 事件实际发生时间 (用于日/N分钟区间维度聚合); 缺省取当前时间.
+
+    current_vehicles/persons 始终更新 (车流单向车道无 Exit 事件, current_vehicles 即
+    累计进入数, 为该场景的预期语义; 人流恒为双向计数, Enter/Exit 自然对冲).
     """
     delta = EVENT_DELTA.get(event_type)
     if delta is None:
@@ -92,10 +100,34 @@ async def apply_event(
     # N 分钟区间保留 (序列长度 + 余量) × 区间分钟 × 60 秒
     interval_ttl = (settings.prediction_series_length + 10) * settings.prediction_interval_minutes * 60
     pipe.expire(interval_key, interval_ttl)
+    # 越线事件历史持久化 (Redis List, 头插, 保留最近 _EVENT_MAX 条)
+    event_record = {
+        "device_id": device_id,
+        "event_type": event_type,
+        "occurred_at": event_time.isoformat() if isinstance(event_time, datetime) else str(event_time),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    pipe.lpush(_EVENTS_KEY, json.dumps(event_record, ensure_ascii=False))
+    pipe.ltrim(_EVENTS_KEY, 0, _EVENT_MAX - 1)
     await pipe.execute()
 
     await _clamp_negatives(_CUR_KEY, _CURRENT_FIELDS)
     return await get_stats()
+
+
+async def list_events(limit: int = 100) -> list[dict]:
+    """读取最近 N 条越线事件历史 (供前端"最近事件"展示与审计)."""
+    if limit <= 0:
+        return []
+    redis = get_redis()
+    raw_list = await redis.lrange(_EVENTS_KEY, 0, limit - 1)
+    events: list[dict] = []
+    for raw in raw_list:
+        try:
+            events.append(json.loads(raw))
+        except (json.JSONDecodeError, TypeError):
+            continue
+    return events
 
 
 async def _clamp_negatives(key: str, fields: tuple[str, ...]) -> None:

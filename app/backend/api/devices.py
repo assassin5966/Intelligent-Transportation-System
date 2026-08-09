@@ -4,7 +4,7 @@
 AI 服务不可达时仅告警, 不阻塞配置落库.
 """
 import asyncio
-from typing import Optional
+from typing import Literal, Optional
 
 import httpx
 from fastapi import APIRouter, Body, HTTPException, Response
@@ -44,8 +44,8 @@ class DeviceIn(BaseModel):
     stream_url: str
     line_coords: Optional[str] = None  # "x1,y1,x2,y2" 归一化 0-1
     anchor_coords: Optional[str] = None  # "x,y" 归一化 0-1, 内侧锚点
-    count_only: Optional[str] = None  # None=双向, "enter"=只计Enter, "exit"=只计Exit
-    camera_type: Optional[str] = None  # None=全部检测, "vehicle"=只检测机动车, "person"=只检测人流(含非机动车)
+    count_only: Optional[Literal["enter", "exit"]] = None  # None=双向, "enter"=只计Enter, "exit"=只计Exit
+    camera_type: Optional[Literal["vehicle", "person"]] = None  # None=全部检测, vehicle/person
     roi_coords: Optional[str] = None  # "x1,y1,x2,y2,..." 归一化 0-1, >=3 顶点
     gb_device_id: Optional[str] = None  # 国标设备ID (WVP 同步设备填写, 手动注册留空)
     gb_channel_id: Optional[str] = None  # 国标通道ID (WVP 同步设备填写, 手动注册留空)
@@ -325,8 +325,8 @@ async def refresh_stream(device_id: str):
 class DeviceEnableIn(BaseModel):
     line_coords: str  # "x1,y1,x2,y2" 归一化 0-1 (必填, 启流必需)
     anchor_coords: Optional[str] = None
-    count_only: Optional[str] = None
-    camera_type: Optional[str] = None
+    count_only: Optional[Literal["enter", "exit"]] = None
+    camera_type: Optional[Literal["vehicle", "person"]] = None
     roi_coords: Optional[str] = None
 
 

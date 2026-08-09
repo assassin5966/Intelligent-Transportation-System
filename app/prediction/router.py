@@ -1,7 +1,8 @@
 """预测 REST API: /api/prediction.
 
 核心功能: 每 N 分钟基于历史 30 个 N 分钟区间的总人数序列, 预测下一个 N 分钟的总人数.
-车流转人流: 每辆车随机 2~5 人, 加总到人流得到总人数序列.
+车流转人流: 每辆车随机 2~5 人, 加总到人流得到总人数序列 (专门设计, 引入随机性
+以反映真实场景中每车承载人数的随机波动).
 """
 import asyncio
 import json
@@ -25,6 +26,8 @@ def convert_vehicle_to_person(vehicle_series: list[float]) -> list[float]:
     """将车流序列转化为人流序列: 每辆车 random(min, max) 人.
 
     对每个区间, 每辆车独立采样一个 [min, max] 的整数人数, 求和得到该区间转化后的人数.
+    随机性为专门设计: 真实场景中每车承载人数存在波动, 确定性期望值会低估方差,
+    不利于 Chronos-2 对人流峰谷的时序预测.
     """
     lo = settings.vehicle_person_min
     hi = settings.vehicle_person_max

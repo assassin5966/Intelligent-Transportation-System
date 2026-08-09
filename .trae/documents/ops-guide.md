@@ -299,10 +299,12 @@ http://<backend-host>:8000/static/device-config.html
 | `CHRONOS_MODEL` | `models` | Chronos-2 本地模型目录 | 是 | `models` |
 | `PREDICTION_INTERVAL_MINUTES` | `15` | 预测间隔（分钟） | 否 | `15`（高峰期可缩短至 10） |
 | `PREDICTION_SERIES_LENGTH` | `30` | 历史序列长度（30 个区间） | 否 | `30` |
-| `VEHICLE_PERSON_MIN` | `2` | 车流转人流每车最少人数 | 否 | `2` |
-| `VEHICLE_PERSON_MAX` | `5` | 车流转人流每车最多人数 | 否 | `5` |
+| `VEHICLE_PERSON_MIN` | `2` | 车流转人流每车最少人数（随机采样下界） | 否 | `2` |
+| `VEHICLE_PERSON_MAX` | `5` | 车流转人流每车最多人数（随机采样上界） | 否 | `5` |
 
-> 预测逻辑：读取历史 N 个区间的人流/车流序列 -> 车流转人流（每车 random(2,5) 人）-> 总人数 = 人流 + 转化车流 -> 喂入 Chronos-2 预测下一个 N 分钟。
+> 预测逻辑：读取历史 N 个区间的人流/车流序列 -> 车流转人流（每车 `random.randint(min,max)` 人）-> 总人数 = 人流 + 转化车流 -> 喂入 Chronos-2 预测下一个 N 分钟。
+>
+> ⚠️ **随机性为专门设计**：真实场景中每车承载人数存在波动，确定性期望值（如 `(min+max)/2`）会低估序列方差，不利于 Chronos-2 对人流峰谷的时序预测。请勿将此处改为确定性转换。预测结果总数已向上取整为整数。
 
 #### 告警配置
 
@@ -609,6 +611,27 @@ AI 管道内置 `AnomalyMonitor`（见 `app/ai/anomaly.py`），周期采样 + �
 
 所有告警持久化到 Redis List `sc:alerts`，保留最近 1000 条（`LTRIM 0 999`），通过 `GET /api/alerts?limit=100` 查询。
 
+#### 越线事件历史（审计回溯）
+
+AI 推送的每一条越线事件（`VehicleEnter/Exit`、`PersonEnter/Exit`）在更新实时统计的同时，落库到 Redis List `sc:events`（见 `app/backend/core/realtime.py` 的 `apply_event`）：
+
+- 写入方式：`LPUSH` 头插 + `LTRIM 0 1999`，保留最近 2000 条，超出自动淘汰最早记录
+- 与实时统计独立：实时统计（`sc:realtime:current`）和今日累计（`sc:realtime:daily:*`）存于独立 Hash，事件历史淘汰不影响计数
+- 查询接口：`GET /api/events?limit=N`（N 范围 1~2000，默认 100，按时间倒序）
+
+```bash
+# 查看最近 20 条越线事件（REST 接口）
+curl -s "http://localhost:8000/api/events?limit=20" | python -m json.tool
+
+# 直接读取 Redis List（调试/运维）
+docker compose -p smartcity exec redis redis-cli lrange sc:events 0 19
+
+# 统计事件历史总量（上限 2000）
+docker compose -p smartcity exec redis redis-cli llen sc:events
+```
+
+> 事件历史供前端大屏「最近事件」滚动列表与运营审计回溯使用。若需更长保留周期，可调整 `app/backend/core/realtime.py` 中 `_EVENT_MAX` 常量并重启 backend。
+
 ### 3.3 日志监控
 
 #### loguru 日志格式和级别
@@ -745,9 +768,11 @@ curl -X POST http://localhost:8000/api/devices/GB-3402000000-3402000000132000000
 参数说明：
 - `line_coords`：计数线两端点 `x1,y1,x2,y2`（归一化 0-1，必填）
 - `anchor_coords`：内侧锚点 `x,y`（归一化 0-1，可选，决定 Enter/Exit 方向）
-- `count_only`：`null`=双向计数，`enter`=只计进入，`exit`=只计离开
-- `camera_type`：`null`=全部检测，`vehicle`=只检测机动车，`person`=只检测人流
+- `count_only`：`null`=双向计数，`enter`=只计进入，`exit`=只计离开（Pydantic `Literal` 校验，仅接受小写枚举值，`Enter`/`in`/`both` 等会返回 422）
+- `camera_type`：`null`=全部检测，`vehicle`=只检测机动车，`person`=只检测人流（同样 `Literal` 校验）
 - `roi_coords`：ROI 多边形顶点 `x1,y1,x2,y2,...`（归一化 0-1，至少 3 顶点，可选）
+
+> 📌 **单向车道 `count_only` 配置要点**：车流单向车道应设 `count_only=enter`（只产生 `VehicleEnter`），此时 `current_vehicles` 为累计进入数（无 `Exit` 对冲，为单向场景预期语义），勿误判为「只增不减异常」。人流摄像头恒为双向计数（`count_only=null`），`Enter`/`Exit` 自然对冲 `current_persons`。该参数仅过滤事件生成，不影响事件对实时统计的累加逻辑。
 
 #### 设备状态查看
 
@@ -763,6 +788,9 @@ curl -s http://localhost:8000/api/devices/GB-xxx-xxx/stream | python -m json.too
 
 # 截取设备当前画面（WVP 设备）
 curl -s http://localhost:8000/api/devices/GB-xxx-xxx/snapshot -o snapshot.jpg
+
+# 查看最近越线事件历史（审计/排障）
+curl -s "http://localhost:8000/api/events?limit=50" | python -m json.tool
 ```
 
 设备状态值说明：
@@ -1118,6 +1146,7 @@ docker compose -p smartcity exec redis redis-cli dbsize
 | N 分钟区间 | `sc:realtime:interval:{YYYYMMDDHHMM}` | Hash：区间计数（供预测） | (序列长度+10)*间隔*60 秒 |
 | 逐设备人数 | `sc:realtime:device:{device_id}` | Hash：设备在场人数 | 24 小时 |
 | 告警列表 | `sc:alerts` | List：最近 1000 条告警 | 无（LTRIM 保留 1000 条） |
+| 越线事件历史 | `sc:events` | List：最近 2000 条越线事件（`VehicleEnter/Exit`、`PersonEnter/Exit`） | 无（LTRIM 保留 2000 条） |
 | 告警序号 | `sc:alert:seq` | String：告警自增 ID | 无 |
 | 警力区域 | `sc:police:regions` | Hash：区域配置 | 无 |
 | 总警力 | `sc:police:total` | String：总警力数 | 无 |
@@ -1493,3 +1522,81 @@ asyncio.run(migrate())
 ```
 
 > 数据迁移前务必备份 Redis 数据（见第六章）。迁移操作建议在低峰期进行，避免影响实时业务。
+
+### 8.5 测试套件
+
+项目内置 73 个自动化测试（单元 + 集成 + 功能），覆盖越线计数、实时状态、事件 API、Schema 校验、离线流量统计、视频异常、WVP 客户端等模块。测试均为**自包含**（stub 掉 `ultralytics`、mock Redis、不依赖真实视频/模型），可在无 Docker / 无 GPU 环境直接运行。
+
+#### 测试文件一览
+
+| 测试文件 | 类型 | 覆盖内容 |
+|---------|------|---------|
+| `tests/test_counter.py` | 单元 | `LineCrossingCounter`：Enter/Exit 判定、抖动抑制、hold_frames 确认、去重、冷却、count_only 过滤、ROI 裁剪、ID 切换、多目标（16 用例） |
+| `tests/test_counter_accuracy.py` | 集成 | 已知真值的多目标场景精度基准：precision/recall/accuracy = 1.00（4 场景） |
+| `tests/test_realtime.py` | 单元 | `realtime.py`：`apply_event` 累加、负数钳位、按天隔离、N 分钟区间、单向车道 `current_vehicles` 累计、双向人流对冲（FakeRedis mock） |
+| `tests/test_api_events.py` | 功能 | `/api/events` 全链路：POST 事件入库 + GET 历史读取 + count_only 设备 current 更新（FastAPI TestClient） |
+| `tests/test_schemas_validation.py` | 单元 | `count_only`/`camera_type` 的 `Literal` 枚举校验（拒绝 `Enter`/`in`/`both` 等非法值） |
+| `tests/test_video_processor_stats.py` | 单元 | 离线处理器 60s 滑动窗口流量统计（`vehicle/person_flow_in/out`） |
+| `tests/test_anomaly.py` | 单元 | 黑屏/花屏异常识别（合成帧，双条件 AND 判定） |
+| `tests/test_wvp_client.py` | 单元 | WVP-GB28181 客户端登录/设备查询/点播 |
+
+#### 运行命令
+
+```bash
+# 运行全部测试（需在项目根目录，Python 3.11+）
+python -m pytest tests/ -q
+
+# 运行单个测试文件
+python -m pytest tests/test_counter.py -v
+
+# 运行指定用例
+python -m pytest tests/test_realtime.py::test_count_only_vehicle_updates_current -v
+
+# 查看详细输出（含 print）
+python -m pytest tests/ -v -s
+
+# 生成测试报告
+python -m pytest tests/ --tb=short --junitxml=test-results.xml
+```
+
+> 测试无需启动 Docker 服务，直接在宿主机 Python 环境运行（仅需 `pytest`、`pydantic`、`fastapi`、`httpx` 依赖）。镜像构建时已安装全部测试依赖。
+
+#### 在容器内运行
+
+```bash
+# 在 backend 容器内运行测试
+docker compose -p smartcity exec backend python -m pytest tests/ -q
+
+# 临时启动容器运行测试后退出
+docker run --rm -v $(pwd):/app -w /app smart-city-platform:latest \
+  python -m pytest tests/ -q
+```
+
+#### 接口冒烟测试
+
+`scripts/interface_test.sh` 提供 38 个 REST 端点的端到端冒烟测试（需启动 backend + redis）：
+
+```bash
+# 启动服务后运行
+bash scripts/interface_test.sh
+
+# 期望输出: 38/38 通过, 0 失败
+```
+
+> 该脚本覆盖设备注册/查询/删除、实时统计、告警（含视频异常 onset/recovery）、预测、警力分配、事件历史等全部接口，适合版本发布前的回归验证。
+
+#### 离线视频精度验证
+
+`tool/video_processor.py` 提供离线处理能力，输出含 `vehicle/person_flow_in/out`（60s 滑动窗口）的统计 JSON，用于在无实时流环境下验证计数精度：
+
+```bash
+# 离线处理测试视频（输出统计 + 事件 + 告警）
+python tool/video_processor.py \
+  --video data/test_50f.mp4 \
+  --output output/ \
+  --camera_id CAM001 \
+  --frame_skip 5
+
+# 检查输出统计
+python -c "import json; d=json.load(open('output/result.json')); print(d['final_statistics'])"
+```
