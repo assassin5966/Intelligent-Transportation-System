@@ -156,121 +156,249 @@ POST /api/events {device_id, event_type, occurred_at}
 └── .env.example
 ```
 
-## 环境要求
+## 部署指南
 
-- Docker 20.10+ （含 BuildKit）
-- Docker Compose v2
-- 基础镜像 `python:3.11-slim`（构建时自动拉取）
+### 部署形态总览
 
-## 手动构建镜像
+系统由**两个互相独立的 Docker Compose 项目**组成，按需选择部署形态：
 
-镜像**自动适配 CPU 架构**，无需额外参数：
+| 形态 | 启动的服务 | 适用场景 |
+|------|-----------|---------|
+| 最小部署 | `smartcity`: ai + backend + redis | 设备手填 RTSP 地址即可跑通 AI 计数 |
+| 完整部署 | `smartcity` + `wvp`: wvp + zlmediakit + wvp-mysql + wvp-redis | 接 GB28181 国标摄像头，设备自动同步 |
 
-| 架构 | torch 来源 | 说明 |
-|------|-----------|------|
-| x86_64 (amd64) | `download.pytorch.org/whl/cpu` | 轻量 CPU 版 (~200MB) |
-| aarch64 (arm64) | PyPI (清华镜像) | 官方 CPU 源无 aarch64 wheel，用 PyPI 版（含 CUDA，可在 GPU 服务器推理）|
-
-```bash
-# 1. 默认构建（自动按当前机器架构选 torch 源）
-docker build -t smart-city-platform:latest .
-
-# 2. (可选) 指定镜像名/标签
-docker build -t smart-city-platform:0.1.0 .
-
-# 3. (可选) 不使用缓存重建
-docker build --no-cache -t smart-city-platform:latest .
+```
+┌─ smartcity 网络 ─────────────────┐      ┌─ wvp-net 网络 ──────────────────┐
+│  ai(8001) ⇄ backend(8000) ⇄ redis│      │  wvp(18080/5060, host网络)      │
+└──────────────────────────────────┘      │  zlmediakit(80) mysql redis     │
+        │                                  └────────────────────────────────┘
+        │  跨网络互不连通! backend 访问 WVP 必须用宿主机 IP (见第四步)
+        └──────────────────────────────────────────┘
 ```
 
-> 构建已内置国内加速：apt 用清华 debian 源、pip 用清华 PyPI 源。
-> 若在 amd64 机器上需要 GPU 版 torch，编辑 Dockerfile 第 2 步把 amd64 分支的
-> `--index-url` 改为 `https://download.pytorch.org/whl/cu121`。
+### 第一步：准备
 
-## 启动服务（Docker Compose）
-
-```bash
-# 复制环境变量示例并按需修改
-cp .env.example .env
-
-# 构建并启动全部服务 (ai + backend + redis)
-docker compose -p smartcity up -d --build
-
-# 查看状态
-docker compose -p smartcity ps
-
-# 查看日志
-docker compose -p smartcity logs -f backend
-
-# 停止
-docker compose -p smartcity down
-```
-
-服务端口（默认）：
-- 后端 API：`8000`
-- AI 分析服务：`8001`
-- Redis：`16379`（主机映射，避免与宿主机 6379 冲突）
-- WVP 管理后台：`18080` / SIP：`5060`
-- ZLMediaKit HTTP-FLV：`80` / RTP 收包：`30000-30500/udp`
-
-> 注：docker-compose.yml 未固定 container_name，使用 `-p smartcity` 项目名隔离，
-> 适合在共享服务器上运行，避免与其他项目冲突。
-
-### 启用 GB28181/WVP 接入（可选）
-
-默认 `WVP_ENABLED=false`，设备靠手填 `stream_url` 注册（兼容旧流程）。启用 WVP 自动同步：
-
-1. `.env` 设 `WVP_ENABLED=true`（并可调 `WVP_USERNAME`/`WVP_PASSWORD`/`WVP_SYNC_INTERVAL` 等）。
-2. 启动 WVP 全家桶：`docker compose -p smartcity up -d mysql zlm wvp`，再（重）启 `backend`。
-3. 在 IPC 侧配置 GB28181 指向 WVP（SIP 域 `3402000000`、SIP ID `34020000002000000001`、端口 `5060`、密码 `12345678`，见 `configs/wvp/application.yml`），建议拉子码流降低推理压力。
-4. IPC 在 WVP 后台显示在线后，`POST /api/devices/sync` 同步入表 → `POST /api/devices/{id}/enable` 配计数线启流。
-5. 之后设备上下线/断流由后台 `wvp_sync`（每 30s）与 AI 断流刷新自动维护。
-
-> 跨网部署：`configs/wvp/application.yml` 的 `media.stream-ip`/`sdp-ip` 需改为 IPC 可达的宿主机/公网 IP（默认 `zlm` 仅容器内可达）。
-
-## 部署到新机器（跨机器构建指南）
-
-镜像不随仓库分发，需在目标机器上本地构建（Dockerfile 已跨架构自动适配）。
-
-### 前置条件
-- 已安装 Docker 20.10+（含 BuildKit）与 Docker Compose v2
-- Windows 需 10 22H2 (build 19045)+ 或 Windows 11（否则无法安装 Docker Desktop）；Linux / macOS 直接安装 Docker Engine / Docker Desktop
-
-### 标准步骤
 ```bash
 # 1. 克隆仓库
-git clone git@github.com:assassin5966/Intelligent-Transportation-System.git
+git clone https://github.com/assassin5966/Intelligent-Transportation-System.git
 cd Intelligent-Transportation-System
 
 # 2. 准备环境变量
-cp .env.example .env   # Windows PowerShell: copy .env.example .env
+cp .env.example .env
 
-# 3. 构建镜像（自动按当前机器 CPU 架构选 torch 源，无需任何参数）
-docker build -t smart-city-platform:latest .
+# 3. 准备 YOLO 权重 (必须!)
+#    models/ 被 gitignore 不入库, 但构建时 COPY 进镜像; 本地缺失则构建直接失败
+mkdir -p models
+# 国内网络从 hf-mirror 下载 (~5.4MB):
+wget -O models/yolo11n.pt https://hf-mirror.com/Ultralytics/YOLO11/resolve/main/yolo11n.pt
+# 有外网时也可以从 GitHub Release 下载, 或让本机已有的 ultralytics 自动下载后拷入
 
-# 4. 启动全栈 (ai + backend + redis)
-docker compose -p smartcity up -d --build
+# 4. (可选) 放入 Chronos-2 时序预测模型到 models/ (config.json 等)
+#    缺失时后端启动不报错, 预测自动降级为线性趋势外推
 ```
 
-### 国内网络加速
-- **pip / apt 已内置加速**：Dockerfile 配置了清华 PyPI + 清华 debian 源，构建时装包很快。
-- **Docker Hub 基础镜像拉取慢**时，用 `docker.1ms.run` 镜像前缀预拉并重打标，构建/启动时直接走本地缓存：
-  ```bash
-  docker pull docker.1ms.run/library/python:3.11-slim && docker tag docker.1ms.run/library/python:3.11-slim python:3.11-slim
-  docker pull docker.1ms.run/library/redis:7-alpine && docker tag docker.1ms.run/library/redis:7-alpine redis:7-alpine
-  ```
-  预拉后再 `docker compose up`，基础镜像命中本地缓存，不再连 Docker Hub。
-- **GitHub 克隆慢**：可用 HTTPS 方式 `https://github.com/assassin5966/Intelligent-Transportation-System.git`，或配置 git 代理。
+**环境要求**：Docker 20.10+（含 BuildKit）、Docker Compose v2；Windows 需 10 22H2+ / Win11。
 
-### CPU 架构自动适配
+### 第二步：构建业务镜像
 
-| 架构 | torch 来源 | 说明 |
-|------|-----------|------|
-| x86_64 (amd64，常见 PC/服务器) | `download.pytorch.org/whl/cpu` | 轻量 CPU 版 (~200MB) |
-| aarch64 (arm64，如 Grace/树莓派) | PyPI | 官方 CPU 源无 aarch64 wheel，用 PyPI 版（含 CUDA，可在 GPU 服务器推理）|
+```bash
+docker build -t smart-city-platform:latest .
+```
 
-- amd64 机器如需 **GPU 版 torch**：编辑 Dockerfile 中 amd64 分支，把 `--index-url` 改为 `https://download.pytorch.org/whl/cu121`，并在 docker-compose.yml 中启用 ai 服务的 `deploy.resources.reservations.devices` GPU 块。
-- 镜像只在本机构建、本机运行，不会自动同步；换机器重新 `docker build` 即可。
+镜像**自动适配 CPU 架构**（构建时按 `dpkg --print-architecture` 分支），无需任何参数：
 
+| 架构 | torch 来源 | 体积 | 首次构建耗时 |
+|------|-----------|------|------------|
+| x86_64 (amd64) | `download.pytorch.org/whl/cpu`（轻量 CPU 版） | ~3GB | 5-15 分钟 |
+| aarch64 (arm64) | PyPI 清华源（官方 CPU 源无 arm64 wheel，含 CUDA 依赖约 2GB+） | ~6.5GB | 30-60 分钟 |
+
+> - pip / apt 已内置国内加速（清华 PyPI + 清华 debian 源），无需额外配置。
+> - amd64 需 GPU 推理时：编辑 Dockerfile 把 amd64 分支 `--index-url` 改为
+>   `https://download.pytorch.org/whl/cu121`，并在 compose 启用 ai 服务 GPU 块。
+> - **构建失败排查**：`COPY models 失败` = 第一步的权重没放；下载超时 = 见下方加速器。
+
+### 国内受限网络：基础镜像预拉
+
+Docker Hub 直连（`registry-1.docker.io`）在国内通常超时。若 `docker info` 未配置可用的 Registry Mirror，先手动预拉基础镜像再构建/启动：
+
+```bash
+# 实测可用加速器 (2026-08): docker.m.daocloud.io / docker.1panel.live / ccr.ccs.tencentyun.com
+# 不可用: docker.1ms.run / docker.tbedu.top / hub-mirror.c.163.com / dockerpull.org
+M=docker.m.daocloud.io
+
+for img in library/python:3.11-slim library/redis:7-alpine library/mysql:8.0 zlmediakit/zlmediakit:master; do
+  docker pull $M/$img && docker tag $M/$img ${img#library/}
+done
+```
+
+> 注意：DaoCloud 对**个人镜像有白名单限制**（如 `648540858/wvp_pro` 不在白名单拉不到）；
+> 官方镜像（`library/*`）与 `zlmediakit/zlmediakit` 可正常拉取。
+
+### 离线构建（目标机器无外网）
+
+在有网机器上构建并导出，拷贝到目标机器导入（详见[完全离线部署](#完全离线部署无外网机器)）：
+
+```bash
+# 有网机器
+docker build -t smart-city-platform:latest .
+docker save smart-city-platform:latest | gzip > smart-city.tar.gz
+# 目标机器
+docker load < smart-city.tar.gz
+```
+
+### 第三步：启动业务服务（smartcity 项目）
+
+```bash
+docker compose -p smartcity up -d
+
+# 逐步验证 (每步应看到对应输出)
+docker compose -p smartcity ps                       # ai/backend/redis 为 Up
+curl http://localhost:8000/health                    # {"status":"ok","service":"backend"}
+curl http://localhost:8001/health                    # {"status":"ok","service":"ai",...}
+curl http://localhost:8000/api/stats/realtime        # 返回统计 JSON
+
+# 日常运维
+docker compose -p smartcity logs -f backend          # 跟日志
+docker compose -p smartcity down                     # 停止
+```
+
+服务端口：后端 `8000` / AI `8001` / Redis `16379`（避让宿主 6379）。
+
+> - `-p smartcity` 项目名隔离（compose 未固定 container_name），适合共享服务器。
+> - compose 内置 `rtsp-server` + `rtsp-streamer-{vehicle,person}` 测试推流服务（循环推测试视频），
+>   联调时可 `docker compose -p smartcity stop rtsp-server rtsp-streamer-vehicle rtsp-streamer-person`。
+> - **最小部署到此完成**：`POST /api/devices` 手填设备（`stream_url` 填
+>   `rtsp://<宿主IP>:8554/vehicle` 可用内置测试流）即可跑通。
+
+### 第四步（可选，GB28181 接入）：部署 WVP 信令平台
+
+按 CPU 架构选择方案--**arm64 机器没有现成镜像，必须源码自建**：
+
+| 场景 | 方案 |
+|------|------|
+| x86_64 (amd64) | 现成镜像 `648540858/wvp_pro:latest`（或仓库 `wvp-lower/`、`wvp-upper/` 级联编排）|
+| aarch64 (arm64) | **必须自建**：本仓库 `docker-compose.wvp.yml`（gitee 源码 maven 编译）|
+
+#### 4a. arm64 自建 WVP（本仓库方案）
+
+```bash
+# 1. 克隆 WVP 源码 (国内 gitee 镜像, ~1分钟)
+git clone --depth 1 https://gitee.com/pan648540858/wvp-GB28181-pro.git /tmp/wvp-src
+
+# 2. 预拉编译用基础镜像 (DaoCloud, 见第二步加速器)
+M=docker.m.daocloud.io
+docker pull $M/library/maven:3.9-eclipse-temurin-21 && docker tag $M/library/maven:3.9-eclipse-temurin-21 maven:3.9-eclipse-temurin-21
+docker pull $M/library/eclipse-temurin:21-jre && docker tag $M/library/eclipse-temurin:21-jre eclipse-temurin:21-jre
+
+# 3. 构建 WVP 镜像 (maven 多阶段编译, 约 10-20 分钟)
+docker build -t wvp:2.7.4 -f deploy/wvp/wvp/Dockerfile /tmp/wvp-src
+
+# 4. 启动 WVP 四容器 (端口映射 30000-30500 较多, 首次 up 需 1-3 分钟属正常)
+docker compose -p wvp -f docker-compose.wvp.yml up -d
+
+# 5. 验证
+docker compose -p wvp -f docker-compose.wvp.yml ps            # 四容器全 Up
+curl -o /dev/null -w "%{http_code}\n" http://localhost:18080  # 200/404 均表示 WVP 存活
+curl -o /dev/null -w "%{http_code}\n" http://localhost:80     # 200, ZLM 存活
+docker logs wvp-server 2>&1 | grep "SIP.*启动成功"             # tcp/udp 5060 启动成功
+docker logs wvp-server 2>&1 | grep "ZLM-连接成功"              # WVP 已连上 ZLM
+```
+
+WVP 管理后台：`http://<宿主IP>:18080`（admin / admin）。
+
+**arm64 方案已知注意点**：
+- **`WVP_HOST` 必须填摄像头可达的宿主机 IP**（默认 `172.16.168.9`，按实际网络改
+  `docker-compose.wvp.yml` 的 `WVP_HOST`）。WVP 用 host 网络 bind 该 IP 的 5060 端口。
+- **ZLM secret 漂移**：ZLM 认为配置里的 secret 非法时自动生成随机值，**ZLM 容器重启后
+  secret 会变**，导致 WVP 日志刷 `ZLM-尝试连接失败`。恢复：从 ZLM 日志取新 secret
+  （`docker logs wvp-zlmediakit 2>&1 | grep "modified it to"`），更新到
+  `deploy/wvp/wvp/application.yml` 的 `media.secret`（或 `ZLM_SECRET` 环境变量），重启 WVP。
+- WVP 专用 MySQL 映射宿主 `3307`（避让已占用的 3306）、Redis 映射 `6380`。
+
+#### 4b. 摄像头（IPC）侧 GB28181 配置
+
+IPC Web 管理界面 -> 网络 -> 平台接入 -> GB28181：
+
+| 参数 | 值 |
+|------|-----|
+| SIP 服务器 ID | `34020000002000000001` |
+| SIP 域 | `3402000000` |
+| SIP 服务器地址 | `<宿主机IP>`（arm64 方案即 `WVP_HOST` 的值）|
+| SIP 端口 | `5060` |
+| SIP 密码 | `12345678` |
+| 视频通道 | 建议选子码流（降低推理压力）|
+
+#### 4c. 后端对接 WVP（关键：跨网络用宿主 IP）
+
+`smartcity` 与 `wvp` 是两个隔离网络，**容器名互不可达**，`.env` 必须用宿主机 IP：
+
+```bash
+# .env 修改 (172.16.168.9 换成实际宿主 IP)
+WVP_ENABLED=true
+WVP_API_URL=http://172.16.168.9:18080     # 不要用 http://wvp:18080 (跨网络不通!)
+
+docker compose -p smartcity up -d backend  # 重建 backend 生效
+docker logs smartcity-backend-1 2>&1 | grep "WVP"   # 应看到 WVP 同步已启动
+```
+
+#### 4d. 设备上线与启流
+
+```
+IPC 注册 (上电/保存配置)
+  -> WVP 管理后台「国标设备」显示在线
+  -> POST /api/devices/sync                    # 手动触发同步入表 (或等 30s 自动)
+  -> POST /api/devices/glm-5.3_common/enable   # 配计数线/ROI 并启动 AI 管道
+  -> 之后设备上下线/断流由 wvp_sync(每30s)与 AI 断流刷新自动维护
+```
+
+### 完全离线部署（无外网机器）
+
+镜像不随仓库分发。在**有网机器**构建/拉齐全部镜像后导出，拷贝到**离线机器**导入：
+
+**镜像清单**：
+
+| 镜像 | 用途 | 离线机器是否必需 |
+|------|------|----------------|
+| `smart-city-platform:latest` | 业务（AI+后端，含模型） | 最小部署必需 |
+| `redis:7-alpine` | 业务状态存储 | 最小部署必需 |
+| `wvp:2.7.4` | WVP 信令（arm64 需自建） | GB28181 部署必需 |
+| `zlmediakit/zlmediakit:master` | 流媒体 | GB28181 部署必需 |
+| `mysql:8.0` | WVP 数据库 | GB28181 部署必需 |
+| `wvp 专用 redis` | 即 `redis:7-alpine`，复用 | - |
+
+**有网机器导出**：
+
+```bash
+docker save smart-city-platform:latest redis:7-alpine \
+  wvp:2.7.4 zlmediakit/zlmediakit:master mysql:8.0 \
+  | gzip > smartcity-all-images.tar.gz
+```
+
+**离线机器导入并启动**：
+
+```bash
+docker load < smartcity-all-images.tar.gz
+cd Intelligent-Transportation-System   # 仓库代码 git 内网克隆或拷贝
+cp .env.example .env                   # 按需修改 (WVP_API_URL 用宿主 IP)
+docker compose -p smartcity up -d      # 镜像已本地存在, 不再联网
+docker compose -p wvp -f docker-compose.wvp.yml up -d
+```
+
+> 离线机器同样需要仓库代码目录（compose 文件 + 挂载的 `app/`、`configs/` 等），
+> 通过内网 git 镜像或直接拷贝目录获取；模型已打包进业务镜像，无需单独放 `models/`。
+
+### 常见部署问题排查
+
+| 症状 | 原因与解决 |
+|------|-----------|
+| 构建 `COPY models` 失败 | 第一步的 `models/yolo11n.pt` 没放（gitignore 不入库）|
+| 拉基础镜像超时 / `registry-1.docker.io` 报错 | Docker Hub 直连不通，用第二步加速器预拉并重打标 |
+| arm64 拉 `648540858/wvp_pro` 失败 / `no matching manifest for linux/arm64` | 该镜像无 arm64 版本，走 4a 源码自建；DaoCloud 亦将其排除在白名单外 |
+| arm64 用 `mysql:5.7` 报 `no matching manifest` | 5.7 无 arm64 镜像，统一用 `mysql:8.0` |
+| backend 日志 WVP 同步失败 / 连接超时 | `WVP_API_URL` 用了容器名 `wvp`（跨网络不通），改成宿主机 IP |
+| WVP 日志刷 `ZLM-尝试连接失败` | ZLM 重启后 secret 漂移，按 4a 注意点同步新 secret 后重启 WVP |
+| WVP SIP 启动失败 `端口被占用或ip不正确` | `WVP_HOST` 不是本机网卡 IP；多网卡机器选摄像头可达的那个 |
+| `docker compose up` 卡在创建 wvp-zlmediakit | 30000-30500 端口映射量大属正常，等 1-3 分钟 |
 ## API 接口
 
 ### 后端（端口 8000）
