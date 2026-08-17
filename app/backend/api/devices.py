@@ -258,36 +258,47 @@ async def wvp_webhook(body: dict = Body(...)):
 async def snapshot(device_id: str):
     """截取一帧画面供前端绘制计数线/锚点.
 
-    仅 WVP 同步设备可用: play/start 拿 FLV → cv2 拉一帧 → 返回 JPEG.
-    截完自动 stop_play 释放 ZLM 资源.
+    支持两种模式:
+      1. WVP 同步设备: play/start 拿 FLV → cv2 拉一帧 → 返回 JPEG.
+      2. 手动注册设备: 直接用 stream_url 拉流截帧.
+    截完自动释放资源.
     """
-    if not settings.wvp_enabled:
-        raise HTTPException(503, "WVP 未启用 (wvp_enabled=false)")
     redis = get_redis()
     key = _DEVICE_KEY_PREFIX + device_id
     data = await redis.hgetall(key)
     if not data:
         raise HTTPException(404, "device not found")
+
     gb_dev = data.get("gb_device_id", "")
     gb_ch = data.get("gb_channel_id", "")
-    if not gb_dev or not gb_ch:
-        raise HTTPException(400, "非 WVP 同步设备, 无法截帧")
+    is_wvp = bool(settings.wvp_enabled and gb_dev and gb_ch)
 
-    from ..core.wvp_client import get_wvp_client
-    wvp = get_wvp_client()
-    play = await wvp.start_play(gb_dev, gb_ch)
-    try:
-        stream_url = wvp.select_stream_url(play)
+    if is_wvp:
+        # 模式 1: WVP 同步设备
+        from ..core.wvp_client import get_wvp_client
+        wvp = get_wvp_client()
+        play = await wvp.start_play(gb_dev, gb_ch)
+        try:
+            stream_url = wvp.select_stream_url(play)
+            if not stream_url:
+                raise HTTPException(502, "WVP 点播失败, 无法获取流地址")
+            jpeg = await asyncio.wait_for(
+                asyncio.to_thread(_capture_frame_sync, stream_url),
+                timeout=15.0,
+            )
+        except asyncio.TimeoutError:
+            raise HTTPException(504, "截帧超时 (流可能未就绪, 请重试)")
+        finally:
+            await wvp.stop_play(gb_dev, gb_ch)
+    else:
+        # 模式 2: 手动注册设备, 直接拉流截帧
+        stream_url = data.get("stream_url", "")
         if not stream_url:
-            raise HTTPException(502, "WVP 点播失败, 无法获取流地址")
+            raise HTTPException(400, "设备未配置 stream_url, 无法截帧")
         jpeg = await asyncio.wait_for(
             asyncio.to_thread(_capture_frame_sync, stream_url),
             timeout=15.0,
         )
-    except asyncio.TimeoutError:
-        raise HTTPException(504, "截帧超时 (流可能未就绪, 请重试)")
-    finally:
-        await wvp.stop_play(gb_dev, gb_ch)
 
     if jpeg is None:
         raise HTTPException(502, "截帧失败 (无法读取视频流, 检查设备是否在线)")
@@ -332,22 +343,21 @@ class DeviceEnableIn(BaseModel):
 
 @router.post("/{device_id}/enable", status_code=200)
 async def enable_device(device_id: str, body: DeviceEnableIn):
-    """为 WVP 同步设备配置计数线并启流 (status: synced -> online).
+    """配置计数线并启流 (支持 WVP 同步设备和手动注册设备).
 
-    仅适用于 wvp_sync 自动入表 (status=synced/offline) 的设备; 手动注册设备请直接
-    用 POST /api/devices.
+    两种模式:
+      1. WVP 同步设备: 调 WVP 拿流地址 → 启流 (status: synced -> online).
+      2. 手动注册设备: 更新配置 → 重启 AI 管道 (status: registered -> running).
     """
-    if not settings.wvp_enabled:
-        raise HTTPException(503, "WVP 未启用 (wvp_enabled=false)")
     redis = get_redis()
     key = _DEVICE_KEY_PREFIX + device_id
     data = await redis.hgetall(key)
     if not data:
         raise HTTPException(404, "device not found")
+
     gb_dev = data.get("gb_device_id", "")
     gb_ch = data.get("gb_channel_id", "")
-    if not gb_dev or not gb_ch:
-        raise HTTPException(400, "非 WVP 同步设备, 请直接用 POST /api/devices 注册")
+    is_wvp = bool(settings.wvp_enabled and gb_dev and gb_ch)
 
     # 落库计数线配置
     await redis.hset(
@@ -360,19 +370,32 @@ async def enable_device(device_id: str, body: DeviceEnableIn):
             "roi_coords": body.roi_coords or "",
         },
     )
-
-    # 调 WVP 拿流地址并启流
-    from ..core.wvp_client import get_wvp_client
-    from ..core.wvp_sync import _start_ai_pipeline
-
-    wvp = get_wvp_client()
-    play = await wvp.start_play(gb_dev, gb_ch)
-    stream_url = wvp.select_stream_url(play)
-    if not stream_url:
-        raise HTTPException(502, f"WVP 点播失败, 无法获取流地址 (gb_dev={gb_dev}, gb_ch={gb_ch})")
-
     updated = await redis.hgetall(key)
-    await _start_ai_pipeline(updated, stream_url)
-    await redis.hset(key, "status", "online")
-    logger.info(f"[WVP] 设备 {device_id} 已启用并启流")
-    return {"device_id": device_id, "status": "online", "stream_url": stream_url}
+
+    if is_wvp:
+        # 模式 1: WVP 同步设备
+        from ..core.wvp_client import get_wvp_client
+        from ..core.wvp_sync import _start_ai_pipeline
+
+        wvp = get_wvp_client()
+        play = await wvp.start_play(gb_dev, gb_ch)
+        stream_url = wvp.select_stream_url(play)
+        if not stream_url:
+            raise HTTPException(502, f"WVP 点播失败, 无法获取流地址 (gb_dev={gb_dev}, gb_ch={gb_ch})")
+
+        await _start_ai_pipeline(updated, stream_url)
+        await redis.hset(key, "status", "online")
+        logger.info(f"[WVP] 设备 {device_id} 已启用并启流")
+        return {"device_id": device_id, "status": "online", "stream_url": stream_url}
+    else:
+        # 模式 2: 手动注册设备 - 重启 AI 管道 (先停旧管道, 再起新管道)
+        from ..core.wvp_sync import _start_ai_pipeline
+
+        # 先停止旧管道 (如果存在)
+        await _forward_to_ai("DELETE", f"/devices/{device_id}")
+
+        # 再启动新管道
+        await _start_ai_pipeline(updated, updated.get("stream_url", ""))
+        await redis.hset(key, "status", "online")
+        logger.info(f"[手动] 设备 {device_id} 已重新配置并启流")
+        return {"device_id": device_id, "status": "online", "stream_url": updated.get("stream_url", "")}

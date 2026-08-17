@@ -25,7 +25,14 @@
   .dev-btn.online { border-color: #27ae60; }
   #canvasWrap { position: relative; display: inline-block; max-width: 100%; }
   canvas { display: block; max-width: 100%; border: 1px solid #444; background: #000; }
-  #status { margin-top: 12px; font-size: 13px; color: #aaa; min-height: 20px; }
+  #status { margin-top: 12px; font-size: 14px; min-height: 24px; padding: 10px 14px; border-radius: 6px; transition: all 0.3s; font-weight: 500; }
+  #status.success { color: #2ecc71; background: rgba(46,204,113,0.18); border: 1px solid rgba(46,204,113,0.5); box-shadow: 0 0 12px rgba(46,204,113,0.3); }
+  #status.error { color: #ff5e5e; background: rgba(231,76,60,0.18); border: 1px solid rgba(231,76,60,0.5); box-shadow: 0 0 12px rgba(231,76,60,0.3); }
+  #status.info { color: #aaa; background: transparent; border: none; }
+  #status.pending { color: #f1c40f; background: rgba(241,196,15,0.15); border: 1px solid rgba(241,196,15,0.4); }
+  #status.success::before { content: '✓ '; font-weight: bold; }
+  #status.error::before { content: '✗ '; font-weight: bold; }
+  #status.pending::before { content: '⏳ '; }
   .hint { font-size: 12px; color: #888; margin-top: 8px; line-height: 1.6; }
   .coords { font-size: 13px; color: #8be9fd; margin-top: 8px; font-family: monospace; }
   .error { color: #e74c3c; }
@@ -61,6 +68,9 @@
   </select>
   <button id="enableBtn" disabled onclick="doEnable()">启流计数</button>
   <button id="clearBtn" disabled onclick="clearCanvas()">清除画线</button>
+  <span style="width:1px;height:28px;background:#444;display:inline-block;margin:0 8px;"></span>
+  <button id="roiModeBtn" onclick="toggleRoiMode()" style="background:#5a4a2e;">ROI 模式</button>
+  <button id="clearRoiBtn" disabled onclick="clearRoi()" class="danger">清除 ROI</button>
 </div>
 
 <div id="canvasWrap">
@@ -71,7 +81,8 @@
 <div class="coords" id="coords"></div>
 
 <div class="hint">
-  操作：① 选择设备 -> 自动截帧 ② 在画面上点击两个点画计数线 ③ 再点一个点作为锚点（锚点所在侧=内侧=Enter方向）<br>
+  <b>计数线：</b>① 选择设备 -> 自动截帧 ② 在画面上点击两个点画计数线 ③ 再点一个点作为锚点（锚点所在侧=内侧=Enter方向）<br>
+  <b>ROI 区域：</b>点击「ROI 模式」切换到多边形绘制，点击画面添加顶点（至少3个），右键/双击完成多边形，仅 ROI 内轨迹参与计数<br>
   画完后点「启流计数」提交配置并启动 AI 推理管道。
 </div>
 
@@ -85,6 +96,8 @@ let baseUrl = '';
 let currentDevice = null;
 let img = null;
 let clicks = []; // [{x, y}] 前两个=线端点, 第三个=锚点
+let roiClicks = []; // [{x, y}] ROI 多边形顶点
+let isRoiMode = false;
 
 function api(path, options = {}) {
   return fetch(baseUrl + path, options).then(async r => {
@@ -97,9 +110,9 @@ function api(path, options = {}) {
   });
 }
 
-function setStatus(msg, cls = '') {
+function setStatus(msg, cls = 'info') {
   statusEl.textContent = msg;
-  statusEl.className = cls;
+  statusEl.className = 'status ' + cls;
 }
 
 async function doSync() {
@@ -107,33 +120,33 @@ async function doSync() {
   setStatus('正在同步设备...');
   try {
     const res = await api('/api/devices/sync', { method: 'POST' });
-    setStatus(`同步完成: 新增 ${res.json.added}, 启动 ${res.json.started}, 停止 ${res.json.stopped}, 恢复 ${res.json.recovered}`, 'ok');
-    await loadDevices();
+    setStatus(`同步完成: 新增 ${res.json.added}, 启动 ${res.json.started}, 停止 ${res.json.stopped}, 恢复 ${res.json.recovered}`, 'success');
+    await loadDevices(true);
   } catch (e) { setStatus('同步失败: ' + e.message, 'error'); }
 }
 
-async function loadDevices() {
+async function loadDevices(silent = false) {
   baseUrl = document.getElementById('baseUrl').value;
-  setStatus('加载设备列表...');
+  if (!silent) setStatus('加载设备列表...');
   try {
     const res = await api('/api/devices');
     const devices = res.json;
     const list = document.getElementById('deviceList');
     list.innerHTML = '';
-    if (!devices.length) { setStatus('暂无设备'); return; }
+    if (!devices.length) { if (!silent) setStatus('暂无设备'); return; }
     devices.forEach(d => {
       const btn = document.createElement('button');
       btn.className = 'dev-btn ' + (d.status || '');
       btn.textContent = `${d.id} [${d.status || '?'}]`;
-      if (d.status === 'synced' || d.status === 'online') {
+      if (d.status === 'synced' || d.status === 'online' || d.status === 'running' || d.status === 'registered') {
         btn.onclick = () => selectDevice(d);
       } else {
         btn.disabled = true;
       }
       list.appendChild(btn);
     });
-    setStatus(`共 ${devices.length} 台设备，点击 synced/online 设备进行配置`);
-  } catch (e) { setStatus('加载失败: ' + e.message, 'error'); }
+    if (!silent) setStatus(`共 ${devices.length} 台设备，点击设备进行配置`);
+  } catch (e) { if (!silent) setStatus('加载失败: ' + e.message, 'error'); }
 }
 
 async function selectDevice(d) {
@@ -141,9 +154,18 @@ async function selectDevice(d) {
   document.querySelectorAll('.dev-btn').forEach(b => b.classList.remove('active'));
   event.target.classList.add('active');
   clicks = [];
+  roiClicks = [];
+  isRoiMode = false;
+  document.getElementById('roiModeBtn').textContent = 'ROI 模式';
+  document.getElementById('roiModeBtn').style.background = '#5a4a2e';
   coordsEl.textContent = '';
   document.getElementById('enableBtn').disabled = true;
   document.getElementById('clearBtn').disabled = true;
+  document.getElementById('clearRoiBtn').disabled = true;
+
+  // 预填充类型和方向下拉框
+  document.getElementById('cameraType').value = d.camera_type || '';
+  document.getElementById('countOnly').value = d.count_only || '';
 
   setStatus(`正在截取 ${d.id} 画面... (约3-8秒)`);
   try {
@@ -154,8 +176,19 @@ async function selectDevice(d) {
     img.onload = () => {
       canvas.width = img.naturalWidth;
       canvas.height = img.naturalHeight;
+      // 显示设备已有 ROI
+      if (d.roi_coords) {
+        const parts = d.roi_coords.split(',').map(Number);
+        if (parts.length >= 6 && parts.length % 2 === 0) {
+          for (let i = 0; i < parts.length; i += 2) {
+            roiClicks.push({ x: parts[i] * canvas.width, y: parts[i+1] * canvas.height });
+          }
+          document.getElementById('clearRoiBtn').disabled = false;
+        }
+      }
       redraw();
-      setStatus(`截帧成功 ${img.naturalWidth}x${img.naturalHeight}，请点击画面画线`, 'ok');
+      const roiInfo = roiClicks.length ? ` ROI: ${roiClicks.length}顶点` : '';
+      setStatus(`截帧成功 ${img.naturalWidth}x${img.naturalHeight}，请点击画面画线${roiInfo}`, 'success');
       document.getElementById('clearBtn').disabled = false;
     };
     img.src = url;
@@ -170,6 +203,20 @@ canvas.addEventListener('click', (e) => {
   const x = (e.clientX - rect.left) * scaleX;
   const y = (e.clientY - rect.top) * scaleY;
 
+  if (isRoiMode) {
+    // ROI 模式：添加多边形顶点
+    roiClicks.push({ x, y });
+    document.getElementById('clearRoiBtn').disabled = false;
+    redraw();
+    const parts = roiClicks.map(c => `${(c.x/canvas.width).toFixed(4)},${(c.y/canvas.height).toFixed(4)}`).join('  ');
+    coordsEl.textContent = `ROI 顶点 (${roiClicks.length})：${parts}`;
+    setStatus(`ROI 顶点 ${roiClicks.length}/3+，继续点击或右键/双击完成`, 'ok');
+    if (roiClicks.length >= 3) {
+      document.getElementById('enableBtn').disabled = clicks.length < 3;
+    }
+    return;
+  }
+
   if (clicks.length >= 3) clicks = []; // 重新开始
 
   clicks.push({ x, y });
@@ -180,17 +227,87 @@ canvas.addEventListener('click', (e) => {
   } else if (clicks.length === 3) {
     const line = `${(clicks[0].x/canvas.width).toFixed(4)},${(clicks[0].y/canvas.height).toFixed(4)},${(clicks[1].x/canvas.width).toFixed(4)},${(clicks[1].y/canvas.height).toFixed(4)}`;
     const anchor = `${(clicks[2].x/canvas.width).toFixed(4)},${(clicks[2].y/canvas.height).toFixed(4)}`;
-    coordsEl.textContent = `计数线: ${line}\n锚点: ${anchor}`;
-    document.getElementById('enableBtn').disabled = false;
-    setStatus('配置就绪，点「启流计数」提交', 'ok');
+    coordsEl.textContent = `计数线: ${line}  锚点: ${anchor}`;
+    document.getElementById('enableBtn').disabled = roiClicks.length >= 3 ? false : false;
+    setStatus('配置就绪，点「启流计数」提交', 'success');
   } else {
     coordsEl.textContent = `点 ${clicks.length}/3: (${(x/canvas.width).toFixed(3)}, ${(y/canvas.height).toFixed(3)})`;
   }
 });
 
+// 右键/双击完成 ROI 绘制
+canvas.addEventListener('contextmenu', (e) => {
+  e.preventDefault();
+  if (isRoiMode && roiClicks.length >= 3) {
+    finishRoi();
+  }
+});
+canvas.addEventListener('dblclick', (e) => {
+  if (isRoiMode && roiClicks.length >= 3) {
+    e.preventDefault();
+    finishRoi();
+  }
+});
+
+function finishRoi() {
+  isRoiMode = false;
+  document.getElementById('roiModeBtn').textContent = 'ROI 模式';
+  document.getElementById('roiModeBtn').style.background = '#5a4a2e';
+  const parts = roiClicks.map(c => `${(c.x/canvas.width).toFixed(4)},${(c.y/canvas.height).toFixed(4)}`).join(' ');
+  setStatus(`ROI 完成 (${roiClicks.length} 顶点): ${parts}`, 'success');
+  document.getElementById('enableBtn').disabled = clicks.length < 3;
+}
+
 function redraw() {
   if (!img) return;
   ctx.drawImage(img, 0, 0);
+
+  // 绘制 ROI 多边形
+  if (roiClicks.length >= 3) {
+    ctx.beginPath();
+    ctx.moveTo(roiClicks[0].x, roiClicks[0].y);
+    for (let i = 1; i < roiClicks.length; i++) {
+      ctx.lineTo(roiClicks[i].x, roiClicks[i].y);
+    }
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(0, 150, 255, 0.15)';
+    ctx.fill();
+    ctx.strokeStyle = '#0096ff';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([6, 4]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    // 顶点标记
+    roiClicks.forEach((c, i) => {
+      ctx.beginPath();
+      ctx.arc(c.x, c.y, 5, 0, Math.PI * 2);
+      ctx.fillStyle = '#0096ff';
+      ctx.fill();
+      // 顶点序号
+      ctx.fillStyle = '#fff';
+      ctx.font = '12px monospace';
+      ctx.fillText(i + 1, c.x + 8, c.y - 4);
+    });
+  } else if (roiClicks.length > 0) {
+    // 绘制中的 ROI 线段
+    ctx.beginPath();
+    ctx.moveTo(roiClicks[0].x, roiClicks[0].y);
+    for (let i = 1; i < roiClicks.length; i++) {
+      ctx.lineTo(roiClicks[i].x, roiClicks[i].y);
+    }
+    ctx.strokeStyle = '#0096ff';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([6, 4]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    roiClicks.forEach((c, i) => {
+      ctx.beginPath();
+      ctx.arc(c.x, c.y, 5, 0, Math.PI * 2);
+      ctx.fillStyle = '#0096ff';
+      ctx.fill();
+    });
+  }
+
   if (clicks.length >= 1) {
     // 画已点击的点
     clicks.forEach((c, i) => {
@@ -227,9 +344,37 @@ function redraw() {
 function clearCanvas() {
   clicks = [];
   coordsEl.textContent = '';
-  document.getElementById('enableBtn').disabled = true;
+  document.getElementById('enableBtn').disabled = roiClicks.length < 3;
   redraw();
-  setStatus('已清除，请重新画线');
+  setStatus('已清除计数线，请重新画线');
+}
+
+function toggleRoiMode() {
+  isRoiMode = !isRoiMode;
+  const btn = document.getElementById('roiModeBtn');
+  if (isRoiMode) {
+    btn.textContent = '退出 ROI';
+    btn.style.background = '#c0392b';
+    setStatus('ROI 模式：点击画面添加多边形顶点（至少3个），右键或双击完成');
+  } else {
+    btn.textContent = 'ROI 模式';
+    btn.style.background = '#5a4a2e';
+    if (roiClicks.length >= 3) {
+      setStatus('ROI 已就绪', 'success');
+    } else {
+      setStatus('已退出 ROI 模式');
+    }
+  }
+}
+
+function clearRoi() {
+  roiClicks = [];
+  document.getElementById('clearRoiBtn').disabled = true;
+  document.getElementById('enableBtn').disabled = clicks.length < 3;
+  if (isRoiMode) toggleRoiMode();
+  redraw();
+  coordsEl.textContent = coordsEl.textContent.split('\n').filter(l => !l.includes('ROI')).join('\n');
+  setStatus('已清除 ROI 区域');
 }
 
 async function doEnable() {
@@ -239,10 +384,13 @@ async function doEnable() {
   const cameraType = document.getElementById('cameraType').value;
   const countOnly = document.getElementById('countOnly').value;
 
-  setStatus('正在启流...');
+  setStatus('正在启流...', 'pending');
   const body = { line_coords: line, anchor_coords: anchor };
   if (cameraType) body.camera_type = cameraType;
   if (countOnly) body.count_only = countOnly;
+  if (roiClicks.length >= 3) {
+    body.roi_coords = roiClicks.map(c => `${(c.x/canvas.width).toFixed(4)},${(c.y/canvas.height).toFixed(4)}`).join(',');
+  }
 
   try {
     const res = await api(`/api/devices/${currentDevice.id}/enable`, {
@@ -250,8 +398,8 @@ async function doEnable() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
     });
-    setStatus(`启流成功! 设备 ${currentDevice.id} 已上线，AI 开始计数`, 'ok');
-    await loadDevices();
+    setStatus(`启流成功! 设备 ${currentDevice.id} 已上线，AI 开始计数`, 'success');
+    await loadDevices(true);
   } catch (e) { setStatus('启流失败: ' + e.message, 'error'); }
 }
 

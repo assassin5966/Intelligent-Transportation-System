@@ -1,0 +1,13 @@
+# ============================================================
+# Mock 模式 Docker Compose 覆盖配置
+# 功能: 用 data/ 下的测试视频通过 RTSP 模拟视频流, 启动后端所有功能接口
+# 用法: docker compose -f docker-compose.yml -f docker-compose.mock.yml up -d
+# 停止: docker compose -f docker-compose.yml -f docker-compose.mock.yml down
+# ============================================================
+
+services:
+  # ---------- 业务后端: Mock 模式关闭 WVP 同步 ----------
+  # 主 docker-compose.yml 已包含 RTSP 推流服务 (rtsp-streamer-*)
+  backend:
+    environment:
+      - WVP_ENABLED=false

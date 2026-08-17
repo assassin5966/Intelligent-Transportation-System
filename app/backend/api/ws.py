@@ -13,7 +13,7 @@ from typing import Set
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from ..core.realtime import get_stats
+from ..core.realtime import get_all_device_stats, get_stats
 
 router = APIRouter(tags=["websocket"])
 
@@ -62,12 +62,14 @@ async def websocket_endpoint(websocket: WebSocket):
     queue: asyncio.Queue = asyncio.Queue(maxsize=100)
     register_ws_client(queue)
 
-    # 连接时立即推送一次当前统计
+    # 连接时立即推送一次当前统计 (含按设备明细)
     try:
         stats = await get_stats()
+        devices = await get_all_device_stats()
         await websocket.send_text(json.dumps({
             "type": "stats",
             "data": stats,
+            "devices": devices,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }, default=str))
     except Exception:
@@ -80,12 +82,14 @@ async def websocket_endpoint(websocket: WebSocket):
                 message = await asyncio.wait_for(queue.get(), timeout=_STATS_INTERVAL)
                 await websocket.send_text(json.dumps(message, default=str))
             except asyncio.TimeoutError:
-                # 超时无消息 -> 推送最新统计
+                # 超时无消息 -> 推送最新统计 (含按设备明细)
                 try:
                     stats = await get_stats()
+                    devices = await get_all_device_stats()
                     await websocket.send_text(json.dumps({
                         "type": "stats",
                         "data": stats,
+                        "devices": devices,
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                     }, default=str))
                 except Exception:
