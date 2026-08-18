@@ -24,7 +24,9 @@
   .dev-btn.synced { border-color: #f39c12; }
   .dev-btn.online { border-color: #27ae60; }
   #canvasWrap { position: relative; display: inline-block; max-width: 100%; }
-  canvas { display: block; max-width: 100%; border: 1px solid #444; background: #000; }
+  #video { display: none; max-width: 100%; border: 1px solid #444; background: #000; }
+  canvas { display: block; max-width: 100%; border: 1px solid #444; }
+  canvas.overVideo { position: absolute; inset: 0; width: 100%; height: 100%; background: transparent; border: none; z-index: 1; }
   #status { margin-top: 12px; font-size: 14px; min-height: 24px; padding: 10px 14px; border-radius: 6px; transition: all 0.3s; font-weight: 500; }
   #status.success { color: #2ecc71; background: rgba(46,204,113,0.18); border: 1px solid rgba(46,204,113,0.5); box-shadow: 0 0 12px rgba(46,204,113,0.3); }
   #status.error { color: #ff5e5e; background: rgba(231,76,60,0.18); border: 1px solid rgba(231,76,60,0.5); box-shadow: 0 0 12px rgba(231,76,60,0.3); }
@@ -67,6 +69,7 @@
     <option value="exit">只计离开</option>
   </select>
   <button id="enableBtn" disabled onclick="doEnable()">启流计数</button>
+  <button id="previewBtn" disabled onclick="togglePreview()">▶ 预览</button>
   <button id="clearBtn" disabled onclick="clearCanvas()">清除画线</button>
   <span style="width:1px;height:28px;background:#444;display:inline-block;margin:0 8px;"></span>
   <button id="roiModeBtn" onclick="toggleRoiMode()" style="background:#5a4a2e;">ROI 模式</button>
@@ -74,6 +77,7 @@
 </div>
 
 <div id="canvasWrap">
+  <video id="video" muted autoplay playsinline></video>
   <canvas id="canvas" width="960" height="540"></canvas>
 </div>
 
@@ -160,8 +164,10 @@ async function selectDevice(d) {
   document.getElementById('roiModeBtn').style.background = '#5a4a2e';
   coordsEl.textContent = '';
   document.getElementById('enableBtn').disabled = true;
+  document.getElementById('previewBtn').disabled = true;
   document.getElementById('clearBtn').disabled = true;
   document.getElementById('clearRoiBtn').disabled = true;
+  if (previewOn) stopPreview();
 
   // 预填充类型和方向下拉框
   document.getElementById('cameraType').value = d.camera_type || '';
@@ -190,6 +196,7 @@ async function selectDevice(d) {
       const roiInfo = roiClicks.length ? ` ROI: ${roiClicks.length}顶点` : '';
       setStatus(`截帧成功 ${img.naturalWidth}x${img.naturalHeight}，请点击画面画线${roiInfo}`, 'success');
       document.getElementById('clearBtn').disabled = false;
+      document.getElementById('previewBtn').disabled = false;
     };
     img.src = url;
   } catch (e) { setStatus('截帧失败: ' + e.message + ' (设备可能离线)', 'error'); }
@@ -259,8 +266,8 @@ function finishRoi() {
 }
 
 function redraw() {
-  if (!img) return;
-  ctx.drawImage(img, 0, 0);
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (img) ctx.drawImage(img, 0, 0); // 非预览时画截帧底图; 预览时 video 在底层播放
 
   // 绘制 ROI 多边形
   if (roiClicks.length >= 3) {
@@ -375,6 +382,75 @@ function clearRoi() {
   redraw();
   coordsEl.textContent = coordsEl.textContent.split('\n').filter(l => !l.includes('ROI')).join('\n');
   setStatus('已清除 ROI 区域');
+}
+
+// ---- 实时预览播放 (flv.js / hls.js 按协议动态加载) ----
+const videoEl = document.getElementById('video');
+let previewOn = false;
+let previewPlayer = null;
+
+function loadScript(src) {
+  return new Promise((ok, fail) => {
+    if (document.querySelector(`script[src="${src}"]`)) return ok();
+    const s = document.createElement('script');
+    s.src = src;
+    s.onload = ok;
+    s.onerror = () => fail(new Error('CDN 脚本加载失败(内网?): ' + src));
+    document.head.appendChild(s);
+  });
+}
+
+async function togglePreview() {
+  if (previewOn) { stopPreview(); return; }
+  if (!currentDevice) return;
+  setStatus('正在获取播放地址...', 'pending');
+  try {
+    const res = await api(`/api/devices/${currentDevice.id}/play`);
+    const { play_url, protocol } = res.json;
+    setStatus(`正在启动播放 (${protocol.toUpperCase()})...`, 'pending');
+    if (previewPlayer) { try { previewPlayer.destroy(); } catch (e) {} previewPlayer = null; }
+    if (protocol === 'flv') {
+      await loadScript('https://cdn.jsdelivr.net/npm/flv.js@1.6.2/dist/flv.min.js');
+      previewPlayer = flvjs.createPlayer({ type: 'flv', url: play_url, isLive: true });
+      previewPlayer.attachMediaElement(videoEl);
+      previewPlayer.load();
+    } else {
+      await loadScript('https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js');
+      if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
+        videoEl.src = play_url; // Safari 原生 HLS
+      } else if (Hls.isSupported()) {
+        previewPlayer = new Hls();
+        previewPlayer.loadSource(play_url);
+        previewPlayer.attachMedia(videoEl);
+      } else {
+        throw new Error('浏览器不支持 HLS 播放');
+      }
+    }
+    await videoEl.play();
+    previewOn = true;
+    img = null; // 预览时 video 作底层, canvas 只叠加画线
+    canvas.classList.add('overVideo');
+    videoEl.style.display = 'block';
+    videoEl.addEventListener('loadedmetadata', () => {
+      canvas.width = videoEl.videoWidth;
+      canvas.height = videoEl.videoHeight;
+      redraw();
+    }, { once: true });
+    document.getElementById('previewBtn').textContent = '■ 停止预览';
+    setStatus(`预览播放中 (${protocol.toUpperCase()}): ${play_url}`, 'success');
+  } catch (e) { setStatus('预览失败: ' + e.message, 'error'); }
+}
+
+function stopPreview() {
+  videoEl.pause();
+  videoEl.removeAttribute('src');
+  videoEl.load();
+  videoEl.style.display = 'none';
+  if (previewPlayer) { try { previewPlayer.destroy(); } catch (e) {} previewPlayer = null; }
+  previewOn = false;
+  canvas.classList.remove('overVideo');
+  document.getElementById('previewBtn').textContent = '▶ 预览';
+  setStatus('已停止预览');
 }
 
 async function doEnable() {

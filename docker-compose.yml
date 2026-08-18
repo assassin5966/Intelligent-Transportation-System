@@ -55,6 +55,9 @@ services:
       - WVP_SYNC_INTERVAL=${WVP_SYNC_INTERVAL:-30}
       - WVP_PLAY_PROTOCOL=${WVP_PLAY_PROTOCOL:-flv}
       - WVP_STREAM_SUB=${WVP_STREAM_SUB:-true}
+      # 前端播放地址翻译 (/api/devices/glm-5.3_common/play); 空值走自动推导/原样返回
+      - ZLM_PUBLIC_BASE=${ZLM_PUBLIC_BASE:-}
+      - MEDIAMTX_PUBLIC_BASE=${MEDIAMTX_PUBLIC_BASE:-}
     volumes:
       - ./app:/app/app:cached
       - ./models:/app/models:cached
@@ -87,10 +90,11 @@ services:
     container_name: traffic-rtsp-server
     ports:
       - "8554:8554"    # RTSP
-      - "1935:1935"    # RTMP
-      - "8888:8888"    # HTTP
+      - "8888:8888"    # HTTP (HLS 播放, 前端经 /play 接口拿此地址)
+      # 1935 RTMP 已移除映射: 与 wvp 项目的 zlmediakit(1935) 冲突; 当前推流走 8554 RTSP 不需要 RTMP
     volumes:
       - ./data:/data/video:ro
+      - ./configs/mediamtx.yml:/mediamtx.yml:ro   # 开启 HLS (默认关闭; 前端 /play 播放依赖)
     # 默认配置即可接收 publisher 模式推流
 
   # ---------- RTSP 推流服务 - 车辆识别 (用 FFmpeg 推送本地视频到 MediaMTX) ----------

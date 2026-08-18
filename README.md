@@ -415,6 +415,7 @@ docker compose -p wvp -f docker-compose.wvp.yml up -d
 | POST | `/api/devices/{id}/enable` | 配置计数线/ROI 并启动 AI 管道 |
 | POST | `/api/devices/{id}/heartbeat` | AI 心跳上报（供离线检测，90s 超时标离线）|
 | GET | `/api/devices/{id}/stream` | 获取/刷新 FLV 流地址（WVP play/start，AI 断流刷新用）|
+| GET | `/api/devices/{id}/play` | 前端播放地址（WVP→flv / RTSP→HLS，浏览器可播）|
 | POST | `/api/devices/wvp-webhook` | WVP 设备上下线 webhook 回调 |
 | GET/POST/DELETE | `/api/police/regions` | 警力区域管理 |
 | GET | `/api/police/allocation` | 当前警力分配结果 |

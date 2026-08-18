@@ -69,5 +69,13 @@ class Settings(BaseSettings):
     wvp_play_protocol: str = "flv"  # AI 拉流协议: flv | rtsp
     wvp_stream_sub: bool = True  # 拉子码流降低推理压力 (False=主码流)
 
+    # ---- 前端播放地址翻译 (/api/devices/glm-5.3_common/play) ----
+    # ZLM 对外地址前缀 (如 http://172.16.168.9:80); 空则 WVP 返回的 flv 地址原样返回
+    # (WVP 返回地址的 host 取决于 ZLM stream-ip 配置, 配了容器名时浏览器不可达, 需此处重写)
+    zlm_public_base: str = ""
+    # MediaMTX 对外地址 (如 http://172.16.168.9:8888); 空则按前端请求的 Host 自动推导 (:8888)
+    # 用于把 RTSP 测试流 (rtsp://...:8554/{path}) 翻译成浏览器可播的 HLS 地址
+    mediamtx_public_base: str = ""
+
 
 settings = Settings()

@@ -7,7 +7,7 @@ import asyncio
 from typing import Literal, Optional
 
 import httpx
-from fastapi import APIRouter, Body, HTTPException, Response
+from fastapi import APIRouter, Body, HTTPException, Request, Response
 from pydantic import BaseModel
 
 from ...common.config import settings
@@ -331,6 +331,85 @@ async def refresh_stream(device_id: str):
         "stream_url": stream_url,
         "stream_id": play.get("stream_id") if play else None,
     }
+
+
+def _rewrite_url_base(url: str, base: str) -> str:
+    """把 url 的 scheme://host:port 替换为 base, 保留 path/query (path 含 stream_id 是关键)."""
+    from urllib.parse import urlsplit, urlunsplit
+
+    parts = urlsplit(url)
+    b = urlsplit(base)
+    return urlunsplit((b.scheme, b.netloc, parts.path, parts.query, parts.fragment))
+
+
+@router.get("/{device_id}/play")
+async def play(device_id: str, request: Request):
+    """返回浏览器可直接播放的流地址 (前端大屏/预览用; AI 拉流请走 /stream).
+
+    三分支地址翻译:
+      1. WVP 同步设备: play/start 取 FLV; 配置 zlm_public_base 时重写 scheme://host:port
+      2. 手动 RTSP 设备 (约定推流源为 MediaMTX): rtsp://host:8554/{path}
+         -> http://{宿主}:8888/{path}/index.m3u8 (HLS, 浏览器 hls.js 可播)
+      3. stream_url 已是 http(s)://: 原样返回 (如 ZLM FLV 直配)
+    """
+    redis = get_redis()
+    data = await redis.hgetall(_DEVICE_KEY_PREFIX + device_id)
+    if not data:
+        raise HTTPException(404, "device not found")
+
+    gb_dev = data.get("gb_device_id", "")
+    gb_ch = data.get("gb_channel_id", "")
+    stream_url = data.get("stream_url", "")
+
+    # 分支 1: WVP 同步设备 -> FLV
+    if settings.wvp_enabled and gb_dev and gb_ch:
+        from ..core.wvp_client import get_wvp_client
+
+        wvp = get_wvp_client()
+        play_result = await wvp.start_play(gb_dev, gb_ch)
+        flv = (play_result or {}).get("flv")
+        if not flv:
+            raise HTTPException(502, f"WVP 点播失败, 无法获取播放地址 (gb_dev={gb_dev}, gb_ch={gb_ch})")
+        if settings.zlm_public_base:
+            flv = _rewrite_url_base(flv, settings.zlm_public_base.rstrip("/"))
+        return {
+            "device_id": device_id,
+            "play_url": flv,
+            "protocol": "flv",
+            "source": "wvp",
+            "stream_id": (play_result or {}).get("stream_id"),
+        }
+
+    # 分支 2: RTSP 设备 -> 约定推流源为 MediaMTX, 翻译为 HLS
+    if stream_url.startswith("rtsp://"):
+        from urllib.parse import urlsplit
+
+        path = urlsplit(stream_url).path.strip("/")
+        if not path:
+            raise HTTPException(400, f"RTSP 流地址缺少路径, 无法翻译为 HLS: {stream_url!r}")
+        base = settings.mediamtx_public_base.rstrip("/")
+        if not base:
+            # 从前端请求的 Host 推导宿主 IP (前端能访问后端 8000 即可访问同机 MediaMTX 8888)
+            host = request.url.hostname or "127.0.0.1"
+            base = f"http://{host}:8888"
+        return {
+            "device_id": device_id,
+            "play_url": f"{base}/{path}/index.m3u8",
+            "protocol": "hls",
+            "source": "mediamtx",
+            "source_stream_url": stream_url,
+        }
+
+    # 分支 3: http(s) 流地址原样返回
+    if stream_url.startswith(("http://", "https://")):
+        return {
+            "device_id": device_id,
+            "play_url": stream_url,
+            "protocol": "flv",
+            "source": "direct",
+        }
+
+    raise HTTPException(400, f"设备无可播放的流地址 (stream_url={stream_url!r})")
 
 
 class DeviceEnableIn(BaseModel):

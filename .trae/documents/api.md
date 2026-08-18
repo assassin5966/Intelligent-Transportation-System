@@ -233,7 +233,36 @@ GET /api/devices/{device_id}/stream
 
 **错误** `503` WVP 未启用 / `404` 设备不存在 / `400` 非 WVP 同步设备 / `502` WVP 点播失败。
 
-### 3.6 启用 WVP 同步设备
+### 3.6 前端播放地址
+
+返回浏览器可直接播放的流地址（前端大屏/预览用；AI 拉流请走 3.5 刷新流地址）。按设备类型三分支翻译：
+
+| 设备类型 | 翻译逻辑 | protocol |
+|---------|---------|----------|
+| WVP 同步设备 | `play/start` 取 FLV；配置 `ZLM_PUBLIC_BASE` 时重写地址前缀 | `flv` |
+| RTSP 设备（MediaMTX 推流） | `rtsp://host:8554/{path}` -> `http://{宿主}:8888/{path}/index.m3u8`（HLS，`MEDIAMTX_PUBLIC_BASE` 可覆盖，空则按请求 Host 自动推导） | `hls` |
+| http(s) 直配流地址 | 原样返回 | `flv` |
+
+```
+GET /api/devices/{device_id}/play
+```
+
+**响应** `200 OK`（RTSP/MediaMTX 设备示例）
+```json
+{
+  "device_id": "mock-vehicle-01",
+  "play_url": "http://172.16.168.9:8888/vehicle/index.m3u8",
+  "protocol": "hls",
+  "source": "mediamtx",
+  "source_stream_url": "rtsp://rtsp-server:8554/vehicle"
+}
+```
+
+WVP 设备额外返回 `stream_id`。前端按 `protocol` 选择播放器：`flv` -> flv.js，`hls` -> hls.js（Safari 原生）。
+
+**错误** `404` 设备不存在 / `400` 无可播放流地址 / `502` WVP 点播失败。
+
+### 3.7 启用 WVP 同步设备
 
 为 `wvp_sync` 自动入表（`status=synced`/`offline`）的设备配置计数线并启流（`status -> online`）。手动注册设备请直接用 `POST /api/devices`。
 
@@ -256,7 +285,7 @@ POST /api/devices/{device_id}/enable
 { "device_id": "GB-...", "status": "online", "stream_url": "http://zlm/live/xxx.flv" }
 ```
 
-### 3.7 WVP Webhook（预留）
+### 3.8 WVP Webhook（预留）
 
 接收 WVP 定制回调（设备上下线等），透传后触发一次同步。WVP 默认无对外 HTTP webhook，此端点供定制对接（如在 WVP 侧配置事件转发）。
 
@@ -267,7 +296,7 @@ POST /api/devices/wvp-webhook
 **请求体** 任意 JSON（透传记录日志）。
 **响应** 同步结果（同 3.4）；WVP 未启用时返回 `{"status":"skipped","reason":"wvp_disabled"}`。
 
-### 3.8 截取设备画面（配置计数线用）
+### 3.9 截取设备画面（配置计数线用）
 
 对未配置计数线的 WVP 同步设备（`status=synced`），截取一帧画面返回 JPEG 图片，供前端绘制计数线和锚点。
 
