@@ -67,17 +67,6 @@
 | 实时状态 | Redis (redis.asyncio) |
 | 通信 | HTTPX (事件推送) + WebSocket (实时轨迹) |
 
-### 1.4 视频接入：GB28181 / WVP 自动同步
-
-IPC 经 GB28181 SIP 注册到 WVP-GB28181-pro 平台；点播时 WVP 向 IPC 发 INVITE，ZLMediaKit 接收 RTP（RFC 6184 重组 H.264 NALU）并转封装为 HTTP-FLV，AI 服务用 OpenCV（FFmpeg）拉流解码出 BGR 帧送 YOLO11 推理。
-
-**后端为 WVP 唯一对接点**（AI 服务不持有 WVP token）：
-- **设备自动同步**（`app/backend/core/wvp_sync.py`）：每 30s 轮询 WVP 设备/通道，按 `gb_device_id`+`gb_channel_id` 与本地 Redis 设备表比对。新增通道入表 `status=synced`（不自动启流，缺计数线）；WVP 侧离线则停 AI pipeline 标 `offline`；恢复则重新启流。`camera_type` 从通道名启发式推断（含「车」→vehicle、含「人」→person）。
-- **流地址自动刷新**：AI 断流重连失败时回调后端 `GET /api/devices/{id}/stream`，后端转调 WVP `play/start` 返回新 FLV 地址；`stream_frames` 的 `url_provider` 回调带 10s 冷却防频繁打 WVP。
-- **webhook 预留**：`POST /api/devices/wvp-webhook` 供 WVP 定制回调（WVP 默认无对外 HTTP webhook，主力靠轮询）。
-
-**关键配置**：`stream-on-demand=false`（AI 持续拉即持续推，避免 ZLM 无人观看断流）、默认拉子码流降推理压力、`mediaServerId`/`secret` 在 ZLM `config.ini` 与 WVP `application.yml` 间保持一致。手动注册（直填 `stream_url`）路径向后兼容，`url_provider=None` 时离线 `video_processor` 行为不变。
-
 ***
 
 ## 二、目标检测算法（YOLO11）
@@ -875,6 +864,100 @@ services:
 
 ***
 
+## 十一·五、视频异常识别（黑屏 + 花屏）
+
+在视频处理流水线中实时识别两类视频异常，复用现有告警体系（Redis 持久化 + WebSocket 推送），覆盖在线（`DevicePipeline`）与离线（`video_processor.py`）两条路径。异常属**事件驱动型**告警，不走 `rules.yaml` 阈值评估，由 AI 管道直接注入告警流。
+
+### 1. 分析帧预处理
+
+为使阈值与分辨率无关且低开销，检测前将原始帧等比缩放到固定分析宽度（默认 480px），插值采用 `cv2.INTER_NEAREST`（**不平滑**，保留噪声特性，避免 `INTER_AREA` 平均化削弱花屏噪声导致漏检）。所有阈值面向该分析宽度标定，可通过环境变量/.env 覆盖。
+
+### 2. 黑屏检测（black_screen）
+
+摄像头故障/信号丢失导致整帧近黑。**双条件 AND**，避免夜间合法低光场景误报：
+
+```python
+brightness = mean(gray)                                    # 整体亮度
+black_ratio = count(gray < black_pixel_value) / total      # 近黑像素占比
+is_black = brightness < black_screen_brightness AND black_ratio > black_screen_ratio
+```
+
+- 纯黑帧：brightness≈0、ratio≈1.0 → 命中。
+- 夜间有路灯：brightness 偏高或 ratio < 0.95 → 不命中。
+
+### 3. 花屏检测（flower_screen）
+
+花屏表现为随机彩色噪声（雪花点）或 MPEG 块状损坏。采用**多信号复合 AND**，单信号均易误报，复合后鲁棒：
+
+| 信号 | 计算 | 花屏特征 |
+|------|------|---------|
+| `spatial_noise` | NxN 块均标准差 | 每块都高噪 → 高 |
+| `uniformity` | 1 - CV(块std) | 噪声遍布全图 → 高（块间 std 接近） |
+| `channel_corr` | R-G、G-B 相关系数均值绝对值 | 彩色雪花随机 → 低（去相关） |
+| `temporal_diff` | mean(\|gray - prev_gray\|) | 每帧随机 → 高 |
+
+```python
+is_flower = spatial_noise > T_noise AND uniformity > T_uniform
+if 有前帧:
+    is_flower = is_flower AND (channel_corr < T_corr OR temporal_diff > T_temp)   # 覆盖彩色雪花(去相关) + 块状损坏(时域抖动)
+else:
+    is_flower = is_flower AND (channel_corr < T_corr)                              # 首帧仅靠去相关
+```
+
+- 正常复杂静态场景（如树冠）：spatial/uniform 高，但 `channel_corr` 高且 `temporal_diff≈0` → 不命中。
+- 正常繁忙动态：`temporal_diff` 中等、`channel_corr` 高 → 不命中。
+- **优先级**：先判黑屏，命中则直接返回（黑帧空间噪声低，不会误触花屏）。
+
+> **实测验证**：mp4v 压缩的随机噪声帧 `channel_corr≈0.57`（压缩引入通道相关，去相关信号失效），但 `temporal_diff≈56` 命中，仍正确检出花屏 — 证明多信号复合设计的必要性。
+
+### 4. 去抖与状态机（AnomalyMonitor）
+
+- **采样**：每 `anomaly_check_interval` 帧检测一次（默认 30 帧 ≈ 1s@30fps），降低 CPU（单次 <5ms）。
+- **连续确认** `anomaly_confirm_frames`（默认 2）：连续 N 次采样命中才确认，过滤单帧毛刺。
+- **状态机**：`normal ⇄ black_screen/flower_screen`，仅在**状态转移**时产出事件（onset/recovery），避免持续告警刷屏。
+
+**双层去重**（与越线计数多层过滤一致）：
+- 管道层：`confirm_frames` 连续确认 + 状态转移（仅报 onset/recovery）。
+- 后端层：`anomaly_cooldown_seconds` Redis NX 去重（兜底，防管道重启重复上报）。
+
+### 5. 双路径集成
+
+| 路径 | 集成点 | 行为 |
+|------|--------|------|
+| 在线 | `DevicePipeline._run()` 帧循环 | 状态转移 → AI WS 广播 `video_anomaly` + POST `/api/alerts/anomaly` |
+| 离线 | `tool/video_processor.py` 帧循环 | 状态转移 → 记录到 `{video}_anomalies.json` + 标注视频叠加红色边框 |
+
+### 6. 告警通道
+
+异常**不走 `/api/events`**（不改变车/人在场计数，`EVENT_DELTA` 无映射），走告警通道：
+
+- `POST /api/alerts/anomaly`（后端）：Redis 冷却去重 → `persist_alert` 落 Redis List → `broadcast_alert` 推后端 `/ws`。
+- `onset` → `critical`，`recovery` → `info`；`category=video_anomaly`，`rule_id=video_{black_screen|flower_screen}`。
+- 前端经 `GET /api/alerts` 与后端 `/ws` 即可看到，**无需前端改动**。
+
+### 7. 配置参数
+
+| 参数 | 默认 | 说明 |
+|------|------|------|
+| `anomaly_check_interval` | 30 | 每 N 帧检测一次 |
+| `anomaly_confirm_frames` | 2 | 连续确认采样数（去抖） |
+| `anomaly_cooldown_seconds` | 60 | 后端告警冷却（秒） |
+| `anomaly_analysis_width` | 480 | 分析帧宽度 |
+| `black_screen_brightness` | 20 | 灰度均值上限（黑屏条件1） |
+| `black_screen_ratio` | 0.95 | 近黑像素占比下限（黑屏条件2） |
+| `flower_noise_std` | 35.0 | 块均标准差下限（花屏: 高噪） |
+| `flower_uniformity` | 0.6 | 噪声均匀度下限（花屏: 均匀） |
+| `flower_channel_corr` | 0.5 | 通道相关性上限（花屏: 去相关） |
+| `flower_temporal_diff` | 25.0 | 时域差分下限（花屏: 时域高噪） |
+
+### 8. 验证结果
+
+- **单元测试**（`tests/test_anomaly.py`）：9/9 通过，黑屏/花屏/正常/低光非黑/首帧无时域/去抖/恢复/采样/正常段无事件 全覆盖。
+- **真实视频回归**：`车辆识别20s.mp4`、`人流识别20s.mp4`（各 500 帧）异常事件 = 0（无误报）。
+- **合成视频端到端**（`data/anomaly_test.mp4`，450 帧，正常→黑屏→正常→花屏→正常 各 90 帧）：检出 4 个事件 — 黑屏 onset@帧150 / 黑屏 recovery@帧210 / 花屏 onset@帧330 / 花屏 recovery@帧390。
+
+***
+
 ## 十二、风险与应对
 
 | 风险点 | 应对措施 |
@@ -891,6 +974,10 @@ services:
 | Chronos-2 模型加载失败 | 降级为线性趋势外推 |
 | Redis 单点故障 | appendonly 持久化 + 数据可重建 |
 | 夜间低光照 | YOLO11 预训练模型适应性 + 可换权重 |
+| 黑屏误报（夜间低光） | 双条件 AND（亮度 + 近黑占比），仅纯黑帧命中 |
+| 花屏误报（复杂纹理场景） | 多信号复合 AND（空间噪声 + 均匀度 + 去相关/时域），正常场景通道高相关被过滤 |
+| 花屏漏报（压缩噪声通道相关） | 时域差分信号兜底，覆盖 mp4/H.264 压缩噪声子类 |
+| 异常告警刷屏 | 双层去重（管道状态转移 + 后端 Redis 冷却 60s） |
 
 ***
 
@@ -911,5 +998,10 @@ services:
 | 设备管理 | [app/backend/api/devices.py](file:///Users/bianwei/Desktop/codes/DT/app/backend/api/devices.py) |
 | 时序预测 | [app/prediction/chronos_model.py](file:///Users/bianwei/Desktop/codes/DT/app/prediction/chronos_model.py) |
 | 离线处理器 | [tool/video_processor.py](file:///Users/bianwei/Desktop/codes/DT/tool/video_processor.py) |
+| 视频异常识别 | [app/ai/anomaly.py](file:///Users/bianwei/Desktop/codes/DT/app/ai/anomaly.py) |
+| 异常上报API | [app/backend/api/alerts.py](file:///Users/bianwei/Desktop/codes/DT/app/backend/api/alerts.py) |
 | 全局配置 | [app/common/config.py](file:///Users/bianwei/Desktop/codes/DT/app/common/config.py) |
 | 事件Schema | [app/schemas/events.py](file:///Users/bianwei/Desktop/codes/DT/app/schemas/events.py) |
+| 异常单元测试 | [tests/test_anomaly.py](file:///Users/bianwei/Desktop/codes/DT/tests/test_anomaly.py) |
+| 异常测试视频生成 | [scripts/gen_anomaly_video.py](file:///Users/bianwei/Desktop/codes/DT/scripts/gen_anomaly_video.py) |
+| 异常端到端测试 | [scripts/anomaly_test.sh](file:///Users/bianwei/Desktop/codes/DT/scripts/anomaly_test.sh) |
