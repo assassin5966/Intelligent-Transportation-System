@@ -126,7 +126,13 @@ async function doSync() {
     const res = await api('/api/devices/sync', { method: 'POST' });
     setStatus(`同步完成: 新增 ${res.json.added}, 启动 ${res.json.started}, 停止 ${res.json.stopped}, 恢复 ${res.json.recovered}`, 'success');
     await loadDevices(true);
-  } catch (e) { setStatus('同步失败: ' + e.message, 'error'); }
+  } catch (e) {
+    if (String(e.message).includes('WVP 同步未启用')) {
+      setStatus('当前未启用 WVP (WVP_ENABLED=false)：同步按钮仅用于国标摄像头场景；测试流/直连流直接「手动注册」即可（mock 设备已在列表中）', 'info');
+    } else {
+      setStatus('同步失败: ' + e.message, 'error');
+    }
+  }
 }
 
 async function loadDevices(silent = false) {
