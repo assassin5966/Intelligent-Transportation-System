@@ -11,3 +11,18 @@ services:
   backend:
     environment:
       - WVP_ENABLED=false
+
+  # ---------- RTSP 推流视频覆盖: 统一用 data/text.mp4 (点位 mock) ----------
+  # 主 compose 推车辆识别20s.mp4/人流识别20s.mp4; mock 环境只有 text.mp4,
+  # 这里覆盖推流命令, 两路点位共用同一测试视频.
+  rtsp-streamer-vehicle:
+    command: >
+      ffmpeg -re -stream_loop -1 -i /data/video/text.mp4
+      -c:v libx264 -preset ultrafast -tune zerolatency
+      -f rtsp -rtsp_transport tcp rtsp://rtsp-server:8554/vehicle
+
+  rtsp-streamer-person:
+    command: >
+      ffmpeg -re -stream_loop -1 -i /data/video/text.mp4
+      -c:v libx264 -preset ultrafast -tune zerolatency
+      -f rtsp -rtsp_transport tcp rtsp://rtsp-server:8554/person

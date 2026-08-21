@@ -92,36 +92,35 @@ sleep 10
 # ---- 3. 注册 Mock 设备 ----
 log_info "注册 Mock 设备..."
 
-# 3a. 车辆识别摄像头 (北门) - RTSP 流
-log_info "注册车辆识别摄像头..."
-VEHICLE_RESP=$(curl -s -X POST "http://localhost:8000/api/devices" \
+# 3a. 点位1: 和阳南门出口路南以东85米 (GAJK-2648, 便道人流) - RTSP 流
+log_info "注册点位1 (GAJK-2648 和阳南门出口路南以东85米)..."
+PT1_RESP=$(curl -s -X POST "http://localhost:8000/api/devices" \
     -H "Content-Type: application/json" \
     -d '{
-        "id": "mock-cam-vehicle",
-        "name": "北门摄像头-车辆",
+        "id": "mock-pt1-gajk2648",
+        "name": "GAJK-2648 和阳南门出口路南以东85米",
         "stream_url": "rtsp://rtsp-server:8554/vehicle",
         "line_coords": "0.3,0.5,0.7,0.5",
         "anchor_coords": "0.5,0.6",
-        "count_only": "enter",
-        "camera_type": "vehicle"
+        "camera_type": "person"
     }')
-echo "  车辆识别: $VEHICLE_RESP"
+echo "  点位1: $PT1_RESP"
 
 sleep 2
 
-# 3b. 人流识别摄像头 (南门) - RTSP 流
-log_info "注册人流识别摄像头..."
-PERSON_RESP=$(curl -s -X POST "http://localhost:8000/api/devices" \
+# 3b. 点位2: 和阳南门出口路北以东90米 (GAJK-2649, 便道人流) - RTSP 流
+log_info "注册点位2 (GAJK-2649 和阳南门出口路北以东90米)..."
+PT2_RESP=$(curl -s -X POST "http://localhost:8000/api/devices" \
     -H "Content-Type: application/json" \
     -d '{
-        "id": "mock-cam-person",
-        "name": "南门摄像头-人流",
+        "id": "mock-pt2-gajk2649",
+        "name": "GAJK-2649 和阳南门出口路北以东90米",
         "stream_url": "rtsp://rtsp-server:8554/person",
         "line_coords": "0.5,0.3,0.5,0.7",
         "anchor_coords": "0.6,0.5",
         "camera_type": "person"
     }')
-echo "  人流识别: $PERSON_RESP"
+echo "  点位2: $PT2_RESP"
 
 sleep 3
 
@@ -166,8 +165,8 @@ echo "  RTSP 车辆流:        rtsp://localhost:8554/vehicle"
 echo "  RTSP 人流流:        rtsp://localhost:8554/person"
 echo ""
 echo "  注册设备:"
-echo "    - mock-cam-vehicle (北门车辆, RTSP)"
-echo "    - mock-cam-person  (南门人流, RTSP)"
+echo "    - mock-pt1-gajk2648 (点位1: GAJK-2648 和阳南门出口路南以东85米)"
+echo "    - mock-pt2-gajk2649 (点位2: GAJK-2649 和阳南门出口路北以东90米)"
 echo ""
 log_info "查看日志: docker compose $COMPOSE_FILES logs -f [service]"
 log_info "停止服务: bash scripts/mock_start.sh --down"

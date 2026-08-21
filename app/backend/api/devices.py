@@ -47,6 +47,7 @@ class DeviceIn(BaseModel):
     count_only: Optional[Literal["enter", "exit"]] = None  # None=双向, "enter"=只计Enter, "exit"=只计Exit
     camera_type: Optional[Literal["vehicle", "person"]] = None  # None=全部检测, vehicle/person
     roi_coords: Optional[str] = None  # "x1,y1,x2,y2,..." 归一化 0-1, >=3 顶点
+    max_vehicles: Optional[int] = None  # 拥挤判断: ROI 内最大车辆数阈值 (>0 开启拥挤判断)
     gb_device_id: Optional[str] = None  # 国标设备ID (WVP 同步设备填写, 手动注册留空)
     gb_channel_id: Optional[str] = None  # 国标通道ID (WVP 同步设备填写, 手动注册留空)
 
@@ -60,6 +61,7 @@ class DeviceOut(BaseModel):
     count_only: Optional[str] = None
     camera_type: Optional[str] = None
     roi_coords: Optional[str] = None
+    max_vehicles: Optional[int] = None
     gb_device_id: Optional[str] = None
     gb_channel_id: Optional[str] = None
     status: str = "registered"
@@ -154,7 +156,12 @@ async def list_():
     async for key in redis.scan_iter(f"{_DEVICE_KEY_PREFIX}*"):
         data = await redis.hgetall(key)
         if data:
-            found.append(DeviceOut(**data))
+            # Redis hash 空值一律是 "", Pydantic v2 对 Optional[int] 无法解析空字符串,
+            # 统一清洗为 None (兼容历史设备无 max_vehicles 字段).
+            clean = dict(data)
+            if clean.get("max_vehicles") == "":
+                clean["max_vehicles"] = None
+            found.append(DeviceOut(**clean))
     return found
 
 
@@ -173,6 +180,7 @@ async def register(dev: DeviceIn):
             "count_only": dev.count_only or "",
             "camera_type": dev.camera_type or "",
             "roi_coords": dev.roi_coords or "",
+            "max_vehicles": str(dev.max_vehicles) if dev.max_vehicles is not None else "",
             "gb_device_id": dev.gb_device_id or "",
             "gb_channel_id": dev.gb_channel_id or "",
             "status": "registered",
@@ -418,6 +426,7 @@ class DeviceEnableIn(BaseModel):
     count_only: Optional[Literal["enter", "exit"]] = None
     camera_type: Optional[Literal["vehicle", "person"]] = None
     roi_coords: Optional[str] = None
+    max_vehicles: Optional[int] = None  # 拥挤判断: ROI 内最大车辆数阈值 (设置后拥挤判断生效)
 
 
 @router.post("/{device_id}/enable", status_code=200)
@@ -447,6 +456,7 @@ async def enable_device(device_id: str, body: DeviceEnableIn):
             "count_only": body.count_only or "",
             "camera_type": body.camera_type or "",
             "roi_coords": body.roi_coords or "",
+            "max_vehicles": str(body.max_vehicles) if body.max_vehicles is not None else "",
         },
     )
     updated = await redis.hgetall(key)

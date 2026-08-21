@@ -262,6 +262,21 @@ class LineCrossingCounter:
         self._recompute_clip()
         logger.info(f"已设置 ROI 多边形 ({len(self.roi_polygon)} 顶点)")
 
+    def count_roi_vehicles(self, tracks) -> int:
+        """统计 ROI 内的车辆个数 (瞬时在场车辆数, 供拥挤判断).
+
+        - 车辆类别: car/truck/bus
+        - ROI 未启用时统计全画面车辆 (向后兼容)
+        - 只按当前帧判定, 不依赖跨线事件 (反映真实在场占用)
+        """
+        count = 0
+        for track in tracks:
+            if track.class_name not in ("car", "truck", "bus"):
+                continue
+            if self._point_in_roi(track.center):
+                count += 1
+        return count
+
     def _point_in_roi(self, point) -> bool:
         """点是否在 ROI 多边形内 (射线法); ROI 未启用时恒返回 True."""
         if self._roi_px is None:

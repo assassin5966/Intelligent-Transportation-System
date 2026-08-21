@@ -31,6 +31,10 @@ class Settings(BaseSettings):
     vehicle_person_min: int = 2  # 每车最少人数 (车流转人流随机采样下界)
     vehicle_person_max: int = 5  # 每车最多人数 (车流转人流随机采样上界)
 
+    # ---- 车流速度与拥挤判断 ----
+    congestion_min_flow: float = 5.0  # 拥挤判定: 每分钟跨线车辆数低于此值视为车流速度过低 (辆/分钟)
+    roi_report_interval: float = 2.0  # AI 每 N 秒上报一次 ROI 内车辆数 (供拥挤判断)
+
     # ---- 告警 ----
     rules_file: str = "configs/rules.yaml"
 

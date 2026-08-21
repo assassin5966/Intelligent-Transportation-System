@@ -1,5 +1,7 @@
 """单设备处理管道: 拉流 -> 跟踪 -> 越线计数 -> 推送事件到后端 + WebSocket推送."""
 import asyncio
+import time
+from collections import deque
 from datetime import datetime
 from typing import List, Optional
 
@@ -63,6 +65,9 @@ class DevicePipeline:
         self._anomaly_monitor = AnomalyMonitor()  # 视频异常监测 (黑屏/花屏)
         # WVP 同步设备启用流地址刷新: 断流重连失败时回调后端 /api/devices/{id}/stream 拿新地址
         self.enable_url_refresh = enable_url_refresh
+        # 车流速度统计: 最近 60 秒跨线车辆事件时间戳 (用于计算每分钟车流量, 单调时钟秒)
+        self._vehicle_cross_times: deque = deque(maxlen=4096)
+        self._last_roi_report = 0.0  # 上次 ROI 车辆数上报时刻 (monotonic 秒)
 
     async def _run(self) -> None:
         logger.info(f"[{self.device_id}] 管道启动: {self.stream_url}")
@@ -92,6 +97,18 @@ class DevicePipeline:
                 for event in events:
                     await self._push(event)
                     await self._broadcast_ws(event)
+
+                # 车流速度统计: 记录车辆跨线事件时间戳 (每分钟车流量计算)
+                now_mono = time.monotonic()
+                for event in events:
+                    if event.event_type in ("VehicleEnter", "VehicleExit"):
+                        self._vehicle_cross_times.append(now_mono)
+
+                # 周期上报 ROI 内车辆个数 (供后端拥挤判断)
+                if now_mono - self._last_roi_report >= settings.roi_report_interval:
+                    self._last_roi_report = now_mono
+                    roi_vehicles = self.counter.count_roi_vehicles(track_result.tracks)
+                    await self._report_congestion(roi_vehicles)
 
                 await self._broadcast_tracks_ws(track_result)
         except asyncio.CancelledError:
@@ -152,6 +169,41 @@ class DevicePipeline:
             )
         except Exception as e:  # noqa: BLE001
             logger.error(f"[{self.device_id}] 推送失败: {e}")
+
+    def _vehicle_flow_per_minute(self, now_mono: float) -> float:
+        """最近 60 秒内车辆跨线次数折算为每分钟车流量 (辆/分钟).
+
+        车流速度指标: 反映车流通过计数线的速率, 停滞/缓行时趋近 0.
+        """
+        cutoff = now_mono - 60.0
+        while self._vehicle_cross_times and self._vehicle_cross_times[0] < cutoff:
+            self._vehicle_cross_times.popleft()
+        return float(len(self._vehicle_cross_times))
+
+    async def _report_congestion(self, roi_vehicles: int) -> None:
+        """周期上报 ROI 内车辆个数 + 每分钟车流量, 供后端拥挤判定.
+
+        车流速度 = 最近 60 秒车辆跨线次数 (辆/分钟).
+        上报失败仅记日志, 不阻塞视频处理.
+        """
+        now_mono = time.monotonic()
+        flow_per_min = self._vehicle_flow_per_minute(now_mono)
+        payload = {
+            "device_id": self.device_id,
+            "roi_vehicles": roi_vehicles,
+            "vehicle_flow_per_min": flow_per_min,
+        }
+        try:
+            resp = await self._client.post(
+                f"{settings.backend_url}/api/stats/congestion",
+                json=payload,
+            )
+            logger.debug(
+                f"[{self.device_id}] 拥挤上报 roi_vehicles={roi_vehicles} "
+                f"flow={flow_per_min:.1f}/min -> HTTP {resp.status_code}"
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[{self.device_id}] 拥挤上报失败: {e}")
 
     async def _handle_anomaly(self, ev: AnomalyEvent) -> None:
         """视频异常 (黑屏/花屏) 上报: AI WS 广播 + POST 后端告警端点.
