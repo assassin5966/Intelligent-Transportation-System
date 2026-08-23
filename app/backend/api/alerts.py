@@ -6,6 +6,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from ...common.business_rules import get_rule
 from ...common.config import settings
 from ...common.logger import logger
 from ...common.redis_client import get_redis
@@ -58,7 +59,11 @@ async def report_anomaly(body: AnomalyAlertIn):
         f"{settings.redis_prefix}:alert:anomaly:"
         f"{body.device_id}:{body.anomaly_type}:{body.phase}"
     )
-    if not await redis.set(dedup_key, "1", ex=settings.anomaly_cooldown_seconds, nx=True):
+    if not await redis.set(
+        dedup_key, "1",
+        ex=int(get_rule("alerts", "anomaly_cooldown_seconds", default=settings.anomaly_cooldown_seconds)),
+        nx=True,
+    ):
         return {"status": "deduplicated", "device_id": body.device_id}
 
     label = _ANOMALY_LABELS[body.anomaly_type]

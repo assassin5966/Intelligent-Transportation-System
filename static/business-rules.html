@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>业务规则配置 - 运维工具</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: system-ui, sans-serif; background: #1a1a2e; color: #e0e0e0; padding: 20px; }
+  h1 { font-size: 18px; margin-bottom: 6px; color: #8be9fd; }
+  .sub { font-size: 13px; color: #888; margin-bottom: 16px; line-height: 1.6; }
+  .row { display: flex; gap: 12px; margin-bottom: 16px; align-items: center; flex-wrap: wrap; }
+  input, select, button {
+    padding: 6px 12px; border: 1px solid #444; border-radius: 4px;
+    background: #2a2a4e; color: #e0e0e0; font-size: 14px;
+  }
+  input[type="number"] { width: 110px; text-align: right; font-family: monospace; }
+  button { cursor: pointer; background: #0d7377; border: none; }
+  button:hover { background: #14a085; }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  button.danger { background: #c0392b; }
+  button.danger:hover { background: #e74c3c; }
+  button.ghost { background: transparent; border: 1px solid #444; }
+  button.ghost:hover { background: #2a2a4e; }
+  .nav { margin-bottom: 16px; }
+  .nav a { color: #8be9fd; font-size: 13px; text-decoration: none; margin-right: 16px; }
+  .nav a:hover { text-decoration: underline; }
+  .group { background: #242444; border: 1px solid #333; border-radius: 8px; margin-bottom: 16px; padding: 16px; }
+  .group h2 { font-size: 15px; color: #8be9fd; margin-bottom: 2px; }
+  .group .gdesc { font-size: 12px; color: #888; margin-bottom: 12px; }
+  .param { display: flex; align-items: center; gap: 12px; padding: 8px 0; border-top: 1px solid #2a2a4e; flex-wrap: wrap; }
+  .param:first-of-type { border-top: none; }
+  .param label { width: 190px; font-size: 13px; color: #e0e0e0; flex-shrink: 0; }
+  .param .pdesc { font-size: 12px; color: #888; flex: 1; min-width: 180px; line-height: 1.5; }
+  .param .def { font-size: 11px; color: #666; font-family: monospace; }
+  .param .reset { padding: 2px 8px; font-size: 12px; background: #444; }
+  .param .reset:hover { background: #666; }
+  .param .dirty { color: #f1c40f; font-size: 11px; }
+  #status { margin-top: 12px; font-size: 14px; min-height: 24px; padding: 10px 14px; border-radius: 6px; font-weight: 500; }
+  #status.success { color: #2ecc71; background: rgba(46,204,113,0.18); border: 1px solid rgba(46,204,113,0.5); }
+  #status.error { color: #ff5e5e; background: rgba(231,76,60,0.18); border: 1px solid rgba(231,76,60,0.5); }
+  #status.info { color: #aaa; background: transparent; border: none; }
+  #status.pending { color: #f1c40f; background: rgba(241,196,15,0.15); border: 1px solid rgba(241,196,15,0.4); }
+  #status.success::before { content: '✓ '; font-weight: bold; }
+  #status.error::before { content: '✗ '; font-weight: bold; }
+  #status.pending::before { content: '⏳ '; }
+</style>
+</head>
+<body>
+
+<h1>业务规则配置</h1>
+<div class="sub">
+  修改计数 / 告警 / 拥挤 / 警力 / 预测 / 视频异常 / 跟踪参数，保存后<b style="color:#8be9fd;">基于文件 mtime 热重载</b>，<b>无需重启</b> backend 与 AI 服务。
+  配置持久化到 <code>configs/business_rules.yaml</code>。
+</div>
+
+<div class="nav">
+  <a href="/static/device-config.html">← 设备计数配置</a>
+</div>
+
+<div class="row">
+  <label>后端地址</label>
+  <input id="baseUrl" value="http://localhost:8000" style="width:240px">
+  <button onclick="loadRules()">加载配置</button>
+  <button class="danger" onclick="resetAll()">全部恢复默认</button>
+  <button id="saveBtn" disabled onclick="saveRules()">保存并热重载</button>
+</div>
+
+<div id="groups"></div>
+
+<div id="status" class="info">加载后在此查看结果…</div>
+
+<script>
+let groups = [];   // 后端返回的分组元数据
+const base = () => document.getElementById('baseUrl').value.trim().replace(/\/$/, '');
+
+function setStatus(msg, cls) {
+  const el = document.getElementById('status');
+  el.className = cls;
+  el.textContent = msg;
+}
+
+// 恢复某参数为默认值
+function resetParam(groupKey, paramKey) {
+  const g = groups.find(x => x.key === groupKey);
+  const p = g.params.find(x => x.key === paramKey);
+  p.value = p.default;
+  const inp = document.querySelector(`[data-group="${groupKey}"][data-key="${paramKey}"]`);
+  if (inp) inp.value = p.default;
+  markDirty(inp);
+}
+
+// 全部恢复默认
+function resetAll() {
+  if (!groups.length) return;
+  groups.forEach(g => g.params.forEach(p => p.value = p.default));
+  document.querySelectorAll('input[type="number"]').forEach(inp => {
+    const g = groups.find(x => x.key === inp.dataset.group);
+    const p = g && g.params.find(x => x.key === inp.dataset.key);
+    if (p) inp.value = p.default;
+    markDirty(inp);
+  });
+  setStatus('已恢复为默认值，点击「保存并热重载」生效', 'info');
+}
+
+function markDirty(inp) {
+  if (!inp) return;
+  const g = groups.find(x => x.key === inp.dataset.group);
+  const p = g && g.params.find(x => x.key === inp.dataset.key);
+  const dirty = p && String(p.value) !== String(p.default);
+  inp.parentElement.querySelector('.dirty').textContent = dirty ? '已修改' : '';
+}
+
+async function loadRules() {
+  setStatus('加载中…', 'pending');
+  const saveBtn = document.getElementById('saveBtn');
+  saveBtn.disabled = true;
+  try {
+    const resp = await fetch(`${base()}/api/config/business-rules`);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+    groups = data.groups;
+    render(data.groups);
+    saveBtn.disabled = false;
+    setStatus(`已加载 ${data.groups.length} 个分组 (${data.file})，保存即热重载`, 'success');
+  } catch (e) {
+    setStatus(`加载失败: ${e.message}。请确认后端地址正确且已重启后端使新接口生效。`, 'error');
+  }
+}
+
+function render(groups) {
+  const wrap = document.getElementById('groups');
+  wrap.innerHTML = '';
+  groups.forEach(g => {
+    const card = document.createElement('div');
+    card.className = 'group';
+    let html = `<h2>${g.title}</h2><div class="gdesc">${g.desc}</div>`;
+    g.params.forEach(p => {
+      const num = p.type === 'int' || p.type === 'float';
+      const step = p.step || (p.type === 'int' ? 1 : 0.1);
+      const range = num && (p.min !== undefined || p.max !== undefined)
+        ? ` min="${p.min ?? ''}" max="${p.max ?? ''}"` : '';
+      html += `<div class="param">
+        <label title="${p.key}">${p.label}</label>
+        <input type="${num ? 'number' : 'text'}" data-group="${g.key}" data-key="${p.key}"
+               value="${p.value}" step="${step}"${range}
+               oninput="onChange(this)">
+        <span class="def">默认 ${p.default}</span>
+        <span class="dirty"></span>
+        <button class="reset" onclick="resetParam('${g.key}', '${p.key}')">恢复默认</button>
+        <span class="pdesc">${p.desc}</span>
+      </div>`;
+    });
+    card.innerHTML = html;
+    wrap.appendChild(card);
+  });
+  document.querySelectorAll('input[type="number"]').forEach(markDirty);
+}
+
+function onChange(inp) {
+  const g = groups.find(x => x.key === inp.dataset.group);
+  const p = g && g.params.find(x => x.key === inp.dataset.key);
+  if (!p) return;
+  p.value = inp.value;
+  markDirty(inp);
+}
+
+async function saveRules() {
+  setStatus('保存中…', 'pending');
+  // 组装 {分组: {参数: 值}}; 空输入框按默认值提交
+  const body = {};
+  groups.forEach(g => {
+    body[g.key] = {};
+    g.params.forEach(p => {
+      let v = p.value;
+      if (v === '' || v === null || v === undefined) v = p.default;
+      body[g.key][p.key] = p.type === 'int' ? parseInt(v, 10) : (p.type === 'float' ? parseFloat(v) : v);
+    });
+  });
+  try {
+    const resp = await fetch(`${base()}/api/config/business-rules`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+    groups = data.groups;
+    render(data.groups);
+    setStatus(`${data.message} (${data.file})`, 'success');
+  } catch (e) {
+    setStatus(`保存失败: ${e.message}`, 'error');
+  }
+}
+
+// 初始加载
+loadRules();
+</script>
+</body>
+</html>

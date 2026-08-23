@@ -11,6 +11,7 @@ import json
 from datetime import datetime, timezone
 from typing import Optional
 
+from ...common.business_rules import get_rule
 from ...common.config import settings
 from ...common.logger import logger
 from ...common.redis_client import get_redis
@@ -23,11 +24,17 @@ _CONGESTION_DEV_PREFIX = f"{settings.redis_prefix}:congestion:device:"
 _CONGESTION_STATE_PREFIX = f"{settings.redis_prefix}:congestion:state:"
 
 
-async def record_congestion(device_id: str, roi_vehicles: int, vehicle_flow_per_min: float) -> dict:
+async def record_congestion(
+    device_id: str,
+    roi_vehicles: int,
+    vehicle_flow_per_min: float,
+    person_flow_per_min: float = 0.0,
+) -> dict:
     """记录一次 AI 上报的拥挤数据, 执行双阈值拥挤判定, 返回判定结果.
 
     - roi_vehicles: ROI 内瞬时车辆个数
     - vehicle_flow_per_min: 每分钟车流量 (辆/分钟, 车流速度)
+    - person_flow_per_min: 每分钟人流量 (人/分钟, 人流速度)
     """
     redis = get_redis()
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -38,6 +45,7 @@ async def record_congestion(device_id: str, roi_vehicles: int, vehicle_flow_per_
             "device_id": device_id,
             "roi_vehicles": roi_vehicles,
             "vehicle_flow_per_min": vehicle_flow_per_min,
+            "person_flow_per_min": person_flow_per_min,
             "updated_at": now_iso,
         },
     )
@@ -60,9 +68,11 @@ async def record_congestion(device_id: str, roi_vehicles: int, vehicle_flow_per_
             "max_vehicles": 0,
         }
 
+    # 车流速度下限热重载 (business_rules.yaml 修改后无需重启)
+    min_flow = float(get_rule("congestion", "congestion_min_flow", default=settings.congestion_min_flow))
     congested = (
         roi_vehicles >= max_vehicles
-        and vehicle_flow_per_min < settings.congestion_min_flow
+        and vehicle_flow_per_min < min_flow
     )
 
     state_key = f"{_CONGESTION_STATE_PREFIX}{device_id}"
@@ -98,10 +108,11 @@ async def _trigger_alert(
     phase: str,
 ) -> None:
     """持久化拥挤告警并 WebSocket 推送 (onset=critical, recovery=info)."""
+    min_flow = float(get_rule("congestion", "congestion_min_flow", default=settings.congestion_min_flow))
     if phase == "onset":
         message = (
             f"设备 {device_id} 拥堵: 区域车辆 {roi_vehicles}/{max_vehicles} "
-            f"且车流速度 {vehicle_flow_per_min:.1f} 辆/分钟 (低于 {settings.congestion_min_flow})"
+            f"且车流速度 {vehicle_flow_per_min:.1f} 辆/分钟 (低于 {min_flow})"
         )
     else:
         message = (
@@ -151,6 +162,7 @@ async def latest_congestion(device_id: Optional[str] = None) -> list[dict]:
             "device_id": data.get("device_id", ""),
             "roi_vehicles": int(data.get("roi_vehicles", 0)),
             "vehicle_flow_per_min": float(data.get("vehicle_flow_per_min", 0.0)),
+            "person_flow_per_min": float(data.get("person_flow_per_min", 0.0)),
             "updated_at": data.get("updated_at", ""),
         })
     return out

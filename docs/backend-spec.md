@@ -249,9 +249,9 @@ load_rules() / load_predict_rules()
 
 **关键功能：**
 
-1. **手动注册（POST /api/devices）：** Redis HSET 落库 -> 解析坐标 -> 转发 AI `POST /devices` 启动管道（AI 不可达仅告警不阻塞）
+1. **手动注册（POST /api/devices）：** Redis HSET 落库设备配置（`status=registered`），**不启流**。启流统一由 `POST /{id}/enable` 负责（见第 3 条）。
 2. **截帧（GET /{id}/snapshot）：** WVP `play/start` -> `cv2.VideoCapture` 拉一帧 -> JPEG 编码（质量 85）-> `play/stop` 释放。超时 15 秒。
-3. **启流（POST /{id}/enable）：** 落库计数线配置 -> WVP `play/start` 取流地址 -> 转发 AI 启动管道 -> 标记 online
+3. **启流（POST /{id}/enable）：** 落库计数线配置。WVP 设备：`play/start` 取流地址 -> 转发 AI 启动管道；手动注册设备：先转发 AI `DELETE` 停旧管道 -> 再启动新管道。两种模式均标记 `status=online`。
 4. **流刷新（GET /{id}/stream）：** WVP `play/start` -> 按协议选地址 -> 返回 `{stream_url, stream_id}`。AI 断流重连时调用。
 5. **心跳（POST /{id}/heartbeat）：** 更新 `last_heartbeat` + `status=online`。AI 服务每 30 秒上报。
 6. **坐标解析：** `_line_from_coords` / `_anchor_from_coords` / `_roi_from_coords` 解析字符串为坐标列表，格式非法时使用默认值并告警，坐标超出 [0,1] 时告警。
@@ -292,8 +292,8 @@ load_rules() / load_predict_rules()
     │ registered │               │  synced   │
     │ (手动注册)  │               │ (WVP入表)  │
     └─────┬─────┘               └─────┬─────┘
-          │ AI转发启流                  │ POST /{id}/enable
-          │                             │ (配线+启流)
+          │ POST /{id}/enable           │ POST /{id}/enable
+          │ (配线+启流)                 │ (配线+启流)
           ▼                             ▼
     ┌───────────────────────────────────────┐
     │              online                   │
@@ -631,14 +631,13 @@ offset(Q) = n_inner · (Q - P1):  >0 内侧, <0 外侧
 | # | 方法 | 路径 | 说明 |
 |---|------|------|------|
 | 6 | GET | `/api/devices` | 设备列表 |
-| 7 | POST | `/api/devices` | 注册设备（手动，转发 AI 启流） |
+| 7 | POST | `/api/devices` | 注册设备（手动，仅保存配置不启流） |
 | 8 | DELETE | `/api/devices/{device_id}` | 删除设备（转发 AI 停流） |
 | 9 | POST | `/api/devices/{device_id}/heartbeat` | AI 心跳上报 |
 | 10 | POST | `/api/devices/sync` | 手动触发 WVP 设备同步 |
-| 11 | POST | `/api/devices/wvp-webhook` | WVP 回调（设备上下线） |
-| 12 | GET | `/api/devices/{device_id}/snapshot` | 截取一帧画面（JPEG） |
-| 13 | GET | `/api/devices/{device_id}/stream` | 刷新并返回流地址 |
-| 14 | POST | `/api/devices/{device_id}/enable` | 配置计数线并启流 |
+| 11 | GET | `/api/devices/{device_id}/snapshot` | 截取一帧画面（JPEG） |
+| 12 | GET | `/api/devices/{device_id}/stream` | 刷新并返回流地址 |
+| 13 | POST | `/api/devices/{device_id}/enable` | 配置计数线并启流 |
 
 **POST /api/devices** 请求体（`DeviceIn`）：
 ```json
@@ -895,7 +894,8 @@ EVENT_DELTA = {
 ┌──────────────────────────────────────────────────┐
 │  后端 enable_device()                              │
 │  1. Redis HSET 落库计数线配置                      │
-│  2. WVP play/start 获取流地址                      │
+│  2. 取流: WVP设备 play/start 获取流地址;           │
+│     手动设备直接用 stream_url (先停旧管道)         │
 │  3. _start_ai_pipeline() -> POST ai:8001/devices   │
 │  4. Redis HSET status=online                      │
 └──────────────────────┬───────────────────────────┘
@@ -1195,7 +1195,7 @@ _run_once():
 | 降级方案 | Chronos-2 加载/推理失败 -> 线性趋势外推；WVP 未启用 -> 手动注册设备 | `chronos_model.py` + `wvp_client.py` |
 | 告警去重 | 实时告警 5 分钟 NX 去重；异常告警 60s 冷却去重；离线告警 5 分钟去重 | `alerts.py` + `heartbeat.py` |
 | 调度器容错 | 每个调度器独立 try/except，单个失败不影响其他 | `main.py` lifespan |
-| AI 转发容错 | 设备注册转发 AI 失败仅告警不阻塞配置落库 | `devices.py` `_forward_to_ai()` |
+| AI 转发容错 | 启流/删除设备时转发 AI 失败仅告警不阻塞配置落库 | `devices.py` `_forward_to_ai()` |
 | WS 推送容错 | 推送失败仅记日志不影响告警/预测流程 | `alerts.py` / `scheduler.py` |
 | 负值钳位 | 当前态计数不允许为负，异常事件/重启漂移自动修正 | `realtime.py` `_clamp_negatives()` |
 | 轨迹清理 | 已计数轨迹 300s TTL 淘汰，防内存泄漏 + 流重连 ID 重用漏计 | `counter.py` `_cleanup_old_tracks()` |

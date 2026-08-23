@@ -7,8 +7,12 @@
 import json
 import math
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
+import yaml
+
+from ...common.business_rules import get_rule
 from ...common.config import settings
 from ...common.logger import logger
 from ...common.redis_client import get_redis
@@ -42,6 +46,58 @@ async def _get_total_officers() -> int:
     if val is None:
         return 0
     return int(val)
+
+
+async def seed_from_config(path: Optional[str] = None) -> dict:
+    """从 configs/police.yaml 加载警力初始配置 (区域 + 总警力), 写入 Redis.
+
+    仅当 Redis 中尚无对应数据时写入 (HSETNX / SETNX), 不覆盖 API 动态配置
+    (POST /api/police/regions、POST /api/police/total). 返回加载统计.
+    """
+    p = Path(path or settings.police_config_file)
+    try:
+        data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+    except OSError as e:
+        logger.warning(f"警力配置文件读取失败: {e}")
+        return {"total": 0, "regions": 0}
+
+    redis = get_redis()
+
+    # 总警力: 仅当未设置时写入
+    total_added = 0
+    total = data.get("total")
+    if total is not None:
+        ok = await redis.set(_TOTAL_KEY, int(total), nx=True)
+        if ok:
+            total_added = 1
+            logger.info(f"[警力配置] 从 {p.name} 设置总警力: {total}")
+
+    # 区域: 逐个 HSETNX, 仅当该区域 id 不存在时写入
+    regions_added = 0
+    for region in data.get("regions", []) or []:
+        rid = region.get("id")
+        if not rid:
+            continue
+        payload = json.dumps(
+            {
+                "name": region.get("name", rid),
+                "center_x": float(region.get("center_x", 0)),
+                "center_y": float(region.get("center_y", 0)),
+                "device_id": region.get("device_id", ""),
+                "current_officers": 0,
+            },
+            ensure_ascii=False,
+        )
+        ok = await redis.hsetnx(_REGIONS_KEY, rid, payload)
+        if ok:
+            regions_added += 1
+            logger.info(f"[警力配置] 从 {p.name} 注册区域: {rid} ({region.get('name', rid)})")
+
+    if regions_added or total_added:
+        logger.info(f"[警力配置] 加载完成: 区域 {regions_added}, 总警力 {total_added} (仅新增)")
+    else:
+        logger.info("[警力配置] 无新增项 (Redis 已有数据, 以 API 配置为准)")
+    return {"total": total_added, "regions": regions_added}
 
 
 async def _get_predicted_total() -> float:
@@ -185,8 +241,11 @@ async def optimize_allocation() -> Optional[dict]:
     device_crowds = await get_all_device_crowds()
     predicted_total = await _get_predicted_total()
 
-    alpha = settings.police_demand_weight_current
-    beta = settings.police_demand_weight_predict
+    # 警力算法参数热重载 (business_rules.yaml 修改后无需重启)
+    alpha = float(get_rule("police", "demand_weight_current", default=settings.police_demand_weight_current))
+    beta = float(get_rule("police", "demand_weight_predict", default=settings.police_demand_weight_predict))
+    min_per_region = int(get_rule("police", "min_per_region", default=settings.police_min_per_region))
+    movement_ratio = float(get_rule("police", "movement_ratio", default=settings.police_movement_ratio))
 
     # 阶段 1: 需求计算
     demands: dict[str, float] = {}
@@ -222,11 +281,11 @@ async def optimize_allocation() -> Optional[dict]:
 
     # 阶段 2: 目标分配
     targets = _compute_targets(
-        demands, current_officers, total_officers, settings.police_min_per_region
+        demands, current_officers, total_officers, min_per_region
     )
 
     # 阶段 3: 调度规划
-    move_limit = math.ceil(total_officers * settings.police_movement_ratio)
+    move_limit = math.ceil(total_officers * movement_ratio)
     movements = _plan_movements(targets, current_officers, centers, move_limit)
 
     # 评分
@@ -273,9 +332,9 @@ async def optimize_allocation() -> Optional[dict]:
         },
     }
 
-    # 缓存方案到 Redis
+    # 缓存方案到 Redis (TTL 随预测周期热重载)
     redis = get_redis()
-    ttl = settings.prediction_interval_minutes * 60 * 2
+    ttl = int(get_rule("prediction", "interval_minutes", default=settings.prediction_interval_minutes)) * 60 * 2
     await redis.set(_PLAN_KEY, json.dumps(plan, ensure_ascii=False), ex=ttl)
 
     # 更新各区域 current_officers 为 target (下一轮的"当前分配")

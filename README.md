@@ -138,20 +138,12 @@ POST /api/events {device_id, event_type, occurred_at}
 │   └── prediction/    # Chronos 时序预测·路由·定时调度
 ├── configs/
 │   ├── rules.yaml     # 告警规则 (车辆>300红警 / 游客>10000饱和)
-│   ├── bytetrack.yaml # BoT-SORT 跟踪配置
-│   ├── wvp/           # WVP 信令平台配置 (application.yml)
-│   └── zlm/           # ZLMediaKit 流媒体配置 (config.ini)
-├── deploy/wvp/        # WVP arm64 自建镜像部署 (gitee源码maven编译)
-│   ├── wvp/Dockerfile # WVP 2.7.4 多阶段构建镜像
-│   ├── wvp/application.yml
-│   ├── zlmediakit/config.ini
-│   └── mysql/init.sql # WVP 数据库初始化 SQL
+│   └── bytetrack.yaml # BoT-SORT 跟踪配置
 ├── scripts/           # 离线处理·冒烟测试·异常视频生成
 ├── tool/              # 离线视频处理器 (独立组件, 不依赖 Redis)
 ├── tests/             # WVP客户端·异常识别 单元测试
 ├── Dockerfile         # 统一镜像 (AI + 后端)
-├── docker-compose.yml # 主编排: ai + backend + redis (+ wvp/zlm/mysql 可选)
-├── docker-compose.wvp.yml # WVP 信令平台独立编排 (arm64 自建镜像, host网络)
+├── docker-compose.yml # 主编排: ai + backend + redis + mysql (+ rtsp 测试)
 ├── requirements.txt
 └── .env.example
 ```
@@ -160,19 +152,20 @@ POST /api/events {device_id, event_type, occurred_at}
 
 ### 部署形态总览
 
-系统由**两个互相独立的 Docker Compose 项目**组成，按需选择部署形态：
+系统为**单个 Docker Compose 项目**（`smartcity`），WVP/ZLM 为外部部署的独立组件，本项目仅作为消费方对接：
 
 | 形态 | 启动的服务 | 适用场景 |
 |------|-----------|---------|
-| 最小部署 | `smartcity`: ai + backend + redis | 设备手填 RTSP 地址即可跑通 AI 计数 |
-| 完整部署 | `smartcity` + `wvp`: wvp + zlmediakit + wvp-mysql + wvp-redis | 接 GB28181 国标摄像头，设备自动同步 |
+| 最小部署 | `smartcity`: ai + backend + redis + mysql | 设备手填 RTSP 地址即可跑通 AI 计数 |
+| 完整部署 | `smartcity` + 外部 WVP/ZLM | 接 GB28181 国标摄像头，设备自动同步 |
 
 ```
-┌─ smartcity 网络 ─────────────────┐      ┌─ wvp-net 网络 ──────────────────┐
-│  ai(8001) ⇄ backend(8000) ⇄ redis│      │  wvp(18080/5060, host网络)      │
-└──────────────────────────────────┘      │  zlmediakit(80) mysql redis     │
-        │                                  └────────────────────────────────┘
-        │  跨网络互不连通! backend 访问 WVP 必须用宿主机 IP (见第四步)
+┌─ smartcity 网络 ──────────────────┐        ┌─ 外部部署 ──────────────────┐
+│  ai(8001) ⇄ backend(8000) ⇄ redis │        │  WVP(18080/5060)           │
+│             ⇄ mysql               │        │  ZLMediaKit(80)            │
+└───────────────────────────────────┘        └────────────────────────────┘
+        │                                      ▲
+        │  跨网络互不连通! backend 访问外部 WVP/ZLM 必须用宿主机 IP (见第四步)
         └──────────────────────────────────────────┘
 ```
 
@@ -226,13 +219,13 @@ Docker Hub 直连（`registry-1.docker.io`）在国内通常超时。若 `docker
 # 不可用: docker.1ms.run / docker.tbedu.top / hub-mirror.c.163.com / dockerpull.org
 M=docker.m.daocloud.io
 
-for img in library/python:3.11-slim library/redis:7-alpine library/mysql:8.0 zlmediakit/zlmediakit:master; do
+for img in library/python:3.11-slim library/redis:7-alpine library/mysql:8.0 bluenviron/mediamtx; do
   docker pull $M/$img && docker tag $M/$img ${img#library/}
 done
 ```
 
-> 注意：DaoCloud 对**个人镜像有白名单限制**（如 `648540858/wvp_pro` 不在白名单拉不到）；
-> 官方镜像（`library/*`）与 `zlmediakit/zlmediakit` 可正常拉取。
+> 注意：DaoCloud 对**个人镜像有白名单限制**；官方镜像（`library/*`）可正常拉取。
+> WVP/ZLM 为外部独立部署组件，其镜像由 WVP 侧自行准备，不在本清单内。
 
 ### 离线构建（目标机器无外网）
 
@@ -270,52 +263,11 @@ docker compose -p smartcity down                     # 停止
 > - **最小部署到此完成**：`POST /api/devices` 手填设备（`stream_url` 填
 >   `rtsp://<宿主IP>:8554/vehicle` 可用内置测试流）即可跑通。
 
-### 第四步（可选，GB28181 接入）：部署 WVP 信令平台
+### 第四步（可选，GB28181 接入）：对接外部 WVP 信令平台
 
-按 CPU 架构选择方案--**arm64 机器没有现成镜像，必须源码自建**：
+WVP 信令平台与 ZLMediaKit 流媒体引擎为**外部独立部署**组件（本项目不提供编排），项目仅作为消费方通过 REST API 同步设备、拉取 FLV 流。部署 WVP/ZLM 请参考官方文档自行部署。
 
-| 场景 | 方案 |
-|------|------|
-| x86_64 (amd64) | 现成镜像 `648540858/wvp_pro:latest`（或仓库 `wvp-lower/`、`wvp-upper/` 级联编排）|
-| aarch64 (arm64) | **必须自建**：本仓库 `docker-compose.wvp.yml`（gitee 源码 maven 编译）|
-
-#### 4a. arm64 自建 WVP（本仓库方案）
-
-```bash
-# 1. 克隆 WVP 源码 (国内 gitee 镜像, ~1分钟)
-git clone --depth 1 https://gitee.com/pan648540858/wvp-GB28181-pro.git /tmp/wvp-src
-
-# 2. 预拉编译用基础镜像 (DaoCloud, 见第二步加速器)
-M=docker.m.daocloud.io
-docker pull $M/library/maven:3.9-eclipse-temurin-21 && docker tag $M/library/maven:3.9-eclipse-temurin-21 maven:3.9-eclipse-temurin-21
-docker pull $M/library/eclipse-temurin:21-jre && docker tag $M/library/eclipse-temurin:21-jre eclipse-temurin:21-jre
-
-# 3. 构建 WVP 镜像 (maven 多阶段编译, 约 10-20 分钟)
-docker build -t wvp:2.7.4 -f deploy/wvp/wvp/Dockerfile /tmp/wvp-src
-
-# 4. 启动 WVP 四容器 (端口映射 30000-30500 较多, 首次 up 需 1-3 分钟属正常)
-docker compose -p wvp -f docker-compose.wvp.yml up -d
-
-# 5. 验证
-docker compose -p wvp -f docker-compose.wvp.yml ps            # 四容器全 Up
-curl -o /dev/null -w "%{http_code}\n" http://localhost:18080  # 200/404 均表示 WVP 存活
-curl -o /dev/null -w "%{http_code}\n" http://localhost:80     # 200, ZLM 存活
-docker logs wvp-server 2>&1 | grep "SIP.*启动成功"             # tcp/udp 5060 启动成功
-docker logs wvp-server 2>&1 | grep "ZLM-连接成功"              # WVP 已连上 ZLM
-```
-
-WVP 管理后台：`http://<宿主IP>:18080`（admin / admin）。
-
-**arm64 方案已知注意点**：
-- **`WVP_HOST` 必须填摄像头可达的宿主机 IP**（默认 `172.16.168.9`，按实际网络改
-  `docker-compose.wvp.yml` 的 `WVP_HOST`）。WVP 用 host 网络 bind 该 IP 的 5060 端口。
-- **ZLM secret 漂移**：ZLM 认为配置里的 secret 非法时自动生成随机值，**ZLM 容器重启后
-  secret 会变**，导致 WVP 日志刷 `ZLM-尝试连接失败`。恢复：从 ZLM 日志取新 secret
-  （`docker logs wvp-zlmediakit 2>&1 | grep "modified it to"`），更新到
-  `deploy/wvp/wvp/application.yml` 的 `media.secret`（或 `ZLM_SECRET` 环境变量），重启 WVP。
-- WVP 专用 MySQL 映射宿主 `3307`（避让已占用的 3306）、Redis 映射 `6380`。
-
-#### 4b. 摄像头（IPC）侧 GB28181 配置
+#### 4a. 摄像头（IPC）侧 GB28181 配置
 
 IPC Web 管理界面 -> 网络 -> 平台接入 -> GB28181：
 
@@ -323,14 +275,14 @@ IPC Web 管理界面 -> 网络 -> 平台接入 -> GB28181：
 |------|-----|
 | SIP 服务器 ID | `34020000002000000001` |
 | SIP 域 | `3402000000` |
-| SIP 服务器地址 | `<宿主机IP>`（arm64 方案即 `WVP_HOST` 的值）|
+| SIP 服务器地址 | `<宿主机IP>`（即 WVP 所在宿主 IP）|
 | SIP 端口 | `5060` |
 | SIP 密码 | `12345678` |
 | 视频通道 | 建议选子码流（降低推理压力）|
 
-#### 4c. 后端对接 WVP（关键：跨网络用宿主 IP）
+#### 4b. 后端对接 WVP（关键：跨网络用宿主 IP）
 
-`smartcity` 与 `wvp` 是两个隔离网络，**容器名互不可达**，`.env` 必须用宿主机 IP：
+`smartcity` 与外部 WVP 部署相互隔离，**容器名互不可达**，`.env` 必须用宿主机 IP：
 
 ```bash
 # .env 修改 (172.16.168.9 换成实际宿主 IP)
@@ -341,7 +293,7 @@ docker compose -p smartcity up -d backend  # 重建 backend 生效
 docker logs smartcity-backend-1 2>&1 | grep "WVP"   # 应看到 WVP 同步已启动
 ```
 
-#### 4d. 设备上线与启流
+#### 4c. 设备上线与启流
 
 ```
 IPC 注册 (上电/保存配置)
@@ -361,16 +313,16 @@ IPC 注册 (上电/保存配置)
 |------|------|----------------|
 | `smart-city-platform:latest` | 业务（AI+后端，含模型） | 最小部署必需 |
 | `redis:7-alpine` | 业务状态存储 | 最小部署必需 |
-| `wvp:2.7.4` | WVP 信令（arm64 需自建） | GB28181 部署必需 |
-| `zlmediakit/zlmediakit:master` | 流媒体 | GB28181 部署必需 |
-| `mysql:8.0` | WVP 数据库 | GB28181 部署必需 |
-| `wvp 专用 redis` | 即 `redis:7-alpine`，复用 | - |
+| `mysql:8.0` | 小时级统计长期归档 | 需要长期报表时必需 |
+| `bluenviron/mediamtx:latest` | 测试用 RTSP 服务器 | 测试用（可省）|
+
+> WVP/ZLM 为外部独立部署组件，其镜像（`wvp:2.7.4`、`zlmediakit/zlmediakit:master` 等）由 WVP 侧自行准备，不在本项目导出清单内。
 
 **有网机器导出**：
 
 ```bash
-docker save smart-city-platform:latest redis:7-alpine \
-  wvp:2.7.4 zlmediakit/zlmediakit:master mysql:8.0 \
+docker save smart-city-platform:latest redis:7-alpine mysql:8.0 \
+  bluenviron/mediamtx:latest \
   | gzip > smartcity-all-images.tar.gz
 ```
 
@@ -381,7 +333,6 @@ docker load < smartcity-all-images.tar.gz
 cd Intelligent-Transportation-System   # 仓库代码 git 内网克隆或拷贝
 cp .env.example .env                   # 按需修改 (WVP_API_URL 用宿主 IP)
 docker compose -p smartcity up -d      # 镜像已本地存在, 不再联网
-docker compose -p wvp -f docker-compose.wvp.yml up -d
 ```
 
 > 离线机器同样需要仓库代码目录（compose 文件 + 挂载的 `app/`、`configs/` 等），
@@ -393,12 +344,9 @@ docker compose -p wvp -f docker-compose.wvp.yml up -d
 |------|-----------|
 | 构建 `COPY models` 失败 | 第一步的 `models/yolo11n.pt` 没放（gitignore 不入库）|
 | 拉基础镜像超时 / `registry-1.docker.io` 报错 | Docker Hub 直连不通，用第二步加速器预拉并重打标 |
-| arm64 拉 `648540858/wvp_pro` 失败 / `no matching manifest for linux/arm64` | 该镜像无 arm64 版本，走 4a 源码自建；DaoCloud 亦将其排除在白名单外 |
-| arm64 用 `mysql:5.7` 报 `no matching manifest` | 5.7 无 arm64 镜像，统一用 `mysql:8.0` |
 | backend 日志 WVP 同步失败 / 连接超时 | `WVP_API_URL` 用了容器名 `wvp`（跨网络不通），改成宿主机 IP |
-| WVP 日志刷 `ZLM-尝试连接失败` | ZLM 重启后 secret 漂移，按 4a 注意点同步新 secret 后重启 WVP |
-| WVP SIP 启动失败 `端口被占用或ip不正确` | `WVP_HOST` 不是本机网卡 IP；多网卡机器选摄像头可达的那个 |
-| `docker compose up` 卡在创建 wvp-zlmediakit | 30000-30500 端口映射量大属正常，等 1-3 分钟 |
+| WVP 日志刷 `ZLM-尝试连接失败` | ZLM 重启后 secret 漂移，同步新 secret 到 WVP 侧配置后重启 WVP |
+| WVP SIP 启动失败 `端口被占用或ip不正确` | WVP 的 SIP IP 不是本机网卡 IP；多网卡机器选摄像头可达的那个 |
 ## API 接口
 
 ### 后端（端口 8000）
@@ -416,7 +364,6 @@ docker compose -p wvp -f docker-compose.wvp.yml up -d
 | POST | `/api/devices/{id}/heartbeat` | AI 心跳上报（供离线检测，90s 超时标离线）|
 | GET | `/api/devices/{id}/stream` | 获取/刷新 FLV 流地址（WVP play/start，AI 断流刷新用）|
 | GET | `/api/devices/{id}/play` | 前端播放地址（WVP→flv / RTSP→HLS，浏览器可播）|
-| POST | `/api/devices/wvp-webhook` | WVP 设备上下线 webhook 回调 |
 | GET/POST/DELETE | `/api/police/regions` | 警力区域管理 |
 | GET | `/api/police/allocation` | 当前警力分配结果 |
 | POST | `/api/police/optimize` | 触发警力优化分配 |

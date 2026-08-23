@@ -2,13 +2,13 @@
 from datetime import datetime, timedelta
 from typing import Optional
 
+from ..common.business_rules import get_rule
 from ..common.config import settings
 from ..common.redis_client import get_redis
 
 
-def _interval_key(dt: datetime) -> str:
+def _interval_key(dt: datetime, interval: int) -> str:
     """N 分钟区间 key (向下取整到区间起点)."""
-    interval = settings.prediction_interval_minutes
     minute = (dt.minute // interval) * interval
     interval_start = dt.replace(minute=minute, second=0, microsecond=0)
     return f"{settings.redis_prefix}:realtime:interval:{interval_start.strftime('%Y%m%d%H%M')}"
@@ -23,15 +23,15 @@ async def load_interval_history(
     每个元素为该 N 分钟区间内的进出总量 (in + out).
     空区间补 0, 保持规则采样.
     """
-    interval = settings.prediction_interval_minutes
+    interval = int(get_rule("prediction", "interval_minutes", default=settings.prediction_interval_minutes))
     if series_length is None:
-        series_length = settings.prediction_series_length
+        series_length = int(get_rule("prediction", "series_length", default=settings.prediction_series_length))
     redis = get_redis()
     now = datetime.now()
     pipe = redis.pipeline()
     for i in range(series_length):
         t = now - timedelta(minutes=interval * i)
-        key = _interval_key(t)
+        key = _interval_key(t, interval)
         pipe.hgetall(key)
     results = await pipe.execute()
 
@@ -46,5 +46,5 @@ async def load_interval_history(
         vehicle_series.append(float(vehicle_total))
         # 计算对应的时间戳
         t = now - timedelta(minutes=interval * (series_length - 1 - i))
-        timestamps.append(_interval_key(t).split(":")[-1])
+        timestamps.append(_interval_key(t, interval).split(":")[-1])
     return person_series, vehicle_series, timestamps

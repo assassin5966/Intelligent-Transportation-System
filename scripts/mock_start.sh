@@ -106,6 +106,13 @@ PT1_RESP=$(curl -s -X POST "http://localhost:8000/api/devices" \
     }')
 echo "  点位1: $PT1_RESP"
 
+# 注册仅保存配置, 需调用 enable 启流 (WVP 同步/手动设备均通过 enable 启动管道)
+sleep 1
+log_info "启流点位1..."
+curl -s -X POST "http://localhost:8000/api/devices/mock-pt1-gajk2648/enable" \
+    -H "Content-Type: application/json" \
+    -d '{"line_coords":"0.3,0.5,0.7,0.5","anchor_coords":"0.5,0.6","camera_type":"person"}' | python3 -m json.tool 2>/dev/null || true
+
 sleep 2
 
 # 3b. 点位2: 和阳南门出口路北以东90米 (GAJK-2649, 便道人流) - RTSP 流
@@ -121,6 +128,13 @@ PT2_RESP=$(curl -s -X POST "http://localhost:8000/api/devices" \
         "camera_type": "person"
     }')
 echo "  点位2: $PT2_RESP"
+
+# 注册仅保存配置, 需调用 enable 启流
+sleep 1
+log_info "启流点位2..."
+curl -s -X POST "http://localhost:8000/api/devices/mock-pt2-gajk2649/enable" \
+    -H "Content-Type: application/json" \
+    -d '{"line_coords":"0.5,0.3,0.5,0.7","anchor_coords":"0.6,0.5","camera_type":"person"}' | python3 -m json.tool 2>/dev/null || true
 
 sleep 3
 

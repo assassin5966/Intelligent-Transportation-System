@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException
 
+from ..common.business_rules import get_rule
 from ..common.config import settings
 from ..common.redis_client import get_redis
 from .chronos_model import ChronosPredictor
@@ -29,8 +30,8 @@ def convert_vehicle_to_person(vehicle_series: list[float]) -> list[float]:
     随机性为专门设计: 真实场景中每车承载人数存在波动, 确定性期望值会低估方差,
     不利于 Chronos-2 对人流峰谷的时序预测.
     """
-    lo = settings.vehicle_person_min
-    hi = settings.vehicle_person_max
+    lo = int(get_rule("prediction", "vehicle_person_min", default=settings.vehicle_person_min))
+    hi = int(get_rule("prediction", "vehicle_person_max", default=settings.vehicle_person_max))
     converted = []
     for v in vehicle_series:
         n = int(v)
@@ -49,6 +50,7 @@ async def predict_total_persons() -> dict:
     3. 总人数 = 人流 + 转化后车流
     4. 喂入 Chronos-2 预测下一个 N 分钟
     """
+    interval_minutes = int(get_rule("prediction", "interval_minutes", default=settings.prediction_interval_minutes))
     person_series, vehicle_series, timestamps = await load_interval_history()
 
     # 车流转人流
@@ -60,7 +62,7 @@ async def predict_total_persons() -> dict:
     if not total_series:
         return {
             "predicted_total": 0,
-            "interval_minutes": settings.prediction_interval_minutes,
+            "interval_minutes": interval_minutes,
             "series_length": 0,
             "generated_at": datetime.now(timezone.utc).isoformat(),
         }
@@ -78,7 +80,7 @@ async def predict_total_persons() -> dict:
 
     return {
         "predicted_total": int(round(predicted)),
-        "interval_minutes": settings.prediction_interval_minutes,
+        "interval_minutes": interval_minutes,
         "series_length": len(total_series),
         "history": {
             "timestamps": timestamps,
@@ -104,15 +106,17 @@ async def predict_total_persons() -> dict:
 @router.get("/health")
 async def health():
     predictor = ChronosPredictor.instance()
+    interval_minutes = int(get_rule("prediction", "interval_minutes", default=settings.prediction_interval_minutes))
+    series_length = int(get_rule("prediction", "series_length", default=settings.prediction_series_length))
     return {
         "status": "ok",
         "service": "prediction",
         "degraded": predictor.is_degraded,
-        "interval_minutes": settings.prediction_interval_minutes,
-        "series_length": settings.prediction_series_length,
+        "interval_minutes": interval_minutes,
+        "series_length": series_length,
         "vehicle_person_range": [
-            settings.vehicle_person_min,
-            settings.vehicle_person_max,
+            int(get_rule("prediction", "vehicle_person_min", default=settings.vehicle_person_min)),
+            int(get_rule("prediction", "vehicle_person_max", default=settings.vehicle_person_max)),
         ],
     }
 

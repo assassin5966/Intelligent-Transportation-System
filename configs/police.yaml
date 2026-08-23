@@ -1,0 +1,28 @@
+# 警力分配初始配置 (区域 + 总警力)
+#
+# 加载时机: 后端启动时读取并写入 Redis (sc:police:regions / sc:police:total),
+#           仅当 Redis 中尚无对应数据时写入, 不覆盖 API 动态配置
+#           (POST /api/police/regions, POST /api/police/total).
+# 修改: 改文件后重启后端生效 (仅对新增/空数据生效, 已有数据以 Redis 为准).
+#
+# 字段说明:
+#   regions[].id        区域标识 (唯一, 与 API 注册的 id 同规则)
+#   regions[].name      区域名称 (前端展示)
+#   regions[].center_x/y 区域中心坐标 (归一化 0-1, 调度阶段计算移动距离用)
+#   regions[].device_id 关联摄像头设备 ID (分配时读取该设备当前在场人数,
+#                       必须指向真实人流摄像头, 否则该区域人数恒为 0)
+
+total: 50
+
+regions:
+  - id: R1
+    name: "示例区域1"
+    center_x: 0.5
+    center_y: 0.5
+    device_id: ""
+
+  - id: R2
+    name: "示例区域2"
+    center_x: 0.7
+    center_y: 0.3
+    device_id: ""

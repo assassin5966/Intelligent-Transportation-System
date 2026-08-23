@@ -9,6 +9,7 @@ import numpy as np
 from collections import OrderedDict
 from ultralytics import YOLO
 
+from ..common.business_rules import get_rule
 from ..common.config import settings
 from ..common.logger import logger
 
@@ -58,11 +59,16 @@ class ByteTracker:
     def track(self, frame: np.ndarray) -> TrackResult:
         self._ensure_loaded()
         self.frame_id += 1
-        
+        # 热重载跟踪参数 (yolo_conf/iou/track_buffer 修改后无需重启)
+        conf = float(get_rule("tracking", "yolo_conf", default=settings.yolo_conf))
+        iou = float(get_rule("tracking", "yolo_iou", default=settings.yolo_iou))
+        track_buffer = int(get_rule("tracking", "track_buffer", default=settings.track_buffer))
+        self.max_history_length = track_buffer
+
         results = self._model.track(
             frame,
-            conf=settings.yolo_conf,
-            iou=settings.yolo_iou,
+            conf=conf,
+            iou=iou,
             verbose=False,
             tracker=_TRACKER_CFG
         )

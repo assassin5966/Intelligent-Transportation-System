@@ -58,6 +58,13 @@ services:
       # 前端播放地址翻译 (/api/devices/glm-5.3_common/play); 空值走自动推导/原样返回
       - ZLM_PUBLIC_BASE=${ZLM_PUBLIC_BASE:-}
       - MEDIAMTX_PUBLIC_BASE=${MEDIAMTX_PUBLIC_BASE:-}
+      # MySQL 长期归档 (小时级车流/人流量落库, 长期报表); MYSQL_ENABLED=false 则跳过
+      - MYSQL_ENABLED=${MYSQL_ENABLED:-true}
+      - MYSQL_HOST=${MYSQL_HOST:-mysql}
+      - MYSQL_PORT=${MYSQL_PORT:-3306}
+      - MYSQL_USER=${MYSQL_USER:-root}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD:-root123456}
+      - MYSQL_DATABASE=${MYSQL_DATABASE:-dt_stats}
     volumes:
       - ./app:/app/app:cached
       - ./models:/app/models:cached
@@ -67,6 +74,24 @@ services:
       - ./logs:/app/logs
     depends_on:
       - redis
+      - mysql
+
+  # ---------- MySQL: 长期归档 (小时级车流/人流量报表) ----------
+  mysql:
+    image: mysql:8.0
+    container_name: dt-mysql
+    restart: unless-stopped
+    environment:
+      - MYSQL_ROOT_PASSWORD=root123456
+      - MYSQL_DATABASE=dt_stats
+      - TZ=Asia/Shanghai
+    command: >
+      --character-set-server=utf8mb4
+      --collation-server=utf8mb4_unicode_ci
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
 
   # ---------- Redis: 实时状态 (当前车辆/人员数量、告警、设备配置) ----------
   redis:
@@ -149,3 +174,4 @@ services:
 volumes:
   redis-data:
   model-cache:
+  mysql-data:

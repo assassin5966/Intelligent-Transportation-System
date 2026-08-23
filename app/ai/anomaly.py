@@ -55,6 +55,25 @@ class AnomalyConfig:
             confirm_frames=s.anomaly_confirm_frames,
         )
 
+    def reload(self) -> "AnomalyConfig":
+        """热重载: 从 business_rules.yaml 刷新参数 (修改后无需重启, 未配置回落默认)."""
+        from ..common.business_rules import get_rule
+        from ..common.config import settings
+
+        s = settings
+        self.analysis_width = int(get_rule("anomaly", "analysis_width", default=s.anomaly_analysis_width))
+        self.black_screen_brightness = int(get_rule("anomaly", "black_screen_brightness", default=s.black_screen_brightness))
+        self.black_screen_ratio = float(get_rule("anomaly", "black_screen_ratio", default=s.black_screen_ratio))
+        self.black_pixel_value = int(get_rule("anomaly", "black_pixel_value", default=s.black_pixel_value))
+        self.flower_block_grid = int(get_rule("anomaly", "flower_block_grid", default=s.flower_block_grid))
+        self.flower_noise_std = float(get_rule("anomaly", "flower_noise_std", default=s.flower_noise_std))
+        self.flower_uniformity = float(get_rule("anomaly", "flower_uniformity", default=s.flower_uniformity))
+        self.flower_channel_corr = float(get_rule("anomaly", "flower_channel_corr", default=s.flower_channel_corr))
+        self.flower_temporal_diff = float(get_rule("anomaly", "flower_temporal_diff", default=s.flower_temporal_diff))
+        self.check_interval = int(get_rule("anomaly", "check_interval", default=s.anomaly_check_interval))
+        self.confirm_frames = int(get_rule("anomaly", "confirm_frames", default=s.anomaly_confirm_frames))
+        return self
+
 
 @dataclass
 class AnomalyResult:
@@ -201,6 +220,8 @@ class AnomalyMonitor:
 
     def check(self, frame: np.ndarray) -> Optional[AnomalyEvent]:
         """按 interval 采样检测; 返回状态转移事件或 None."""
+        # 热重载业务规则 (每帧检查 mtime, 变化才生效)
+        self.cfg.reload()
         self._frame_counter += 1
         if self._frame_counter % self.cfg.check_interval != 0:
             return None

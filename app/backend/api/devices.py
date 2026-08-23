@@ -1,13 +1,15 @@
 """设备管理 API (注册/列表/删除, 含越线计数线配置).
 
-注册/删除时转发到 AI 分析服务启停视频处理管道, 同时在 Redis 保存配置.
+注册仅保存配置到 Redis (不启流); 启流/删除时转发到 AI 分析服务启停视频处理管道.
 AI 服务不可达时仅告警, 不阻塞配置落库.
 """
 import asyncio
+import json
+from pathlib import Path
 from typing import Literal, Optional
 
 import httpx
-from fastapi import APIRouter, Body, HTTPException, Request, Response
+from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel
 
 from ...common.config import settings
@@ -66,6 +68,36 @@ class DeviceOut(BaseModel):
     gb_channel_id: Optional[str] = None
     status: str = "registered"
     last_heartbeat: Optional[str] = None
+    longitude: Optional[float] = None  # 设备经纬度 (来自 data/device_geo.json, 按名称匹配)
+    latitude: Optional[float] = None
+
+
+# 设备经纬度映射缓存: 设备名称 -> {"longitude", "latitude"} (来自 data/device_geo.json)
+_geo_cache: Optional[dict] = None
+_GEO_FILE = Path(__file__).resolve().parents[3] / "data" / "device_geo.json"
+
+
+def _load_geo() -> dict:
+    """加载设备经纬度映射 (带模块级缓存, 首次读取后复用)."""
+    global _geo_cache
+    if _geo_cache is None:
+        try:
+            if _GEO_FILE.exists():
+                _geo_cache = json.loads(_GEO_FILE.read_text(encoding="utf-8")).get("devices", {})
+            else:
+                _geo_cache = {}
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning(f"读取 device_geo.json 失败: {e}")
+            _geo_cache = {}
+    return _geo_cache
+
+
+def _geo_by_name(name: str) -> tuple[Optional[float], Optional[float]]:
+    """按设备名称查经纬度, 未匹配到返回 (None, None)."""
+    geo = _load_geo().get(name or "")
+    if not geo:
+        return None, None
+    return geo.get("longitude"), geo.get("latitude")
 
 
 def _line_from_coords(line_coords: Optional[str]) -> list[list[float]]:
@@ -161,12 +193,21 @@ async def list_():
             clean = dict(data)
             if clean.get("max_vehicles") == "":
                 clean["max_vehicles"] = None
+            # 按设备名称补全经纬度 (来自 data/device_geo.json)
+            lng, lat = _geo_by_name(clean.get("name", ""))
+            clean["longitude"] = lng
+            clean["latitude"] = lat
             found.append(DeviceOut(**clean))
     return found
 
 
 @router.post("", status_code=201)
 async def register(dev: DeviceIn):
+    """注册设备 (仅保存配置到 Redis, 不启流).
+
+    启流统一由 POST /api/devices/{device_id}/enable 负责: 手动注册设备注册后
+    status=registered, 配置计数线并 enable 后才启动 AI 管道.
+    """
     redis = get_redis()
     key = f"{_DEVICE_KEY_PREFIX}{dev.id}"
     await redis.hset(
@@ -186,23 +227,6 @@ async def register(dev: DeviceIn):
             "status": "registered",
         },
     )
-    line = _line_from_coords(dev.line_coords)
-    anchor = _anchor_from_coords(dev.anchor_coords)
-    roi = _roi_from_coords(dev.roi_coords)
-    payload = {"device_id": dev.id, "stream_url": dev.stream_url, "line": line}
-    if anchor is not None:
-        payload["anchor"] = anchor
-    if dev.count_only is not None:
-        payload["count_only"] = dev.count_only
-    if dev.camera_type is not None:
-        payload["camera_type"] = dev.camera_type
-    if roi is not None:
-        payload["roi"] = roi
-    if dev.gb_device_id is not None:
-        payload["gb_device_id"] = dev.gb_device_id
-    if dev.gb_channel_id is not None:
-        payload["gb_channel_id"] = dev.gb_channel_id
-    await _forward_to_ai("POST", "/devices", payload)
     return {"id": dev.id, "status": "registered"}
 
 
@@ -235,7 +259,7 @@ async def heartbeat(device_id: str):
     return {"device_id": device_id, "heartbeat": now_iso}
 
 
-# ---- WVP-GB28181 对接 (设备同步 / 流地址刷新 / 启用 / webhook) ----
+# ---- WVP-GB28181 对接 (设备同步 / 流地址刷新 / 启用) ----
 
 
 @router.post("/sync", status_code=200)
@@ -245,20 +269,6 @@ async def sync_wvp():
         raise HTTPException(503, "WVP 同步未启用 (wvp_enabled=false)")
     from ..core.wvp_sync import sync_once
 
-    return await sync_once()
-
-
-@router.post("/wvp-webhook", status_code=200)
-async def wvp_webhook(body: dict = Body(...)):
-    """接收 WVP 定制回调 (设备上下线等), 透传后触发一次同步.
-
-    WVP 默认无对外 HTTP webhook, 此端点供定制对接 (如在 WVP 侧配置事件转发).
-    """
-    if not settings.wvp_enabled:
-        return {"status": "skipped", "reason": "wvp_disabled"}
-    from ..core.wvp_sync import sync_once
-
-    logger.info(f"[WVP webhook] 收到回调: {body}")
     return await sync_once()
 
 
@@ -334,10 +344,13 @@ async def refresh_stream(device_id: str):
     stream_url = wvp.select_stream_url(play)
     if not stream_url:
         raise HTTPException(502, f"WVP 点播失败, 无法获取流地址 (gb_dev={gb_dev}, gb_ch={gb_ch})")
+    lng, lat = _geo_by_name(data.get("name", ""))
     return {
         "device_id": device_id,
         "stream_url": stream_url,
         "stream_id": play.get("stream_id") if play else None,
+        "longitude": lng,
+        "latitude": lat,
     }
 
 

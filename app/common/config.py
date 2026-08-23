@@ -35,8 +35,26 @@ class Settings(BaseSettings):
     congestion_min_flow: float = 5.0  # 拥挤判定: 每分钟跨线车辆数低于此值视为车流速度过低 (辆/分钟)
     roi_report_interval: float = 2.0  # AI 每 N 秒上报一次 ROI 内车辆数 (供拥挤判断)
 
+    # ---- 小时级车流/人流量 (记录每天每小时) ----
+    hourly_retention_days: int = 30  # 小时级数据保留天数 (Redis 自动过期)
+
+    # ---- MySQL 长期归档 (小时级车流/人流量落库, 长期报表) ----
+    mysql_enabled: bool = False  # 总开关; False 时跳过归档调度与落库
+    mysql_host: str = "mysql"
+    mysql_port: int = 3306
+    mysql_user: str = "root"
+    mysql_password: str = "root123456"
+    mysql_database: str = "dt_stats"
+    archive_interval_seconds: int = 300  # 归档调度周期 (秒), 仅归档已完成小时
+    mysql_retention_days: int = 365  # MySQL 长期保留天数 (定期清理)
+
     # ---- 告警 ----
     rules_file: str = "configs/rules.yaml"
+
+    # ---- 业务规则集中配置 (热重载) ----
+    # 计数/告警/拥挤/警力/预测/异常/跟踪参数可集中在 configs/business_rules.yaml,
+    # 修改后基于 mtime 热重载 (无需重启). 未配置项回落下方各字段默认值.
+    business_rules_file: str = "configs/business_rules.yaml"
 
     # ---- Redis 实时状态 key 前缀 ----
     redis_prefix: str = "sc"
@@ -46,6 +64,7 @@ class Settings(BaseSettings):
     police_demand_weight_predict: float = 0.7  # 需求计算: 预测人数权重 β
     police_movement_ratio: float = 0.5  # 每轮最大移动比例 (占总警力)
     police_min_per_region: int = 1  # 每区域最少警力
+    police_config_file: str = "configs/police.yaml"  # 警力初始配置 (区域+总警力), 启动时写入 Redis
 
     # ---- 视频异常检测 ----
     anomaly_check_interval: int = 30  # 每 N 帧检测一次 (≈1s@30fps)

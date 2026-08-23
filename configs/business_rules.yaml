@@ -1,0 +1,57 @@
+# 业务规则集中配置 (热重载)
+#
+# 修改本文件即可实时生效 (基于 mtime 热重载, 无需重启服务)。
+# 优先级: business_rules.yaml 覆盖 config.py 默认值; 未配置项回落 config.py。
+#
+# 按业务域分组: counting(计数) / alerts(告警) / congestion(拥堵) /
+#               police(警力分配) / prediction(预测) / anomaly(视频异常) / tracking(跟踪)
+
+counting:                  # 越线计数参数 (counter.py)
+  min_distance_ratio: 0.02       # 距线最小距离占帧短边比例 (防抖)
+  endpoint_sensitivity: 0.05     # 端点误判过滤敏感度
+  hold_frames: 3                 # 滞留确认帧数 (跨线后需在新侧连续保持)
+  min_motion: 2                  # 最小位移(像素), 小于此值视为抖动
+  hysteresis_ratio: 0.04         # 滞回防抖: 侧别反转需超过此距离(占帧短边比例)
+  reverse_crossing_cooldown: 3.0 # 反向跨线冷却(秒), 同一轨迹反向事件间隔
+  id_switch_speed_ratio: 3.0     # ID切换: 速度超过历史平均 N 倍视为切换
+  id_switch_min_pixel: 30.0      # ID切换: 速度差距至少 N 像素
+  id_switch_min_avg_speed: 5.0   # ID切换: 历史平均速度低于此值不判(静止误判)
+  id_switch_history_window: 5    # ID切换: 方向一致性验证的历史窗口
+  counted_tracks_ttl: 300        # 已计数去重保留时长(秒)
+
+alerts:                    # 告警阈值 (rules.yaml 为规则文件, 此处为引擎参数)
+  anomaly_cooldown_seconds: 60   # 视频异常同设备同类型冷却(秒)
+
+congestion:                # 拥挤判断参数
+  congestion_min_flow: 5.0       # 车流速度下限(辆/分钟), 低于此值视为拥堵
+  roi_report_interval: 2.0       # AI 上报 ROI 车辆数周期(秒)
+
+police:                    # 警力分配算法参数
+  demand_weight_current: 0.3     # 需求 = α×当前人数
+  demand_weight_predict: 0.7     # 需求 = β×预测人数
+  movement_ratio: 0.5            # 每轮最大移动比例(占总警力)
+  min_per_region: 1              # 每区域最少警力
+
+prediction:                # 时序预测参数
+  interval_minutes: 15           # 预测周期(分钟), 同时驱动告警/警力/WS调度同步
+  series_length: 30              # 历史序列长度(个区间)
+  vehicle_person_min: 2          # 车流转人流的每车人数随机采样下限
+  vehicle_person_max: 5          # 车流转人流的每车人数随机采样上限
+
+anomaly:                   # 视频异常检测参数 (黑屏/花屏)
+  analysis_width: 480              # 分析用降采样宽度
+  black_screen_brightness: 20    # 黑屏: 灰度均值低于此值
+  black_screen_ratio: 0.95       # 黑屏: 近黑像素占比高于此值
+  black_pixel_value: 20          # 黑屏: 像素值低于此值算近黑
+  flower_block_grid: 8           # 花屏: 分块网格数
+  flower_noise_std: 35.0         # 花屏: 空间噪声标准差阈值
+  flower_uniformity: 0.6         # 花屏: 噪声均匀度阈值(1-CV)
+  flower_channel_corr: 0.5       # 花屏: 通道相关度阈值(低于此值判去相关)
+  flower_temporal_diff: 25.0     # 花屏: 时域差分阈值
+  check_interval: 30             # 每 N 帧检测一次
+  confirm_frames: 2              # 连续确认帧数(去抖)
+
+tracking:                  # 目标跟踪参数
+  yolo_conf: 0.4                 # YOLO 置信度阈值
+  yolo_iou: 0.5                  # NMS IoU 阈值
+  track_buffer: 30               # 跟踪历史最大长度 (由 bytetrack.yaml 决定算法)

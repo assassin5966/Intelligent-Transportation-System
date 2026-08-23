@@ -7,6 +7,7 @@ from typing import List, Optional
 
 import httpx
 
+from ..common.business_rules import get_rule
 from ..common.config import settings
 from ..common.logger import logger
 from ..schemas.events import EventIn, CrossingEvent
@@ -65,8 +66,10 @@ class DevicePipeline:
         self._anomaly_monitor = AnomalyMonitor()  # 视频异常监测 (黑屏/花屏)
         # WVP 同步设备启用流地址刷新: 断流重连失败时回调后端 /api/devices/{id}/stream 拿新地址
         self.enable_url_refresh = enable_url_refresh
-        # 车流速度统计: 最近 60 秒跨线车辆事件时间戳 (用于计算每分钟车流量, 单调时钟秒)
+        # 车流速度统计: 最近 60 秒车辆跨线事件时间戳 (用于计算每分钟车流量, 单调时钟秒)
         self._vehicle_cross_times: deque = deque(maxlen=4096)
+        # 人流速度统计: 最近 60 秒人员跨线事件时间戳 (用于计算每分钟人流量, 单调时钟秒)
+        self._person_cross_times: deque = deque(maxlen=4096)
         self._last_roi_report = 0.0  # 上次 ROI 车辆数上报时刻 (monotonic 秒)
 
     async def _run(self) -> None:
@@ -98,14 +101,17 @@ class DevicePipeline:
                     await self._push(event)
                     await self._broadcast_ws(event)
 
-                # 车流速度统计: 记录车辆跨线事件时间戳 (每分钟车流量计算)
+                # 车流/人流速度统计: 记录跨线事件时间戳 (每分钟车/人流量计算)
                 now_mono = time.monotonic()
                 for event in events:
                     if event.event_type in ("VehicleEnter", "VehicleExit"):
                         self._vehicle_cross_times.append(now_mono)
+                    elif event.event_type in ("PersonEnter", "PersonExit"):
+                        self._person_cross_times.append(now_mono)
 
-                # 周期上报 ROI 内车辆个数 (供后端拥挤判断)
-                if now_mono - self._last_roi_report >= settings.roi_report_interval:
+                # 周期上报 ROI 内车辆个数 (供后端拥挤判断); 间隔热重载
+                roi_interval = float(get_rule("congestion", "roi_report_interval", default=settings.roi_report_interval))
+                if now_mono - self._last_roi_report >= roi_interval:
                     self._last_roi_report = now_mono
                     roi_vehicles = self.counter.count_roi_vehicles(track_result.tracks)
                     await self._report_congestion(roi_vehicles)
@@ -180,18 +186,30 @@ class DevicePipeline:
             self._vehicle_cross_times.popleft()
         return float(len(self._vehicle_cross_times))
 
-    async def _report_congestion(self, roi_vehicles: int) -> None:
-        """周期上报 ROI 内车辆个数 + 每分钟车流量, 供后端拥挤判定.
+    def _person_flow_per_minute(self, now_mono: float) -> float:
+        """最近 60 秒内人员跨线次数折算为每分钟人流量 (人/分钟).
 
-        车流速度 = 最近 60 秒车辆跨线次数 (辆/分钟).
+        人流速度指标: 反映人流通过计数线的速率, 停滞时趋近 0.
+        """
+        cutoff = now_mono - 60.0
+        while self._person_cross_times and self._person_cross_times[0] < cutoff:
+            self._person_cross_times.popleft()
+        return float(len(self._person_cross_times))
+
+    async def _report_congestion(self, roi_vehicles: int) -> None:
+        """周期上报 ROI 内车辆个数 + 每分钟车/人流量, 供后端拥挤判定.
+
+        车流速度 = 最近 60 秒车辆跨线次数 (辆/分钟); 人流量同理 (人/分钟).
         上报失败仅记日志, 不阻塞视频处理.
         """
         now_mono = time.monotonic()
         flow_per_min = self._vehicle_flow_per_minute(now_mono)
+        person_flow_per_min = self._person_flow_per_minute(now_mono)
         payload = {
             "device_id": self.device_id,
             "roi_vehicles": roi_vehicles,
             "vehicle_flow_per_min": flow_per_min,
+            "person_flow_per_min": person_flow_per_min,
         }
         try:
             resp = await self._client.post(

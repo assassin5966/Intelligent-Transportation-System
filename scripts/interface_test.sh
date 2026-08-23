@@ -110,7 +110,6 @@ fi
 
 # WVP 相关接口: sync/stream 需要 WVP 启用; snapshot/enable 已支持非 WVP 设备直接截帧启流
 r=$(req POST "$BACKEND/api/devices/sync");                  wvp_sync="${r%%|*}"; check "POST /api/devices/sync 需WVP→503" 5 "$wvp_sync" "${r#*|}"
-r=$(req POST "$BACKEND/api/devices/wvp-webhook" '{"test":1}'); wvp_wh="${r%%|*}"; check "POST /api/devices/wvp-webhook (WVP)" 2 "$wvp_wh" "${r#*|}"
 r=$(req GET "$BACKEND/api/devices/$MOCK_VEHICLE/stream");   check "GET /api/devices/{id}/stream 需WVP→503" 5 "${r%%|*}" "${r#*|}"
 r=$(req GET "$BACKEND/api/devices/$MOCK_VEHICLE/snapshot"); check "GET /api/devices/{id}/snapshot (非WVP截帧)" 2 "${r%%|*}" "${r#*|}"
 r=$(req POST "$BACKEND/api/devices/$MOCK_VEHICLE/enable" '{"line_coords":"0.1,0.4,0.9,0.4","camera_type":"vehicle","count_only":"enter"}'); check "POST /api/devices/{id}/enable (非WVP启流)" 2 "${r%%|*}" "${r#*|}"

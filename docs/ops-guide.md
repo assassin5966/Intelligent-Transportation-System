@@ -39,18 +39,11 @@
 | 8000 | TCP | 业务后端 (FastAPI) | REST API + WebSocket | docker-compose.yml `backend` |
 | 8001 | TCP | AI 分析服务 | 视频流注册/管理/WS 推送 | docker-compose.yml `ai` |
 | 16379 | TCP | Redis | 实时状态存储（映射容器 6379） | docker-compose.yml `redis` |
-| 18080 | TCP | WVP 管理后台 | REST API（设备同步/点播） | docker-compose.wvp.yml `wvp`（host 网络） |
-| 5060 | UDP/TCP | WVP SIP 信令 | GB28181 设备注册/INVITE | docker-compose.wvp.yml `wvp`（host 网络） |
-| 80 | TCP | ZLMediaKit HTTP | HTTP-FLV 拉流（AI 使用） | docker-compose.wvp.yml `zlmediakit` |
-| 554 | TCP | ZLMediaKit RTSP | RTSP 拉流（可选协议） | docker-compose.wvp.yml `zlmediakit` |
-| 1935 | TCP | ZLMediaKit RTMP | RTMP 推/拉流 | docker-compose.wvp.yml `zlmediakit` / docker-compose.yml `rtsp-server` |
-| 30000-30500 | TCP/UDP | ZLMediaKit RTP | RTP 收包端口范围（摄像头推流） | docker-compose.wvp.yml `zlmediakit` |
+| 3306 | TCP | MySQL | 小时级统计长期归档 | docker-compose.yml `mysql` |
 | 8554 | TCP | MediaMTX RTSP | 测试用 RTSP 服务器 | docker-compose.yml `rtsp-server` |
 | 8888 | TCP | MediaMTX HTTP | 测试用 HTTP 接口 | docker-compose.yml `rtsp-server` |
-| 3307 | TCP | WVP 专用 MySQL | 映射 3306，避开宿主 3306 | docker-compose.wvp.yml `wvp-mysql` |
-| 6380 | TCP | WVP 专用 Redis | 映射 6379，避开宿主 6379 | docker-compose.wvp.yml `wvp-redis` |
 
-> **注意**：Redis 映射端口为 16379（非默认 6379），WVP 专用 MySQL/Redis 分别映射到 3307/6380，均为了避开宿主机已占用端口。
+> **注意**：Redis 映射端口为 16379（非默认 6379），避开宿主机已占用端口。WVP(18080/5060) 与 ZLMediaKit(80/554/1935/30000-30500) 为外部独立部署组件，端口由 WVP 侧管理，不在本项目编排内。
 
 ### 1.2 镜像构建
 
@@ -152,7 +145,7 @@ cp .env.example .env
 |----------------------|-----------|------|
 | `./app:/app/app:cached` | ai, backend | 应用代码（开发热加载） |
 | `./models:/app/models:cached` | ai, backend | AI 模型权重（YOLO/Chronos-2） |
-| `./configs:/app/configs:cached` | ai, backend | 配置文件（rules.yaml/bytetrack.yaml） |
+| `./configs:/app/configs:cached` | ai, backend | 配置文件（rules.yaml/business_rules.yaml/bytetrack.yaml，规则与业务参数热重载） |
 | `./static:/app/static:cached` | backend | 静态文件（运维工具页面） |
 | `./data:/app/data:cached` | backend | 数据目录（测试视频等） |
 | `./logs:/app/logs` | ai, backend | 日志输出目录 |
@@ -200,16 +193,7 @@ docker compose -p smartcity down -v
 - ZLMediaKit HTTP-FLV 端口（默认 80）对 AI 服务网络可达
 - 摄像头已通过 GB28181 SIP 协议注册到 WVP
 
-WVP 全家桶独立部署编排见 `docker-compose.wvp.yml`，包含：
-
-| 服务 | 说明 |
-|------|------|
-| `wvp-mysql` | WVP 专用 MySQL 8.0（映射 3307） |
-| `wvp-redis` | WVP 专用 Redis 7（映射 6380） |
-| `zlmediakit` | ZLMediaKit 流媒体引擎（80/554/1935/30000-30500） |
-| `wvp` | WVP 信令平台（host 网络模式，SIP bind 宿主 IP） |
-
-WVP 使用 host 网络模式（SIP 必须 bind 摄像头可达的 IP），MySQL/Redis/ZLM 均通过 `127.0.0.1` 连接。
+WVP 信令平台与 ZLMediaKit 流媒体引擎由外部独立部署（本项目不提供编排），部署方式参考 WVP 官方文档。本项目仅作为消费方对接（见下方 `.env` 配置）。
 
 #### .env 配置
 
@@ -264,6 +248,14 @@ http://<backend-host>:8000/static/device-config.html
 - 计数线/锚点/ROI 可视化绘制
 - 设备启用配置（调用 `POST /api/devices/{id}/enable`）
 - 拥挤判断阈值设置（「最大车辆数」输入框，对应 `max_vehicles` 字段）
+
+**业务规则配置页**（无需启用 WVP 也可访问）：
+
+```
+http://<backend-host>:8000/static/business-rules.html
+```
+
+提供计数/告警/拥挤/警力/预测/视频异常/跟踪参数的图形化编辑，保存即热重载（对应接口 `GET|PUT /api/config/business-rules`，详见下方 2.2 与 API 文档 §10）。
 
 ---
 
@@ -443,6 +435,58 @@ predict_rules:
 
 > 修改 `rules.yaml` 后保存即可，下一次告警评估周期自动生效。
 
+#### 业务规则集中配置（business_rules.yaml，热重载）
+
+计数、拥挤、警力、预测、视频异常、跟踪参数可集中在 `configs/business_rules.yaml`（见 `app/common/business_rules.py`）：
+
+```yaml
+counting:                  # 越线计数参数 (counter.py)
+  min_distance_ratio: 0.02
+  hold_frames: 3
+  hysteresis_ratio: 0.04
+  ...
+congestion:                # 拥挤判断参数
+  congestion_min_flow: 5.0
+  roi_report_interval: 2.0
+police:                    # 警力分配算法参数
+  demand_weight_current: 0.3
+  demand_weight_predict: 0.7
+  movement_ratio: 0.5
+prediction:                # 时序预测参数
+  interval_minutes: 15
+  series_length: 30
+  vehicle_person_min: 2
+  vehicle_person_max: 5
+anomaly:                   # 视频异常检测参数
+  black_screen_brightness: 20
+  check_interval: 30
+  ...
+tracking:                  # 目标跟踪参数
+  yolo_conf: 0.4
+  yolo_iou: 0.5
+```
+
+- 与 rules.yaml 同一热重载机制（mtime 检测），修改保存后自动生效，**无需重启** backend/AI
+- 优先级：`business_rules.yaml` 覆盖 config.py 默认值；未配置项回落环境变量/config.py
+- 配置文件中未列出的分组项保持 config.py 默认值，可按需增删
+- 调度周期类参数（`prediction.interval_minutes`）修改后从下一轮循环起按新周期执行
+
+##### 图形化配置页面（推荐）
+
+无需直接编辑 YAML，浏览器访问运维配置页：
+
+```
+http://<backend-host>:8000/static/business-rules.html
+```
+
+- 按分组展示全部参数（label/说明/默认值），支持单个恢复默认与一键全部恢复
+- 点击「保存并热重载」调用 `PUT /api/config/business-rules` 写回 yaml（保留注释），**立即生效无需重启**
+- 后端地址可在页面顶部修改（跨域由 CORS 控制）；已集成设备计数配置页入口
+
+对应接口：
+- `GET /api/config/business-rules`：返回参数值 + 元数据（label/desc/type/default），供页面渲染
+- `PUT /api/config/business-rules`：接收 `{分组: {参数: 值}}`，类型/范围校验（非法值返回 400），按行写回 yaml 保留注释与顺序
+
 #### 自定义规则示例
 
 新增一条车辆预警规则（阈值 150，warning 级别）：
@@ -506,7 +550,8 @@ appearance_thresh: 0.8         # 外观匹配阈值
 | 移动摄像头 | `gmc_method` 改为 `sparseOptFlow` | 启用全局运动补偿 |
 | 需要外观匹配 | `with_reid: True`，`model: 指定 ReID 模型路径` | 需额外下载模型文件 |
 
-> 修改 `bytetrack.yaml` 后需重启 AI 服务才能生效（非热重载）。
+> 修改 `bytetrack.yaml` 后需重启 AI 服务才能生效（跟踪算法参数，非热重载）。
+> 检测置信度/IOU 阈值（`yolo_conf`/`yolo_iou`）与历史长度（`track_buffer`）可通过 `business_rules.yaml` 的 `tracking` 分组热重载，无需重启。
 
 ---
 
@@ -609,6 +654,8 @@ bash scripts/mock_start.sh
 # 停止所有服务
 bash scripts/mock_start.sh --down
 ```
+
+> Mock 模式用 `data/test_50f.mp4` 作为测试视频，经 `rtsp-streamer-vehicle` / `rtsp-streamer-person` 两路 ffmpeg 分别推流到 MediaMTX 的 `/vehicle`、`/person` 路径（推流命令见 `docker-compose.mock.yml`）。测试视频文件需放在 `data/` 根目录且文件名保持一致（常见坑：`data/video/text.mp4` 不存在会导致推流容器启动即退出、RTSP 路径 404）。如需更换测试视频，直接替换该文件即可。
 
 ### 服务地址
 
@@ -1086,7 +1133,24 @@ curl -s "http://localhost:8000/api/alerts?limit=100" | \
 
 ### 4.3 警力分配维护
 
-#### 区域注册/删除
+#### 初始配置（configs/police.yaml）
+
+区域与总警力可通过 **配置文件** `configs/police.yaml` 预置，后端启动时自动写入 Redis：
+
+```yaml
+total: 50                                    # 总警力数
+regions:
+  - id: region_01                            # 区域 ID（唯一）
+    name: "古城南门"                          # 区域名称
+    center_x: 0.5                            # 中心坐标（归一化 0-1）
+    center_y: 0.5
+    device_id: "GB-xxx-xxx"                  # 关联摄像头（读取在场人数）
+```
+
+> - 加载逻辑：仅当 Redis 中**尚无对应数据**时写入（HSETNX/SETNX），**不覆盖** API 动态配置。改文件后重启后端生效，但已存在的区域/总警力以 Redis 为准。
+> - 若需全部重新加载，先删掉 Redis 中对应键（`sc:police:regions` / `sc:police:total`）再重启后端。
+
+#### 区域注册/删除（API 动态配置）
 
 ```bash
 # 注册警力区域
@@ -1260,8 +1324,8 @@ redis-cli hgetall sc:congestion:device:GB-xxx-xxx
 # 查看设备拥挤状态（1=拥挤, 0=正常）
 redis-cli get sc:congestion:state:GB-xxx-xxx
 
-# 查询拥挤数据 REST 接口
-curl -s "http://localhost:8000/api/stats/congestion" | python -m json.tool
+# 查询拥挤数据 REST 接口（拥挤字段已随设备统计返回: roi_vehicles / vehicle_flow_per_min / person_flow_per_min / congested）
+curl -s "http://localhost:8000/api/stats/devices" | python -m json.tool
 
 # 查看告警去重 key（TTL）
 redis-cli ttl sc:alert:vehicle_saturate_critical
@@ -1431,29 +1495,29 @@ tar xzf backup/models-20260808.tar.gz
 | 配置文件 | 路径 | 说明 |
 |---------|------|------|
 | 环境变量 | `.env` | 环境配置（含 WVP 账号密码，注意安全） |
-| 告警规则 | `configs/rules.yaml` | 告警阈值配置 |
-| 跟踪器配置 | `configs/bytetrack.yaml` | BoT-SORT 参数 |
+| 告警规则 | `configs/rules.yaml` | 告警阈值配置（热重载） |
+| 业务规则 | `configs/business_rules.yaml` | 计数/拥挤/警力/预测/异常/跟踪参数（热重载） |
+| 跟踪器配置 | `configs/bytetrack.yaml` | BoT-SORT 算法参数（改后需重启 AI） |
+| 警力配置 | `configs/police.yaml` | 警力区域 + 总警力初始配置 |
 | 主编排 | `docker-compose.yml` | 服务编排 |
-| WVP 编排 | `docker-compose.wvp.yml` | WVP 全家桶编排 |
 | Dockerfile | `Dockerfile` | 镜像构建 |
-| WVP 配置 | `configs/wvp/application.yml` | WVP 信令平台配置 |
-| ZLM 配置 | `configs/zlm/config.ini` | ZLMediaKit 流媒体配置 |
+
+> WVP 信令平台与 ZLMediaKit 为外部独立部署组件，其配置由 WVP 侧自行备份，不在本项目备份清单内。
 
 ```bash
 # 备份全部配置文件
 mkdir -p backup/configs
 cp .env backup/configs/.env.bak
 cp configs/rules.yaml backup/configs/
+cp configs/business_rules.yaml backup/configs/
 cp configs/bytetrack.yaml backup/configs/
+cp configs/police.yaml backup/configs/
 cp docker-compose.yml backup/configs/
-cp docker-compose.wvp.yml backup/configs/
 cp Dockerfile backup/configs/
-cp -r configs/wvp backup/configs/wvp
-cp -r configs/zlm backup/configs/zlm
 
 # 一键备份（配置 + 模型 + Redis 数据）
 tar czf backup/full-backup-$(date +%Y%m%d).tar.gz \
-  .env configs/ docker-compose.yml docker-compose.wvp.yml Dockerfile \
+  .env configs/ docker-compose.yml Dockerfile \
   models/ backup/redis-data-$(date +%Y%m%d)/
 ```
 
@@ -1652,7 +1716,7 @@ docker compose -p smartcity up -d --build ai
 curl -s http://localhost:8001/health
 ```
 
-> AI 服务重启后，WVP 同步会在下一个周期（30 秒内）自动恢复所有已配置设备的视频管道。手动注册的设备需重新注册或等待 AI 管道自动重连。
+> AI 服务重启后，WVP 同步会在下一个周期（30 秒内）自动恢复所有已配置设备的视频管道。手动注册的设备需重新调用启流（`POST /api/devices/{id}/enable`）恢复管道。
 
 #### 回滚方案
 

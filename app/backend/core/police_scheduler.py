@@ -4,6 +4,7 @@
 """
 import asyncio
 
+from ...common.business_rules import get_rule
 from ...common.config import settings
 from ...common.logger import logger
 from .allocator import optimize_allocation
@@ -28,13 +29,12 @@ async def _run_once() -> None:
 
 
 async def _loop() -> None:
-    """定时循环: 每 N 分钟执行一次."""
-    interval = settings.prediction_interval_minutes * 60
+    """定时循环: 每 N 分钟执行一次 (间隔热重载)."""
     # 启动后等待一个间隔再首次执行 (让预测先产出缓存)
-    await asyncio.sleep(interval)
     while True:
-        await _run_once()
+        interval = int(get_rule("prediction", "interval_minutes", default=settings.prediction_interval_minutes)) * 60
         await asyncio.sleep(interval)
+        await _run_once()
 
 
 async def start_scheduler() -> None:
@@ -43,8 +43,9 @@ async def start_scheduler() -> None:
     if _task is not None:
         return
     _task = asyncio.create_task(_loop())
+    interval_minutes = int(get_rule("prediction", "interval_minutes", default=settings.prediction_interval_minutes))
     logger.info(
-        f"警力分配调度器已启动 (每 {settings.prediction_interval_minutes} 分钟一次)"
+        f"警力分配调度器已启动 (每 {interval_minutes} 分钟一次)"
     )
 
 

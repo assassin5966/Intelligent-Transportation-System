@@ -1,7 +1,7 @@
 # 前端对接 API 文档
 
 > 智慧交管拥堵治理预警监控平台
-> 版本: 0.7.0 · 更新日期: 2026-08-13
+> 版本: 0.9.0 · 更新日期: 2026-08-23
 
 ---
 
@@ -16,9 +16,10 @@
 7. [警力分配 API](#7-警力分配-api)
 8. [事件接收 API（AI → 后端）](#8-事件接收-apiai--后端)
 9. [WebSocket 实时推送](#9-websocket-实时推送)
-10. [数据模型](#10-数据模型)
-11. [错误码](#11-错误码)
-12. [接入示例](#12-接入示例)
+10. [业务规则配置 API](#10-业务规则配置-api)
+11. [数据模型](#11-数据模型)
+12. [错误码](#12-错误码)
+13. [接入示例](#13-接入示例)
 ---
 
 ## 1. 服务概述
@@ -41,6 +42,14 @@ http://<backend-host>:8000/static/device-config.html
 ```
 
 该页面用于 WVP 同步设备的计数线配置：同步设备 → 截帧 → 画计数线和锚点 → 启流计数。详见 §3.4 / §3.8 / §3.6。
+
+另有**业务规则配置页**（计数/告警/拥挤/警力/预测/视频异常/跟踪参数，保存即热重载生效）：
+
+```
+http://<backend-host>:8000/static/business-rules.html
+```
+
+对应接口见 §10 业务规则配置 API。
 
 ### 健康检查
 
@@ -104,7 +113,7 @@ CORS_ORIGINS=https://dashboard.example.com,https://admin.example.com
 
 ## 3. 设备管理 API
 
-管理摄像头设备的注册、列表、删除。注册时会自动转发配置到 AI 服务启动视频处理管道。
+管理摄像头设备的注册、列表、删除。注册仅保存配置到 Redis；启流由 §3.7 `POST /api/devices/{device_id}/enable` 统一负责（删除时转发 AI 停止视频管道）。
 
 ### 3.1 注册设备
 
@@ -150,7 +159,7 @@ POST /api/devices
 { "id": "cam-gate-north", "status": "registered" }
 ```
 
-> ⚠️ AI 服务不可达时不会阻塞配置落库，但视频管道不会启动。前端可通过 AI 服务的 `/devices` 接口或 `/health` 的 `active_devices` 确认管道是否运行。
+> 📌 **注册仅保存配置，不启动视频管道**。启流统一由 §3.7 `POST /api/devices/{device_id}/enable` 负责（WVP 同步设备与手动注册设备均如此）。注册后设备 `status=registered`，配置计数线并 enable 后才进入 `online` 并开始计数。
 
 > 📌 **`count_only` 与 `current_*` 语义**：`count_only` 仅过滤「是否生成事件」，不改变事件对实时统计的影响。车流单向车道（`count_only="enter"`）只产生 `VehicleEnter`，`current_vehicles` 即累计进入数（无 `Exit` 事件对冲，为单向场景的预期语义）；人流摄像头恒为双向计数（`count_only=null`），`Enter`/`Exit` 自然对冲 `current_persons`。今日累计 `today_*` 同样按实际产生的事件累加。
 
@@ -177,10 +186,19 @@ GET /api/devices
     "gb_device_id": "",
     "gb_channel_id": "",
     "status": "registered",
-    "last_heartbeat": "2026-08-08T10:00:00+00:00"
+    "last_heartbeat": "2026-08-08T10:00:00+00:00",
+    "longitude": 116.397128,
+    "latitude": 39.916527
   }
 ]
 ```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `longitude` | float \| null | 设备经度（按设备名称匹配 `data/device_geo.json`，未匹配为 `null`）|
+| `latitude` | float \| null | 设备纬度（同上）|
+
+> 经纬度用于前端地图打点。匹配规则：以设备 `name` 精确匹配地理库；匹配不到的设备经纬度为 `null`。
 
 ### 3.3 删除设备
 
@@ -230,8 +248,10 @@ GET /api/devices/{device_id}/stream
 
 **响应** `200 OK`
 ```json
-{ "device_id": "GB-34020000001320000001-34020000001320000002", "stream_url": "http://zlm/live/xxx.flv", "stream_id": "xxx" }
+{ "device_id": "GB-34020000001320000001-34020000001320000002", "stream_url": "http://zlm/live/xxx.flv", "stream_id": "xxx", "longitude": 116.397128, "latitude": 39.916527 }
 ```
+
+> `longitude` / `latitude`：按设备名称匹配 `data/device_geo.json`，未匹配为 `null`（同 §3.2）。
 
 **错误** `503` WVP 未启用 / `404` 设备不存在 / `400` 非 WVP 同步设备 / `502` WVP 点播失败。
 
@@ -264,9 +284,9 @@ WVP 设备额外返回 `stream_id`。前端按 `protocol` 选择播放器：`flv
 
 **错误** `404` 设备不存在 / `400` 无可播放流地址 / `502` WVP 点播失败。
 
-### 3.7 启用 WVP 同步设备
+### 3.7 启流计数
 
-为 `wvp_sync` 自动入表（`status=synced`/`offline`）的设备配置计数线并启流（`status -> online`）。手动注册设备请直接用 `POST /api/devices`。
+为设备配置计数线并启动视频管道（`status -> online`），WVP 同步设备与手动注册设备均通过此端点启流（注册仅保存配置，见 §3.1）。
 
 ```
 POST /api/devices/{device_id}/enable
@@ -288,18 +308,7 @@ POST /api/devices/{device_id}/enable
 { "device_id": "GB-...", "status": "online", "stream_url": "http://zlm/live/xxx.flv" }
 ```
 
-### 3.8 WVP Webhook（预留）
-
-接收 WVP 定制回调（设备上下线等），透传后触发一次同步。WVP 默认无对外 HTTP webhook，此端点供定制对接（如在 WVP 侧配置事件转发）。
-
-```
-POST /api/devices/wvp-webhook
-```
-
-**请求体** 任意 JSON（透传记录日志）。
-**响应** 同步结果（同 3.4）；WVP 未启用时返回 `{"status":"skipped","reason":"wvp_disabled"}`。
-
-### 3.9 截取设备画面（配置计数线用）
+### 3.8 截取设备画面（配置计数线用）
 
 对未配置计数线的 WVP 同步设备（`status=synced`），截取一帧画面返回 JPEG 图片，供前端绘制计数线和锚点。
 
@@ -323,7 +332,7 @@ GET /api/devices/{device_id}/snapshot
 
 #### 前端画线交互流程
 
-WVP 同步设备的完整配置流程为 **同步(§3.4) → 截帧(§3.8) → 画线 → 启用(§3.6)**：
+WVP 同步设备的完整配置流程为 **同步(§3.4) → 截帧(§3.8) → 画线 → 启用(§3.7)**：
 
 ```
 1. POST /api/devices/sync              → 设备入表 status=synced
@@ -377,7 +386,7 @@ await fetch(`http://backend:8000/api/devices/${deviceId}/enable`, {
 });
 ```
 
-> ⚠️ 计数线应画在车流/人流**必经的截面**上（如门口、路口横截面），锚点点击在你想计为"Enter（进）"的那一侧。详见 §10.3 方向判定逻辑。
+> ⚠️ 计数线应画在车流/人流**必经的截面**上（如门口、路口横截面），锚点点击在你想计为"Enter（进）"的那一侧。详见 §11.3 方向判定逻辑。
 
 ---
 
@@ -421,7 +430,7 @@ GET /api/stats/realtime
 
 ### 4.2 各设备分别计数
 
-返回所有注册设备的分别计数（当前在场 + 今日累计 + 拥挤状态），含设备名称和状态。
+返回所有注册设备的分别计数（当前在场 + 今日累计 + 当前小时内车流/人流 + 拥挤状态），含设备名称和状态。
 
 ```
 GET /api/stats/devices
@@ -443,8 +452,14 @@ GET /api/stats/devices
     "today_vehicle_out": 73,
     "today_person_in": 0,
     "today_person_out": 0,
+    "hour": 14,
+    "hour_vehicle_in": 8,
+    "hour_vehicle_out": 5,
+    "hour_person_in": 0,
+    "hour_person_out": 0,
     "roi_vehicles": 12,
     "vehicle_flow_per_min": 34.0,
+    "person_flow_per_min": 0.0,
     "congested": false
   },
   {
@@ -459,8 +474,14 @@ GET /api/stats/devices
     "today_vehicle_out": 0,
     "today_person_in": 2100,
     "today_person_out": 1944,
+    "hour": 14,
+    "hour_vehicle_in": 0,
+    "hour_vehicle_out": 0,
+    "hour_person_in": 312,
+    "hour_person_out": 288,
     "roi_vehicles": 0,
     "vehicle_flow_per_min": 0.0,
+    "person_flow_per_min": 24.0,
     "congested": false
   }
 ]
@@ -479,11 +500,18 @@ GET /api/stats/devices
 | `today_vehicle_out` | int | 该设备今日车辆离开累计 |
 | `today_person_in` | int | 该设备今日人员进入累计 |
 | `today_person_out` | int | 该设备今日人员离开累计 |
+| `hour` | int | 当前小时（0-23）|
+| `hour_vehicle_in` | int | 该设备**当前小时内**车辆进入累计 |
+| `hour_vehicle_out` | int | 该设备**当前小时内**车辆离开累计 |
+| `hour_person_in` | int | 该设备**当前小时内**人员进入累计 |
+| `hour_person_out` | int | 该设备**当前小时内**人员离开累计 |
 | `roi_vehicles` | int | 最近一次上报的 ROI 内瞬时车辆数（AI 每 2 秒上报，见 §4.4）|
 | `vehicle_flow_per_min` | float | 最近一次上报的车流速度：最近 60 秒跨线车辆数折算为每分钟车流量（辆/分钟）|
+| `person_flow_per_min` | float | 最近一次上报的人流速度：最近 60 秒跨线人数折算为每分钟人流量（人/分钟）|
 | `congested` | bool | 是否拥挤（双阈值判定，见 §4.4）|
 
 > 未产生过事件的注册设备也会返回，计数为 0。各设备今日累计按天隔离，跨天自动清零。
+> `hour_*` 为**当前小时累计值**（来自每小时 Hash），与 `*_flow_per_min`（60 秒滑动窗口瞬时速率）不同，两者互补：前者反映本小时累计通过量，后者反映当前速率。
 
 ### 4.3 单个设备计数
 
@@ -514,11 +542,19 @@ GET /api/stats/devices/{device_id}
   "today_vehicle_out": 73,
   "today_person_in": 0,
   "today_person_out": 0,
+  "hour": 14,
+  "hour_vehicle_in": 8,
+  "hour_vehicle_out": 5,
+  "hour_person_in": 0,
+  "hour_person_out": 0,
   "roi_vehicles": 12,
   "vehicle_flow_per_min": 34.0,
+  "person_flow_per_min": 0.0,
   "congested": false
 }
 ```
+
+> 字段说明同 §4.2（`hour_*` 为当前小时内累计，`*_flow_per_min` 为 60 秒滑动窗口速率）。
 
 **错误** `404` 设备不存在：
 ```json
@@ -530,6 +566,7 @@ GET /api/stats/devices/{device_id}
 结合**区域车辆个数**（ROI 内瞬时车辆数）与**车流速度**（每分钟车流量）按**双阈值**判定设备是否拥挤。
 
 - **车流速度（每分钟车流量）**：AI 在 60 秒滑动窗口内统计 `VehicleEnter/Exit` 跨线事件次数，折算为辆/分钟（车流停滞/缓行时趋近 0）。
+- **人流量（每分钟人流量）**：AI 在 60 秒滑动窗口内统计 `PersonEnter/Exit` 跨线事件次数，折算为人/分钟，与车流速度同机制上报（供人流速率展示，不参与拥挤判定）。
 - **区域车辆个数**：AI 每 2 秒统计一次 ROI 内当前跟踪到的车辆（car/truck/bus）数，上报后端。
 - **拥挤判定**：`roi_vehicles >= max_vehicles` 且 `vehicle_flow_per_min < CONGESTION_MIN_FLOW`（默认 5 辆/分钟）时判定为拥挤。两者均需超过阈值，避免把「车多但仍在流动」误判为拥堵。
 - **状态机去抖**：后端记录各设备拥挤状态（`sc:congestion:state:{device_id}`），仅在状态转移时产生告警——进入拥挤触发 `critical` 告警（onset），解除拥挤触发 `info` 告警（recovery）。
@@ -551,10 +588,11 @@ POST /api/stats/congestion
 | `device_id` | string | ✅ | 设备 ID |
 | `roi_vehicles` | int | ✅ | ROI 内瞬时车辆个数（≥0）|
 | `vehicle_flow_per_min` | float | ✅ | 最近 60 秒跨线次数折算的每分钟车流量（≥0）|
+| `person_flow_per_min` | float | ❌ | 最近 60 秒跨线人数折算的每分钟人流量（≥0，默认 0）|
 
 **请求示例**
 ```json
-{ "device_id": "cam-gate-north", "roi_vehicles": 12, "vehicle_flow_per_min": 34.0 }
+{ "device_id": "cam-gate-north", "roi_vehicles": 12, "vehicle_flow_per_min": 34.0, "person_flow_per_min": 0.0 }
 ```
 
 **响应** `200 OK`
@@ -570,32 +608,58 @@ POST /api/stats/congestion
 
 **错误** `404` 设备不存在。
 
-#### 查询最新拥挤数据
+> 拥挤数据无需独立查询端点：`roi_vehicles`、`vehicle_flow_per_min`、`person_flow_per_min`、`congested` 已随 §4.2 / §4.3 设备统计返回；产生告警时经 §5 告警 API 与后端 `/ws`（`type: alert`，`category: congestion`）推送。
+
+### 4.5 长期报表（MySQL 归档）
+
+查询**历史任意时段**的小时级车流/人流量。归档调度器每 `ARCHIVE_INTERVAL_SECONDS`（默认 300s）把 Redis 中**已完成小时**的数据落库到 MySQL `hourly_traffic` 表（按 `device_id+stat_date+hour` 幂等覆盖），支持跨 Redis 30 天保留窗口的长期报表；停机后重启自动补归档。MySQL 数据保留 `MYSQL_RETENTION_DAYS`（默认 365）天，每日自动清理。
 
 ```
-GET /api/stats/congestion?device_id={device_id}
+GET /api/stats/hourly/history?device_id={device_id}&start_date={start}&end_date={end}
 ```
 
 **查询参数**
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `device_id` | string | ❌ | 指定设备 ID；不传返回所有上报过数据的设备 |
+| `device_id` | string | ❌ | 指定设备 ID；不传返回**全局合计**（按日期+小时聚合所有设备）|
+| `start_date` | string | ✅ | 开始时间：`YYYY-MM-DD`（整日，从 00 点起）或 `YYYY-MM-DD:HH`（精确到小时）|
+| `end_date` | string | ✅ | 结束时间：`YYYY-MM-DD`（整日，至 23 点）或 `YYYY-MM-DD:HH`；须不早于 `start_date` |
 
-**响应** `200 OK`（数组，按设备返回最近一次上报数据）
+**示例**：查询 `2026-08-01 01:00` → `2026-08-22 08:00`（闭区间）：
 
-```json
-[
-  {
-    "device_id": "cam-gate-north",
-    "roi_vehicles": 12,
-    "vehicle_flow_per_min": 34.0,
-    "updated_at": "2026-08-13T08:00:00+00:00"
-  }
-]
+```
+GET /api/stats/hourly/history?device_id=cam-gate-north&start_date=2026-08-01:01&end_date=2026-08-22:08
 ```
 
-> 拥挤状态同时反映在 §4.2 / §4.3 的 `congested` 字段；产生告警时经 §5 告警 API 与后端 `/ws`（`type: alert`，`category: congestion`）推送。
+**响应** `200 OK`
+
+```json
+{
+  "device_id": "cam-gate-north",
+  "start": "2026-08-01:01",
+  "end": "2026-08-22:08",
+  "records": [
+    { "stat_date": "2026-08-01", "hour": 1, "vehicle_in": 3, "vehicle_out": 1, "person_in": 0, "person_out": 0 },
+    { "stat_date": "2026-08-01", "hour": 2, "vehicle_in": 5, "vehicle_out": 2, "person_in": 0, "person_out": 0 }
+  ]
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `device_id` | string \| null | 指定设备 ID；`null` 表示全局合计 |
+| `start` / `end` | string | 实际生效的时间边界（`YYYY-MM-DD:HH`）|
+| `records` | array | 记录列表，每项含 `stat_date`（`YYYY-MM-DD`）、`hour` 与 `vehicle_in/out`、`person_in/out` |
+
+**错误**
+
+| 状态码 | 说明 |
+|--------|------|
+| `503` | MySQL 归档未启用（`MYSQL_ENABLED=false`）或查询失败 |
+| `422` | 时间格式非法（非 `YYYY-MM-DD`/`YYYY-MM-DD:HH`、hour 超出 0-23）或开始晚于结束 |
+
+> 📌 小时级车流/人流量查询仅此一个入口（MySQL 长期归档）。Redis 侧每小时 Hash 仅用于 §4.2 / §4.3 的 `hour_*` 当前小时累计字段，不提供独立查询端点。
 
 ---
 
@@ -1299,9 +1363,98 @@ ws://<backend-host>:8000/ws
 
 ---
 
-## 10. 数据模型
+## 10. 业务规则配置 API
 
-### 10.1 检测类别
+集中读写 `configs/business_rules.yaml`（计数/告警/拥挤/警力/预测/视频异常/跟踪参数）。
+
+> **热重载机制**：配置保存到 yaml 文件后，backend/AI 通过 mtime 检测自动重载，**无需重启服务**。优先级：`business_rules.yaml` > 环境变量/config.py 默认值；未配置项回落默认值。
+>
+> 配套运维页面 `http://<backend-host>:8000/static/business-rules.html`（分组表单、恢复默认、一键保存热重载）。
+
+### 10.1 读取业务规则配置
+
+```
+GET /api/config/business-rules
+```
+
+**响应** `200 OK`
+
+```json
+{
+  "file": "configs/business_rules.yaml",
+  "hot_reload": true,
+  "groups": [
+    {
+      "key": "counting",
+      "title": "越线计数",
+      "desc": "跨线计数算法参数 (AI 服务, counter.py)",
+      "params": [
+        { "key": "min_distance_ratio", "label": "最小距离比例", "desc": "距线最小距离占帧短边比例, 防抖", "type": "float", "step": 0.001, "min": 0, "max": 1, "default": 0.02, "value": 0.02 },
+        { "key": "hold_frames", "label": "滞留确认帧数", "desc": "跨线后需在新侧连续保持的帧数", "type": "int", "min": 1, "max": 10, "default": 3, "value": 3 }
+      ]
+    }
+  ]
+}
+```
+
+**响应字段**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `file` | string | 业务规则文件路径 |
+| `hot_reload` | bool | 是否支持热重载（恒为 `true`）|
+| `groups` | array | 分组列表（`counting`/`alerts`/`congestion`/`police`/`prediction`/`anomaly`/`tracking`）|
+| `groups[].key` | string | 分组标识（与 yaml 顶层键一致）|
+| `groups[].title` / `desc` | string | 分组标题 / 说明 |
+| `groups[].params` | array | 参数列表，每项含 `key`/`label`/`desc`/`type`(`int`/`float`)/`step`/`min`/`max`/`default`（出厂默认）/`value`（当前生效值）|
+
+### 10.2 更新业务规则配置
+
+```
+PUT /api/config/business-rules
+```
+
+**请求体**：`{ 分组: { 参数: 值 } }`，仅提交需修改的分组即可。
+
+```json
+{
+  "prediction": { "interval_minutes": 15, "vehicle_person_max": 5 },
+  "congestion": { "congestion_min_flow": 3.0 }
+}
+```
+
+**校验规则**
+
+- 仅接受 yaml 中已定义的参数，未知分组/参数被忽略；请求体无有效参数时返回 `400`
+- 按元数据 `type` 强制转换（int/float），转换失败返回 `400`
+- 超出 `min`/`max` 范围返回 `400`（如 `vehicle_person_max: 999` → `400`）
+
+**响应** `200 OK`：`status: "ok"`、`message: "已保存, 热重载已生效"`，并返回与 `GET` 相同的 `groups`（含更新后的 `value`）。
+
+```json
+{
+  "status": "ok",
+  "message": "已保存, 热重载已生效",
+  "hot_reload": true,
+  "file": "configs/business_rules.yaml",
+  "groups": []
+}
+```
+
+**错误**
+
+| 状态码 | 说明 |
+|--------|------|
+| `400` | 请求体无有效参数 / 值类型或范围非法（`detail` 含具体参数名）|
+| `500` | 业务规则文件不存在 |
+
+> 📌 写回采用**按行替换**方式，保留 yaml 原有注释与顺序；新增参数自动追加到所属分组末尾。保存后通过 mtime 变化触发热重载，backend 与 AI 侧逻辑（计数/异常/跟踪/预测调度/告警去重/警力分配等）立即按新值运行。
+
+---
+
+## 11. 数据模型
+
+### 11.1 检测类别
 
 AI 服务支持的目标检测类别（`_DETECTION_CLASSES`）：
 
@@ -1314,7 +1467,7 @@ AI 服务支持的目标检测类别（`_DETECTION_CLASSES`）：
 
 > `camera_type` 为 `null` 时检测全部类别。`person` 类型包含行人、电动车、自行车等非机动车。
 
-### 10.2 坐标系统说明
+### 11.2 坐标系统说明
 
 | 场景 | 坐标类型 | 取值 | 说明 |
 |------|---------|------|------|
@@ -1322,7 +1475,7 @@ AI 服务支持的目标检测类别（`_DETECTION_CLASSES`）：
 | WebSocket `cross_point` | 归一化 | [0, 1] | 直接按比例映射到画面尺寸 |
 | WebSocket `bbox` / `center` | 像素 | 实际像素 | 需按视频原始分辨率渲染 |
 
-### 10.3 方向判定逻辑
+### 11.3 方向判定逻辑
 
 - **内侧**：锚点（`anchor`）所在的一侧定义为内侧。
 - **enter**：目标从外侧跨越计数线进入内侧。
@@ -1331,7 +1484,7 @@ AI 服务支持的目标检测类别（`_DETECTION_CLASSES`）：
 
 ---
 
-## 11. 错误码
+## 12. 错误码
 
 | HTTP 状态码 | 含义 | 触发场景 |
 |------------|------|---------|
@@ -1349,9 +1502,9 @@ AI 服务支持的目标检测类别（`_DETECTION_CLASSES`）：
 
 ---
 
-## 12. 接入示例
+## 13. 接入示例
 
-### 12.1 JavaScript — 注册设备并监听事件
+### 13.1 JavaScript — 注册设备并监听事件
 
 ```javascript
 // 1. 注册设备
@@ -1393,7 +1546,7 @@ ws.onclose = () => {
 };
 ```
 
-### 12.2 轮询实时统计
+### 13.2 轮询实时统计
 
 ```javascript
 async function refreshStats() {
@@ -1409,7 +1562,7 @@ async function refreshStats() {
 setInterval(refreshStats, 5000);
 ```
 
-### 12.3 获取预测结果
+### 13.3 获取预测结果
 
 ```javascript
 async function getForecast() {
@@ -1431,7 +1584,7 @@ async function getLatestForecast() {
 }
 ```
 
-### 12.4 订阅后端 WebSocket（统计/告警/预测/警力）
+### 13.4 订阅后端 WebSocket（统计/告警/预测/警力）
 
 ```javascript
 // 后端 /ws: 连接后自动每 2 秒推送 stats，并按事件推送 alert/prediction/police_plan
@@ -1468,8 +1621,9 @@ ws.onclose = () => setTimeout(connectBackendWs, 3000); // 自动重连
 
 | 服务 | 端口 | 关键路径 |
 |------|------|---------|
-| 业务后端 | 8000 | `/health`, `/api/devices`, `/api/stats/*`（含 `/api/stats/congestion`）, `/api/alerts`, `/api/alerts/anomaly`, `/api/prediction/*`, `/api/police/*`, `/api/events`, `/ws`, `/static/*` |
+| 业务后端 | 8000 | `/health`, `/api/devices`, `/api/stats/*`（含 `/api/stats/hourly/history`）, `/api/alerts`, `/api/alerts/anomaly`, `/api/prediction/*`, `/api/police/*`, `/api/events`, `/ws`, `/static/*` |
 | AI 分析服务 | 8001 | `/health`, `/devices`, `/ws` |
 | Redis | 16379 (宿主) | 内部使用，前端无需访问 |
+| MySQL | 3306 (宿主) | 长期归档（`hourly_traffic` 表），前端无需访问 |
 
 > 配置可通过环境变量覆盖，详见 `app/common/config.py`。关键变量：`BACKEND_PORT`、`AI_PORT`、`CORS_ORIGINS`、`REDIS_URL`。

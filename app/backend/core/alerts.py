@@ -10,6 +10,7 @@ from typing import Optional
 
 import yaml
 
+from ...common.business_rules import get_rule
 from ...common.config import settings
 from ...common.logger import logger
 from ...common.redis_client import get_redis
@@ -124,7 +125,10 @@ async def evaluate_prediction(prediction: dict) -> list[dict]:
 
     redis = get_redis()
     predicted_value = prediction.get("predicted_total", 0)
-    predict_minutes = prediction.get("interval_minutes", settings.prediction_interval_minutes)
+    predict_minutes = prediction.get(
+        "interval_minutes",
+        int(get_rule("prediction", "interval_minutes", default=settings.prediction_interval_minutes)),
+    )
     triggered: list[dict] = []
 
     for r in rules:
@@ -133,7 +137,11 @@ async def evaluate_prediction(prediction: dict) -> list[dict]:
             continue
         # 预测告警去重: 一个预测周期内同一规则只触发一次
         dedup_key = f"{settings.redis_prefix}:alert:{r['id']}"
-        if not await redis.set(dedup_key, "1", ex=settings.prediction_interval_minutes * 60, nx=True):
+        if not await redis.set(
+            dedup_key, "1",
+            ex=int(get_rule("prediction", "interval_minutes", default=settings.prediction_interval_minutes)) * 60,
+            nx=True,
+        ):
             continue
         msg = r["message"].format(
             value=predicted_value,

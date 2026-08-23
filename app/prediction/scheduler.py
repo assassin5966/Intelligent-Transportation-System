@@ -11,6 +11,7 @@ import json
 from datetime import datetime, timezone
 from typing import Optional
 
+from ..common.business_rules import get_rule
 from ..common.config import settings
 from ..common.logger import logger
 from ..common.redis_client import get_redis
@@ -22,16 +23,17 @@ _task: Optional[asyncio.Task] = None
 async def _run_once() -> None:
     """执行一次总人数预测, 缓存结果到 Redis, 并评估预测告警."""
     redis = get_redis()
+    interval_minutes = int(get_rule("prediction", "interval_minutes", default=settings.prediction_interval_minutes))
     try:
         result = await predict_total_persons()
         payload = json.dumps(result, ensure_ascii=False)
         await redis.set(
             f"{settings.redis_prefix}:prediction:latest:total",
             payload,
-            ex=settings.prediction_interval_minutes * 60 * 4,  # 缓存 4 个区间
+            ex=interval_minutes * 60 * 4,  # 缓存 4 个区间
         )
         logger.info(
-            f"预测已更新: 预计下 {settings.prediction_interval_minutes} 分钟总人数 "
+            f"预测已更新: 预计下 {interval_minutes} 分钟总人数 "
             f"{result['predicted_total']} (序列长度 {result['series_length']}, "
             f"降级={'是' if result.get('degraded') else '否'})"
         )
@@ -55,9 +57,9 @@ async def _run_once() -> None:
 
 
 async def _loop() -> None:
-    """每 N 分钟执行一次预测."""
-    interval_seconds = settings.prediction_interval_minutes * 60
+    """每 N 分钟执行一次预测 (间隔热重载, 修改后按新周期循环)."""
     while True:
+        interval_seconds = int(get_rule("prediction", "interval_minutes", default=settings.prediction_interval_minutes)) * 60
         await _run_once()
         await asyncio.sleep(interval_seconds)
 
@@ -66,9 +68,11 @@ async def start_scheduler() -> None:
     global _task
     if _task is None:
         _task = asyncio.create_task(_loop())
+        interval_minutes = int(get_rule("prediction", "interval_minutes", default=settings.prediction_interval_minutes))
+        series_length = int(get_rule("prediction", "series_length", default=settings.prediction_series_length))
         logger.info(
-            f"预测调度器已启动 (每 {settings.prediction_interval_minutes} 分钟一次, "
-            f"序列长度 {settings.prediction_series_length})"
+            f"预测调度器已启动 (每 {interval_minutes} 分钟一次, "
+            f"序列长度 {series_length})"
         )
 
 

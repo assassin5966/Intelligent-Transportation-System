@@ -11,7 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from ..common.config import settings
 from ..common.logger import logger
 from ..common.redis_client import close_redis
-from .api import alerts, devices, events, police, stats, ws
+from .api import alerts, config_rules, devices, events, police, stats, ws
 
 
 @asynccontextmanager
@@ -38,6 +38,14 @@ async def lifespan(app: FastAPI):
 
     police_started = False
     try:
+        # 加载警力初始配置 (区域+总警力, 仅新增不覆盖 API 配置)
+        from .core.allocator import seed_from_config
+
+        await seed_from_config()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"警力配置加载失败: {e}")
+
+    try:
         from .core.police_scheduler import start_scheduler as start_police
 
         await start_police()
@@ -55,8 +63,24 @@ async def lifespan(app: FastAPI):
     except Exception as e:  # noqa: BLE001
         logger.warning(f"WVP 同步未启动: {e}")
 
+    archive_started = False
+    try:
+        from .core.archive_scheduler import start_scheduler as start_archive
+
+        await start_archive()
+        archive_started = True
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"MySQL 归档调度器未启动: {e}")
+
     yield
 
+    if archive_started:
+        try:
+            from .core.archive_scheduler import stop_scheduler as stop_archive
+
+            await stop_archive()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"停止 MySQL 归档调度器失败: {e}")
     if wvp_started:
         try:
             from .core.wvp_sync import stop_syncer as stop_wvp
@@ -91,6 +115,12 @@ async def lifespan(app: FastAPI):
         await close_wvp_client()
     except Exception as e:  # noqa: BLE001
         logger.warning(f"关闭 WVP 客户端失败: {e}")
+    try:
+        from ..common.mysql_client import close_mysql
+
+        await close_mysql()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"关闭 MySQL 连接池失败: {e}")
     await close_redis()
     logger.info("业务后端关闭")
 
@@ -117,6 +147,7 @@ app.include_router(alerts.router)
 app.include_router(devices.router)
 app.include_router(police.router)
 app.include_router(ws.router)
+app.include_router(config_rules.router)
 
 # 时序预测路由 (挂载到 /api/prediction, 模块缺失则跳过)
 try:
