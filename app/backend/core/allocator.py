@@ -22,6 +22,47 @@ _REGIONS_KEY = f"{settings.redis_prefix}:police:regions"
 _TOTAL_KEY = f"{settings.redis_prefix}:police:total"
 _PLAN_KEY = f"{settings.redis_prefix}:police:plan:latest"
 
+# 设备配置 key (含 name 等注册信息, 见 devices.py)
+_DEVICE_CFG_PREFIX = f"{settings.redis_prefix}:device:"
+# 设备经纬度映射缓存: 名称(去空格) -> (longitude, latitude) (来自 data/device_geo.json)
+_GEO_FILE = Path(__file__).resolve().parents[3] / "data" / "device_geo.json"
+_geo_cache: Optional[dict] = None
+
+
+def _load_device_geo() -> dict:
+    """加载 data/device_geo.json (名称去空格), 返回 {名称: (经度, 纬度)}."""
+    global _geo_cache
+    if _geo_cache is None:
+        try:
+            raw = json.loads(_GEO_FILE.read_text(encoding="utf-8")).get("devices", {})
+            _geo_cache = {
+                name.replace(" ", ""): (d["longitude"], d["latitude"])
+                for name, d in raw.items()
+                if d.get("longitude") is not None and d.get("latitude") is not None
+            }
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning(f"读取 device_geo.json 失败: {e}")
+            _geo_cache = {}
+    return _geo_cache
+
+
+async def _device_geo_map(device_ids) -> dict[str, tuple[float, float]]:
+    """读取设备名称并匹配 device_geo.json, 返回 {device_id: (longitude, latitude)}."""
+    redis = get_redis()
+    geo = _load_device_geo()
+    result: dict[str, tuple[float, float]] = {}
+    for did in device_ids:
+        data = await redis.hgetall(f"{_DEVICE_CFG_PREFIX}{did}")
+        if not data:
+            continue
+        name = data.get("name", "")
+        if isinstance(name, bytes):
+            name = name.decode()
+        pt = geo.get(name.replace(" ", ""))
+        if pt:
+            result[did] = pt
+    return result
+
 
 async def _get_regions() -> list[dict]:
     """读取所有注册区域."""
@@ -81,6 +122,8 @@ async def seed_from_config(path: Optional[str] = None) -> dict:
         payload = json.dumps(
             {
                 "name": region.get("name", rid),
+                "longitude": region.get("longitude"),
+                "latitude": region.get("latitude"),
                 "center_x": float(region.get("center_x", 0)),
                 "center_y": float(region.get("center_y", 0)),
                 "device_id": region.get("device_id", ""),
@@ -239,6 +282,20 @@ async def optimize_allocation() -> Optional[dict]:
 
     # 读取各设备在場人数
     device_crowds = await get_all_device_crowds()
+    # 摄像头就近归区: 每台设备归属距离最近的区域中心 (最近邻分类), 区域人数 =
+    # 归属该区域的摄像头人数之和; 区域无归属设备且显式绑定设备有数据时兜底.
+    device_geo = await _device_geo_map(device_crowds.keys())
+    region_geo = {
+        r["region_id"]: (float(r.get("longitude") or 0.0), float(r.get("latitude") or 0.0))
+        for r in regions
+    }
+    crowds: dict[str, int] = {r["region_id"]: 0 for r in regions}
+    for did, (lon, lat) in device_geo.items():
+        best_rid = min(
+            region_geo,
+            key=lambda k: (region_geo[k][0] - lon) ** 2 + (region_geo[k][1] - lat) ** 2,
+        )
+        crowds[best_rid] += device_crowds.get(did, {}).get("current_persons", 0)
     predicted_total = await _get_predicted_total()
 
     # 警力算法参数热重载 (business_rules.yaml 修改后无需重启)
@@ -249,7 +306,6 @@ async def optimize_allocation() -> Optional[dict]:
 
     # 阶段 1: 需求计算
     demands: dict[str, float] = {}
-    crowds: dict[str, int] = {}
     predicted_crowds: dict[str, float] = {}
     centers: dict[str, tuple[float, float]] = {}
     current_officers: dict[str, int] = {}
@@ -260,10 +316,11 @@ async def optimize_allocation() -> Optional[dict]:
         centers[rid] = (float(r["center_x"]), float(r["center_y"]))
         current_officers[rid] = int(r.get("current_officers", 0))
 
-        device_id = r.get("device_id", "")
-        crowd = device_crowds.get(device_id, {}).get("current_persons", 0)
-        crowds[rid] = crowd
-        total_crowd += crowd
+        # 兜底: 区域无归属摄像头时, 若显式绑定 device_id 有数据则使用
+        if crowds[rid] == 0:
+            bound = r.get("device_id", "")
+            crowds[rid] = device_crowds.get(bound, {}).get("current_persons", 0)
+        total_crowd += crowds[rid]
 
     # 按占比分摊预测值
     for r in regions:

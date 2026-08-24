@@ -28,6 +28,8 @@ _TOTAL_KEY = f"{settings.redis_prefix}:police:total"
 class RegionIn(BaseModel):
     id: str
     name: str
+    longitude: Optional[float] = None  # 区域实际中心经度 (前端地图标注用)
+    latitude: Optional[float] = None   # 区域实际中心纬度
     center_x: float
     center_y: float
     device_id: str  # 关联设备, 用于读取该区域在場人数
@@ -36,6 +38,8 @@ class RegionIn(BaseModel):
 class RegionOut(BaseModel):
     id: str
     name: str
+    longitude: Optional[float] = None
+    latitude: Optional[float] = None
     center_x: float
     center_y: float
     device_id: str
@@ -53,6 +57,8 @@ async def register_region(region: RegionIn):
     redis = get_redis()
     data = {
         "name": region.name,
+        "longitude": region.longitude,
+        "latitude": region.latitude,
         "center_x": region.center_x,
         "center_y": region.center_y,
         "device_id": region.device_id,
@@ -73,6 +79,8 @@ async def list_regions():
         result.append({
             "id": r["region_id"],
             "name": r.get("name", r["region_id"]),
+            "longitude": r.get("longitude"),
+            "latitude": r.get("latitude"),
             "center_x": r.get("center_x", 0),
             "center_y": r.get("center_y", 0),
             "device_id": r.get("device_id", ""),

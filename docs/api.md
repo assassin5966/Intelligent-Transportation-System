@@ -861,6 +861,8 @@ GET /api/prediction/health
 
 基于「区域注册 + 总警力设置 + 三阶段分配算法」（需求计算 → 比例分配+最小保障 → 贪心最近优先调度），自动产出各区域目标警力与调动方案。所有接口挂载在 `/api/police` 下。
 
+> **摄像头就近归区**：分配计算时，每个摄像头（注册名称匹配 `data/device_geo.json` 且有经纬度者）自动归属**距离最近的区域中心**（最近邻分类），区域在場人数 = 归属该区域的摄像头人数之和；区域无归属摄像头且显式 `device_id` 绑定设备有数据时以绑定设备兜底。
+
 ### 7.1 注册警力区域
 
 ```
@@ -873,8 +875,10 @@ POST /api/police/regions
 |------|------|------|------|
 | `id` | string | ✅ | 区域唯一标识 |
 | `name` | string | ✅ | 区域名称 |
-| `center_x` | float | ✅ | 区域中心点 x（用于区域间距离计算） |
-| `center_y` | float | ✅ | 区域中心点 y |
+| `longitude` | float | ❌ | 区域实际中心经度（设备经纬度均值，前端地图标注用）|
+| `latitude` | float | ❌ | 区域实际中心纬度 |
+| `center_x` | float | ✅ | 区域中心点 x 归一化坐标（用于区域间距离计算）|
+| `center_y` | float | ✅ | 区域中心点 y 归一化坐标 |
 | `device_id` | string | ✅ | 关联设备 ID，用于读取该区域在场人数 |
 
 **请求示例**
@@ -882,6 +886,8 @@ POST /api/police/regions
 {
   "id": "r1",
   "name": "北广场",
+  "longitude": 113.313418,
+  "latitude": 40.093323,
   "center_x": 0.3,
   "center_y": 0.4,
   "device_id": "cam-gate-north"
@@ -905,6 +911,8 @@ GET /api/police/regions
   {
     "id": "r1",
     "name": "北广场",
+    "longitude": 113.313418,
+    "latitude": 40.093323,
     "center_x": 0.3,
     "center_y": 0.4,
     "device_id": "cam-gate-north",
@@ -913,6 +921,8 @@ GET /api/police/regions
   }
 ]
 ```
+
+> 📌 `longitude` / `latitude` 为区域实际经纬度（前端地图标注区域用）；`center_x` / `center_y` 为归一化坐标（警力调度移动距离计算用）。默认 4 区域配置来自 `configs/police.yaml`（按 `data/device_geo.json` 城墙方位聚类）。
 
 ### 7.3 删除区域
 

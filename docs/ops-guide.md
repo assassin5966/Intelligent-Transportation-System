@@ -1142,13 +1142,18 @@ total: 50                                    # 总警力数
 regions:
   - id: region_01                            # 区域 ID（唯一）
     name: "古城南门"                          # 区域名称
-    center_x: 0.5                            # 中心坐标（归一化 0-1）
+    longitude: 113.302310                    # 实际中心经度（前端地图标注用）
+    latitude: 40.084888                      # 实际中心纬度
+    center_x: 0.5                            # 中心坐标（归一化 0-1，调度计算用）
     center_y: 0.5
     device_id: "GB-xxx-xxx"                  # 关联摄像头（读取在场人数）
 ```
 
+> - 项目内置默认 4 区域（东-和阳门/南-永泰门/西-清远门/北-武定门），中心坐标与经纬度按 `data/device_geo.json` 城墙方位聚类生成。
+> - **摄像头就近归区**：分配计算时，每个摄像头（名称匹配 `device_geo.json` 有经纬度者）自动归属**距离最近的区域中心**，区域在場人数 = 归属该区域的摄像头人数之和。无需为每个区域手动绑定 `device_id`；某区域无归属摄像头且显式绑定的设备有数据时，以绑定设备兜底。
 > - 加载逻辑：仅当 Redis 中**尚无对应数据**时写入（HSETNX/SETNX），**不覆盖** API 动态配置。改文件后重启后端生效，但已存在的区域/总警力以 Redis 为准。
 > - 若需全部重新加载，先删掉 Redis 中对应键（`sc:police:regions` / `sc:police:total`）再重启后端。
+> - `GET /api/police/regions` 同时返回 `longitude`/`latitude`（实际经纬度）与 `center_x`/`center_y`（归一化坐标）。
 
 #### 区域注册/删除（API 动态配置）
 

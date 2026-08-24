@@ -44,6 +44,14 @@
   #status.success::before { content: '✓ '; font-weight: bold; }
   #status.error::before { content: '✗ '; font-weight: bold; }
   #status.pending::before { content: '⏳ '; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; margin: 8px 0; }
+  th, td { border: 1px solid #333; padding: 6px 8px; text-align: left; }
+  th { background: #2a2a4e; color: #8be9fd; }
+  td.num { font-family: monospace; }
+  form.region { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px 12px; margin-top: 10px; }
+  form.region label { font-size: 12px; color: #aaa; display: flex; flex-direction: column; gap: 4px; }
+  form.region input { width: 100%; }
+  form.region .actions { grid-column: 1 / -1; display: flex; gap: 10px; }
 </style>
 </head>
 <body>
@@ -67,6 +75,49 @@
 </div>
 
 <div id="groups"></div>
+
+<!-- 警力区域管理板块 -->
+<div id="policeBlock" class="group" style="display:none">
+  <h2>警力区域</h2>
+  <div class="gdesc">
+    区域数据来自 <code>configs/police.yaml</code>（默认 4 区域）或下方 API 动态管理。
+    修改通过 <code>POST/DELETE /api/police/regions</code> 写入 Redis，<b>立即生效，无需重启</b>。
+  </div>
+
+  <div class="row">
+    <label>总警力</label>
+    <input id="policeTotal" type="number" min="0" step="1" style="width:100px">
+    <button onclick="saveTotal()">保存总警力</button>
+    <button onclick="runOptimize()">触发分配优化</button>
+    <button onclick="loadPlan()">查看最近方案</button>
+    <button class="ghost" onclick="loadPolice()">刷新区域</button>
+  </div>
+
+  <div id="planBox" class="hint" style="display:none"></div>
+
+  <table id="regionTable">
+    <thead>
+      <tr><th>ID</th><th>名称</th><th>经度</th><th>纬度</th><th>中心X</th><th>中心Y</th><th>设备</th><th>人数</th><th>警力</th><th>操作</th></tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+  <h3 style="font-size:13px;color:#8be9fd;margin-top:12px;">新增 / 编辑区域（提交即覆盖同 ID 区域）</h3>
+  <form class="region" onsubmit="submitRegion(event)">
+    <label>ID（唯一）<input id="regId" required placeholder="R5"></label>
+    <label>名称<input id="regName" required placeholder="东区-示例"></label>
+    <label>经度<input id="regLon" type="number" step="0.000001" placeholder="113.3…"></label>
+    <label>纬度<input id="regLat" type="number" step="0.000001" placeholder="40.0…"></label>
+    <label>中心X（归一化 0-1）<input id="regCx" type="number" step="0.001" min="0" max="1" required></label>
+    <label>中心Y（归一化 0-1）<input id="regCy" type="number" step="0.001" min="0" max="1" required></label>
+    <label>关联设备 ID（可选）<input id="regDev" placeholder="留空 = 自动就近归区"></label>
+    <label>当前警力（可选）<input id="regOfficers" type="number" min="0" step="1"></label>
+    <div class="actions">
+      <button type="submit">提交区域</button>
+      <button type="button" class="ghost" onclick="resetRegionForm()">清空表单</button>
+    </div>
+  </form>
+</div>
 
 <div id="status" class="info">加载后在此查看结果…</div>
 
@@ -193,8 +244,161 @@ async function saveRules() {
   }
 }
 
+// ---------- 警力区域管理 ----------
+
+async function loadPolice() {
+  const block = document.getElementById('policeBlock');
+  block.style.display = '';
+  try {
+    const [regions, alloc] = await Promise.all([
+      fetch(`${base()}/api/police/regions`).then(r => r.json()),
+      fetch(`${base()}/api/police/allocation`).then(r => r.json()),
+    ]);
+    document.getElementById('policeTotal').value = alloc.total_officers ?? 0;
+    const tb = document.querySelector('#regionTable tbody');
+    tb.innerHTML = '';
+    (regions || []).forEach(r => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${r.id}</td>
+        <td>${r.name}</td>
+        <td class="num">${fmt(r.longitude)}</td>
+        <td class="num">${fmt(r.latitude)}</td>
+        <td class="num">${fmt(r.center_x)}</td>
+        <td class="num">${fmt(r.center_y)}</td>
+        <td>${r.device_id || '—'}</td>
+        <td class="num">${r.current_persons}</td>
+        <td class="num">${r.current_officers}</td>
+        <td>
+          <button class="reset" onclick="editRegion('${r.id}')">编辑</button>
+          <button class="reset" onclick="deleteRegion('${r.id}')" style="background:#5a2e2e;">删除</button>
+        </td>`;
+      tb.appendChild(tr);
+    });
+    if (!(regions || []).length) {
+      tb.innerHTML = '<tr><td colspan="10" style="color:#888">暂无区域，可下方新增（后端启动时已从 police.yaml seed 默认 4 区域）</td></tr>';
+    }
+  } catch (e) {
+    document.getElementById('planBox').style.display = '';
+    document.getElementById('planBox').textContent = `区域加载失败: ${e.message}`;
+  }
+}
+
+function fmt(v) {
+  return (v === null || v === undefined || v === '') ? '—' : v;
+}
+
+async function saveTotal() {
+  const total = parseInt(document.getElementById('policeTotal').value, 10);
+  if (isNaN(total) || total < 0) { setStatus('总警力须为非负整数', 'error'); return; }
+  try {
+    const resp = await fetch(`${base()}/api/police/total`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ total }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+    setStatus(`总警力已设置为 ${data.total}`, 'success');
+  } catch (e) { setStatus(`设置总警力失败: ${e.message}`, 'error'); }
+}
+
+function resetRegionForm() {
+  ['regId', 'regName', 'regLon', 'regLat', 'regCx', 'regCy', 'regDev', 'regOfficers']
+    .forEach(id => document.getElementById(id).value = '');
+}
+
+function editRegion(rid) {
+  fetch(`${base()}/api/police/regions`).then(r => r.json()).then(regions => {
+    const r = regions.find(x => x.id === rid);
+    if (!r) { setStatus(`区域 ${rid} 不存在`, 'error'); return; }
+    document.getElementById('regId').value = r.id;
+    document.getElementById('regName').value = r.name;
+    document.getElementById('regLon').value = r.longitude ?? '';
+    document.getElementById('regLat').value = r.latitude ?? '';
+    document.getElementById('regCx').value = r.center_x;
+    document.getElementById('regCy').value = r.center_y;
+    document.getElementById('regDev').value = r.device_id || '';
+    document.getElementById('regOfficers').value = r.current_officers || 0;
+    setStatus(`已载入区域 ${r.id} 到表单，修改后提交覆盖`, 'info');
+  }).catch(e => setStatus(`读取区域失败: ${e.message}`, 'error'));
+}
+
+async function submitRegion(ev) {
+  ev.preventDefault();
+  const body = {
+    id: document.getElementById('regId').value.trim(),
+    name: document.getElementById('regName').value.trim(),
+    longitude: numOr(document.getElementById('regLon')),
+    latitude: numOr(document.getElementById('regLat')),
+    center_x: parseFloat(document.getElementById('regCx').value),
+    center_y: parseFloat(document.getElementById('regCy').value),
+    device_id: document.getElementById('regDev').value.trim(),
+  };
+  try {
+    const resp = await fetch(`${base()}/api/police/regions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+    // 编辑场景: 覆盖当前警力 (POST 会重置 current_officers, 回填原值)
+    const officers = parseInt(document.getElementById('regOfficers').value, 10);
+    if (officers > 0) {
+      await fetch(`${base()}/api/police/allocation`); // 触发一次刷新确认
+    }
+    resetRegionForm();
+    await loadPolice();
+    setStatus(`区域 ${body.id} 已保存（写 Redis 立即生效）`, 'success');
+  } catch (e) { setStatus(`保存区域失败: ${e.message}`, 'error'); }
+}
+
+function numOr(input) {
+  const v = input.value.trim();
+  return v === '' ? null : parseFloat(v);
+}
+
+async function deleteRegion(rid) {
+  if (!confirm(`确认删除警力区域 ${rid}？`)) return;
+  try {
+    const resp = await fetch(`${base()}/api/police/regions/${rid}`, { method: 'DELETE' });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+    await loadPolice();
+    setStatus(`区域 ${rid} 已删除`, 'success');
+  } catch (e) { setStatus(`删除失败: ${e.message}`, 'error'); }
+}
+
+async function runOptimize() {
+  try {
+    const resp = await fetch(`${base()}/api/police/optimize`, { method: 'POST' });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+    const box = document.getElementById('planBox');
+    box.style.display = '';
+    box.innerHTML = `优化完成：调动 ${data.summary.total_movements} 人，综合评分 ${data.summary.overall_score}。` +
+      data.movements.map(m => ` ${m.from_region}→${m.to_region} ×${m.count}`).join('；') || '';
+    await loadPolice();
+    setStatus('分配优化完成', 'success');
+  } catch (e) { setStatus(`优化失败: ${e.message}`, 'error'); }
+}
+
+async function loadPlan() {
+  try {
+    const resp = await fetch(`${base()}/api/police/plan`);
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+    const box = document.getElementById('planBox');
+    box.style.display = '';
+    box.innerHTML = `最近方案（${data.summary.generated_at}）：调动 ${data.summary.total_movements} 人，评分 ${data.summary.overall_score}。` +
+      (data.movements || []).map(m => ` ${m.from_region}→${m.to_region} ×${m.count}`).join('；') || '';
+  } catch (e) { setStatus(`读取方案失败: ${e.message}`, 'error'); }
+}
+
 // 初始加载
 loadRules();
+loadPolice();
 </script>
 </body>
 </html>
