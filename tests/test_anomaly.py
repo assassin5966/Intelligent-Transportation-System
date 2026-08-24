@@ -38,6 +38,7 @@ def _cfg(**overrides) -> AnomalyConfig:
         flower_temporal_diff=20.0,
         check_interval=1,  # 测试: 每帧都检测
         confirm_frames=2,
+        hot_reload=False,  # 显式构造配置不参与业务规则热重载 (防止被 yaml 覆盖)
     )
     base.update(overrides)
     return AnomalyConfig(**base)

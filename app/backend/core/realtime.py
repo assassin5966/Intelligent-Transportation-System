@@ -53,7 +53,7 @@ def _daily_key(d: date) -> str:
 
 def _interval_key(dt: datetime) -> str:
     """N 分钟区间 key (向下取整到区间起点)."""
-    from ..common.business_rules import get_rule
+    from ...common.business_rules import get_rule
 
     interval = int(get_rule("prediction", "interval_minutes", default=settings.prediction_interval_minutes))
     minute = (dt.minute // interval) * interval
@@ -115,7 +115,7 @@ async def apply_event(
     pipe.expire(device_key, 24 * 3600)  # 逐设备在場人数保留 24 小时
     pipe.expire(device_daily_key, 90 * 24 * 3600)  # 逐设备日累计保留 90 天
     # N 分钟区间保留 (序列长度 + 余量) × 区间分钟 × 60 秒; 参数热重载
-    from ..common.business_rules import get_rule
+    from ...common.business_rules import get_rule
 
     series_length = int(get_rule("prediction", "series_length", default=settings.prediction_series_length))
     interval_minutes = int(get_rule("prediction", "interval_minutes", default=settings.prediction_interval_minutes))

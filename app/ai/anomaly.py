@@ -36,6 +36,9 @@ class AnomalyConfig:
     flower_temporal_diff: float
     check_interval: int
     confirm_frames: int
+    # 是否参与业务规则热重载: from_settings() 构造的默认配置为 True (改 yaml 免重启);
+    # 调用方显式构造的配置 (测试/离线处理器自定义阈值) 为 False, 防止 check() 时被覆盖.
+    hot_reload: bool = True
 
     @classmethod
     def from_settings(cls) -> "AnomalyConfig":
@@ -53,6 +56,7 @@ class AnomalyConfig:
             flower_temporal_diff=s.flower_temporal_diff,
             check_interval=s.anomaly_check_interval,
             confirm_frames=s.anomaly_confirm_frames,
+            hot_reload=True,
         )
 
     def reload(self) -> "AnomalyConfig":
@@ -220,8 +224,9 @@ class AnomalyMonitor:
 
     def check(self, frame: np.ndarray) -> Optional[AnomalyEvent]:
         """按 interval 采样检测; 返回状态转移事件或 None."""
-        # 热重载业务规则 (每帧检查 mtime, 变化才生效)
-        self.cfg.reload()
+        # 热重载业务规则 (每帧检查 mtime, 变化才生效); 显式自定义配置不参与热重载
+        if self.cfg.hot_reload:
+            self.cfg.reload()
         self._frame_counter += 1
         if self._frame_counter % self.cfg.check_interval != 0:
             return None
