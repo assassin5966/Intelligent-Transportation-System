@@ -69,7 +69,9 @@
     <option value="exit">只计离开</option>
   </select>
   <label>最大车辆数</label>
-  <input id="maxVehicles" type="number" min="1" step="1" value="" style="width:70px" title="ROI 内车辆数≥此值 且 车流速度过低时判定拥挤">
+  <input id="maxVehicles" type="number" min="1" step="1" value="" style="width:70px" title="ROI 内车辆数≥此值 且 车流速度过低时判定车辆拥挤">
+  <label>最大人数</label>
+  <input id="maxPersons" type="number" min="1" step="1" value="" style="width:70px" title="ROI 内人数≥此值 且 人流速度过低时判定人流拥挤; 同时配置车辆和人流则加权综合">
   <button id="enableBtn" disabled onclick="doEnable()">启流计数</button>
   <button id="previewBtn" disabled onclick="togglePreview()">▶ 预览</button>
   <button id="clearBtn" disabled onclick="clearCanvas()">清除画线</button>
@@ -180,9 +182,11 @@ async function selectDevice(d) {
   // 预填充类型和方向下拉框
   document.getElementById('cameraType').value = d.camera_type || '';
   document.getElementById('countOnly').value = d.count_only || '';
-  // 预填充最大车辆数 (拥挤判断阈值, 未配置留空)
+  // 预填充最大车辆数/最大人数 (拥挤判断阈值, 未配置留空)
   const maxV = d.max_vehicles;
   document.getElementById('maxVehicles').value = (maxV === undefined || maxV === null || maxV === '') ? '' : maxV;
+  const maxP = d.max_persons;
+  document.getElementById('maxPersons').value = (maxP === undefined || maxP === null || maxP === '') ? '' : maxP;
 
   setStatus(`正在截取 ${d.id} 画面... (约3-8秒)`);
   try {
@@ -471,6 +475,7 @@ async function doEnable() {
   const cameraType = document.getElementById('cameraType').value;
   const countOnly = document.getElementById('countOnly').value;
   const maxVehiclesRaw = document.getElementById('maxVehicles').value;
+  const maxPersonsRaw = document.getElementById('maxPersons').value;
 
   setStatus('正在启流...', 'pending');
   const body = { line_coords: line, anchor_coords: anchor };
@@ -479,10 +484,15 @@ async function doEnable() {
   if (roiClicks.length >= 3) {
     body.roi_coords = roiClicks.map(c => `${(c.x/canvas.width).toFixed(4)},${(c.y/canvas.height).toFixed(4)}`).join(',');
   }
-  // 最大车辆数 (拥挤判断阈值): 填写正整数时提交, 留空则不开启拥挤判断
+  // 最大车辆数 (车辆拥挤判断阈值): 填写正整数时提交, 留空则不开启
   if (maxVehiclesRaw !== '' && maxVehiclesRaw !== null) {
     const maxV = parseInt(maxVehiclesRaw, 10);
     if (!isNaN(maxV) && maxV > 0) body.max_vehicles = maxV;
+  }
+  // 最大人数 (人流拥挤判断阈值): 填写正整数时提交, 留空则不开启; 与最大车辆数同时配置则加权综合
+  if (maxPersonsRaw !== '' && maxPersonsRaw !== null) {
+    const maxP = parseInt(maxPersonsRaw, 10);
+    if (!isNaN(maxP) && maxP > 0) body.max_persons = maxP;
   }
 
   try {

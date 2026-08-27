@@ -109,12 +109,13 @@ class DevicePipeline:
                     elif event.event_type in ("PersonEnter", "PersonExit"):
                         self._person_cross_times.append(now_mono)
 
-                # 周期上报 ROI 内车辆个数 (供后端拥挤判断); 间隔热重载
+                # 周期上报 ROI 内车辆/人员个数 (供后端拥挤判断); 间隔热重载
                 roi_interval = float(get_rule("congestion", "roi_report_interval", default=settings.roi_report_interval))
                 if now_mono - self._last_roi_report >= roi_interval:
                     self._last_roi_report = now_mono
                     roi_vehicles = self.counter.count_roi_vehicles(track_result.tracks)
-                    await self._report_congestion(roi_vehicles)
+                    roi_persons = self.counter.count_roi_persons(track_result.tracks)
+                    await self._report_congestion(roi_vehicles, roi_persons)
 
                 await self._broadcast_tracks_ws(track_result)
         except asyncio.CancelledError:
@@ -196,8 +197,8 @@ class DevicePipeline:
             self._person_cross_times.popleft()
         return float(len(self._person_cross_times))
 
-    async def _report_congestion(self, roi_vehicles: int) -> None:
-        """周期上报 ROI 内车辆个数 + 每分钟车/人流量, 供后端拥挤判定.
+    async def _report_congestion(self, roi_vehicles: int, roi_persons: int = 0) -> None:
+        """周期上报 ROI 内车辆/人员个数 + 每分钟车/人流量, 供后端拥挤判定.
 
         车流速度 = 最近 60 秒车辆跨线次数 (辆/分钟); 人流量同理 (人/分钟).
         上报失败仅记日志, 不阻塞视频处理.
@@ -208,6 +209,7 @@ class DevicePipeline:
         payload = {
             "device_id": self.device_id,
             "roi_vehicles": roi_vehicles,
+            "roi_persons": roi_persons,
             "vehicle_flow_per_min": flow_per_min,
             "person_flow_per_min": person_flow_per_min,
         }
@@ -218,7 +220,8 @@ class DevicePipeline:
             )
             logger.debug(
                 f"[{self.device_id}] 拥挤上报 roi_vehicles={roi_vehicles} "
-                f"flow={flow_per_min:.1f}/min -> HTTP {resp.status_code}"
+                f"roi_persons={roi_persons} flow={flow_per_min:.1f}/min "
+                f"person_flow={person_flow_per_min:.1f}/min -> HTTP {resp.status_code}"
             )
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[{self.device_id}] 拥挤上报失败: {e}")

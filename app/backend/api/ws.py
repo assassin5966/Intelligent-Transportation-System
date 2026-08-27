@@ -1,7 +1,7 @@
 """后端 WebSocket 端点: 向前端大屏推送实时统计和告警.
 
 消息类型:
-  - stats:       实时统计 (当前车辆/人员/今日累计/活跃设备)
+  - stats:       实时统计 (全局 data + 每设备 devices, 含拥挤状态/经纬度)
   - alert:       新触发告警
   - prediction:  预测结果更新
   - police_plan: 警力分配方案更新
@@ -13,7 +13,8 @@ from typing import Set
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from ..core.realtime import get_all_device_stats, get_stats
+from ..core.realtime import get_stats
+from .stats import build_all_device_stats_rows
 
 router = APIRouter(tags=["websocket"])
 
@@ -62,10 +63,10 @@ async def websocket_endpoint(websocket: WebSocket):
     queue: asyncio.Queue = asyncio.Queue(maxsize=100)
     register_ws_client(queue)
 
-    # 连接时立即推送一次当前统计 (含按设备明细)
+    # 连接时立即推送一次当前统计 (全局 + 每设备完整明细)
     try:
         stats = await get_stats()
-        devices = await get_all_device_stats()
+        devices = await build_all_device_stats_rows()
         await websocket.send_text(json.dumps({
             "type": "stats",
             "data": stats,
@@ -82,10 +83,10 @@ async def websocket_endpoint(websocket: WebSocket):
                 message = await asyncio.wait_for(queue.get(), timeout=_STATS_INTERVAL)
                 await websocket.send_text(json.dumps(message, default=str))
             except asyncio.TimeoutError:
-                # 超时无消息 -> 推送最新统计 (含按设备明细)
+                # 超时无消息 -> 推送最新统计 (全局 + 每设备完整明细)
                 try:
                     stats = await get_stats()
-                    devices = await get_all_device_stats()
+                    devices = await build_all_device_stats_rows()
                     await websocket.send_text(json.dumps({
                         "type": "stats",
                         "data": stats,

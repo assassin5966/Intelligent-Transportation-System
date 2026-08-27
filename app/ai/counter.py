@@ -243,6 +243,19 @@ class LineCrossingCounter:
                 count += 1
         return count
 
+    def count_roi_persons(self, tracks) -> int:
+        """统计 ROI 内的人员个数 (瞬时在场人数, 供人流拥挤判断).
+
+        语义与 count_roi_vehicles 一致, 只统计 person 类别; ROI 未启用时统计全画面人数.
+        """
+        count = 0
+        for track in tracks:
+            if track.class_name != "person":
+                continue
+            if self.roi_detector.point_in_roi(track.center):
+                count += 1
+        return count
+
     # ---- 内部方法 (薄封装, 保持向后兼容) ----
 
     def _point_in_roi(self, point) -> bool:

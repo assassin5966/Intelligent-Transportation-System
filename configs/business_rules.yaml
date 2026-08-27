@@ -24,6 +24,10 @@ alerts:                    # 告警阈值 (rules.yaml 为规则文件, 此处为
 
 congestion:                # 拥挤判断参数
   congestion_min_flow: 5.0       # 车流速度下限(辆/分钟), 低于此值视为拥堵
+  person_congestion_min_flow: 10.0  # 人流速度下限(人/分钟), 低于此值视为人流拥堵
+  congestion_vehicle_weight: 0.5  # 人车混合区域: 车辆拥挤度权重
+  congestion_person_weight: 0.5   # 人车混合区域: 人流拥挤度权重
+  congestion_threshold: 0.5       # 人车混合区域: 加权拥挤度阈值(0-1), 达到即判拥挤
   roi_report_interval: 2.0       # AI 上报 ROI 车辆数周期(秒)
 
 police:                    # 警力分配算法参数

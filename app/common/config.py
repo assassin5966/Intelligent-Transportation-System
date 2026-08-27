@@ -33,6 +33,10 @@ class Settings(BaseSettings):
 
     # ---- 车流速度与拥挤判断 ----
     congestion_min_flow: float = 5.0  # 拥挤判定: 每分钟跨线车辆数低于此值视为车流速度过低 (辆/分钟)
+    person_congestion_min_flow: float = 10.0  # 人流拥挤判定: 每分钟跨线人数低于此值视为人流速度过低 (人/分钟)
+    congestion_vehicle_weight: float = 0.5  # 人车混合区域: 车辆拥挤度权重
+    congestion_person_weight: float = 0.5  # 人车混合区域: 人流拥挤度权重
+    congestion_threshold: float = 0.5  # 人车混合区域: 加权拥挤度达到此值判定为拥挤 (0-1)
     roi_report_interval: float = 2.0  # AI 每 N 秒上报一次 ROI 内车辆数 (供拥挤判断)
 
     # ---- 小时级车流/人流量 (记录每天每小时) ----

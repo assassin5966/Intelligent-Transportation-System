@@ -49,7 +49,8 @@ class DeviceIn(BaseModel):
     count_only: Optional[Literal["enter", "exit"]] = None  # None=双向, "enter"=只计Enter, "exit"=只计Exit
     camera_type: Optional[Literal["vehicle", "person"]] = None  # None=全部检测, vehicle/person
     roi_coords: Optional[str] = None  # "x1,y1,x2,y2,..." 归一化 0-1, >=3 顶点
-    max_vehicles: Optional[int] = None  # 拥挤判断: ROI 内最大车辆数阈值 (>0 开启拥挤判断)
+    max_vehicles: Optional[int] = None  # 拥挤判断: ROI 内最大车辆数阈值 (>0 开启车辆拥挤判断)
+    max_persons: Optional[int] = None  # 拥挤判断: ROI 内最大人数阈值 (>0 开启人流拥挤判断)
     gb_device_id: Optional[str] = None  # 国标设备ID (WVP 同步设备填写, 手动注册留空)
     gb_channel_id: Optional[str] = None  # 国标通道ID (WVP 同步设备填写, 手动注册留空)
 
@@ -64,12 +65,14 @@ class DeviceOut(BaseModel):
     camera_type: Optional[str] = None
     roi_coords: Optional[str] = None
     max_vehicles: Optional[int] = None
+    max_persons: Optional[int] = None
     gb_device_id: Optional[str] = None
     gb_channel_id: Optional[str] = None
     status: str = "registered"
     last_heartbeat: Optional[str] = None
     longitude: Optional[float] = None  # 设备经纬度 (来自 data/device_geo.json, 按名称匹配)
     latitude: Optional[float] = None
+    category: Optional[str] = None  # 点位分类 (来自 data/device_category.json, 按名称匹配)
 
 
 # 设备经纬度映射缓存: 设备名称 -> {"longitude", "latitude"} (来自 data/device_geo.json)
@@ -92,12 +95,45 @@ def _load_geo() -> dict:
     return _geo_cache
 
 
-def _geo_by_name(name: str) -> tuple[Optional[float], Optional[float]]:
-    """按设备名称查经纬度, 未匹配到返回 (None, None)."""
+def geo_by_name(name: str) -> tuple[Optional[float], Optional[float]]:
+    """按设备名称查经纬度, 未匹配到返回 (None, None).
+
+    供设备 API 与统计/WebSocket 推送共用 (前端地图打点).
+    """
     geo = _load_geo().get(name or "")
     if not geo:
         return None, None
     return geo.get("longitude"), geo.get("latitude")
+
+
+# 设备点位分类映射缓存: 设备名称 -> 点位分类 (来自 data/device_category.json,
+# 由 data/设备信息汇总表.xlsx 提取生成)
+_category_cache: Optional[dict] = None
+_CATEGORY_FILE = Path(__file__).resolve().parents[3] / "data" / "device_category.json"
+
+
+def _load_categories() -> dict:
+    """加载设备点位分类映射 (带模块级缓存, 首次读取后复用)."""
+    global _category_cache
+    if _category_cache is None:
+        try:
+            if _CATEGORY_FILE.exists():
+                _category_cache = json.loads(_CATEGORY_FILE.read_text(encoding="utf-8"))
+            else:
+                _category_cache = {}
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning(f"读取 device_category.json 失败: {e}")
+            _category_cache = {}
+    return _category_cache
+
+
+def category_by_name(name: str) -> Optional[str]:
+    """按设备名称查点位分类, 未匹配到或分类为空返回 None.
+
+    供设备 API 与统计/WebSocket 推送共用 (前端设备卡片分类展示).
+    """
+    cat = _load_categories().get(name or "")
+    return cat or None
 
 
 def _line_from_coords(line_coords: Optional[str]) -> list[list[float]]:
@@ -189,14 +225,18 @@ async def list_():
         data = await redis.hgetall(key)
         if data:
             # Redis hash 空值一律是 "", Pydantic v2 对 Optional[int] 无法解析空字符串,
-            # 统一清洗为 None (兼容历史设备无 max_vehicles 字段).
+            # 统一清洗为 None (兼容历史设备无 max_vehicles/max_persons 字段).
             clean = dict(data)
             if clean.get("max_vehicles") == "":
                 clean["max_vehicles"] = None
+            if clean.get("max_persons") == "":
+                clean["max_persons"] = None
             # 按设备名称补全经纬度 (来自 data/device_geo.json)
-            lng, lat = _geo_by_name(clean.get("name", ""))
+            lng, lat = geo_by_name(clean.get("name", ""))
             clean["longitude"] = lng
             clean["latitude"] = lat
+            # 按设备名称补全点位分类 (来自 data/device_category.json)
+            clean["category"] = category_by_name(clean.get("name", ""))
             found.append(DeviceOut(**clean))
     return found
 
@@ -222,6 +262,7 @@ async def register(dev: DeviceIn):
             "camera_type": dev.camera_type or "",
             "roi_coords": dev.roi_coords or "",
             "max_vehicles": str(dev.max_vehicles) if dev.max_vehicles is not None else "",
+            "max_persons": str(dev.max_persons) if dev.max_persons is not None else "",
             "gb_device_id": dev.gb_device_id or "",
             "gb_channel_id": dev.gb_channel_id or "",
             "status": "registered",
@@ -344,7 +385,7 @@ async def refresh_stream(device_id: str):
     stream_url = wvp.select_stream_url(play)
     if not stream_url:
         raise HTTPException(502, f"WVP 点播失败, 无法获取流地址 (gb_dev={gb_dev}, gb_ch={gb_ch})")
-    lng, lat = _geo_by_name(data.get("name", ""))
+    lng, lat = geo_by_name(data.get("name", ""))
     return {
         "device_id": device_id,
         "stream_url": stream_url,
@@ -439,7 +480,8 @@ class DeviceEnableIn(BaseModel):
     count_only: Optional[Literal["enter", "exit"]] = None
     camera_type: Optional[Literal["vehicle", "person"]] = None
     roi_coords: Optional[str] = None
-    max_vehicles: Optional[int] = None  # 拥挤判断: ROI 内最大车辆数阈值 (设置后拥挤判断生效)
+    max_vehicles: Optional[int] = None  # 拥挤判断: ROI 内最大车辆数阈值 (设置后车辆拥挤判断生效)
+    max_persons: Optional[int] = None  # 拥挤判断: ROI 内最大人数阈值 (设置后人流拥挤判断生效)
 
 
 @router.post("/{device_id}/enable", status_code=200)
@@ -470,6 +512,7 @@ async def enable_device(device_id: str, body: DeviceEnableIn):
             "camera_type": body.camera_type or "",
             "roi_coords": body.roi_coords or "",
             "max_vehicles": str(body.max_vehicles) if body.max_vehicles is not None else "",
+            "max_persons": str(body.max_persons) if body.max_persons is not None else "",
         },
     )
     updated = await redis.hgetall(key)
