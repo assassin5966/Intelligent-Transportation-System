@@ -689,7 +689,7 @@ GET /api/stats/hourly/history?device_id={device_id}&start_date={start}&end_date=
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `device_id` | string | ❌ | 指定设备 ID；不传返回**全局合计**（按日期+小时聚合所有设备）|
+| `device_id` | string | ❌ | 指定设备 ID；不传返回**全局合计**（聚合所有设备）|
 | `start_date` | string | ✅ | 开始时间：`YYYY-MM-DD`（整日，从 00 点起）或 `YYYY-MM-DD:HH`（精确到小时）|
 | `end_date` | string | ✅ | 结束时间：`YYYY-MM-DD`（整日，至 23 点）或 `YYYY-MM-DD:HH`；须不早于 `start_date` |
 
@@ -706,10 +706,7 @@ GET /api/stats/hourly/history?device_id=cam-gate-north&start_date=2026-08-01:01&
   "device_id": "cam-gate-north",
   "start": "2026-08-01:01",
   "end": "2026-08-22:08",
-  "records": [
-    { "stat_date": "2026-08-01", "hour": 1, "vehicle_in": 3, "vehicle_out": 1, "person_in": 0, "person_out": 0 },
-    { "stat_date": "2026-08-01", "hour": 2, "vehicle_in": 5, "vehicle_out": 2, "person_in": 0, "person_out": 0 }
-  ]
+  "total": { "vehicle_in": 100, "vehicle_out": 80, "person_in": 200, "person_out": 190 }
 }
 ```
 
@@ -717,7 +714,7 @@ GET /api/stats/hourly/history?device_id=cam-gate-north&start_date=2026-08-01:01&
 |------|------|------|
 | `device_id` | string \| null | 指定设备 ID；`null` 表示全局合计 |
 | `start` / `end` | string | 实际生效的时间边界（`YYYY-MM-DD:HH`）|
-| `records` | array | 记录列表，每项含 `stat_date`（`YYYY-MM-DD`）、`hour` 与 `vehicle_in/out`、`person_in/out` |
+| `total` | object | 整个时间范围（闭区间）四项计数总和：`vehicle_in/out`、`person_in/out` |
 
 **错误**
 

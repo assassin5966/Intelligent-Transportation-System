@@ -184,7 +184,7 @@ GET /api/stats/hourly/history?device_id={device_id}&start_date={start}&end_date=
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `device_id` | string | ❌ | 指定设备；不传返回**全局合计**（按日期+小时聚合所有设备）|
+| `device_id` | string | ❌ | 指定设备；不传返回**全局合计**（聚合所有设备）|
 | `start_date` | string | ✅ | 开始：`YYYY-MM-DD`（整日）或 `YYYY-MM-DD:HH`（精确到小时）|
 | `end_date` | string | ✅ | 结束：同上，须不早于开始 |
 
@@ -197,16 +197,14 @@ GET /api/stats/hourly/history?device_id={device_id}&start_date={start}&end_date=
   "device_id": null,
   "start": "2026-08-01:01",
   "end": "2026-08-22:08",
-  "records": [
-    { "stat_date": "2026-08-01", "hour": 1, "vehicle_in": 3, "vehicle_out": 1, "person_in": 0, "person_out": 0 }
-  ]
+  "total": { "vehicle_in": 100, "vehicle_out": 80, "person_in": 200, "person_out": 190 }
 }
 ```
 
-- `records` 元素：`stat_date`（`YYYY-MM-DD`）、`hour`（0-23）、`vehicle_in/out`、`person_in/out`
+- `total`：整个时间范围（闭区间）四项计数的总和（`vehicle_in/out`、`person_in/out`）
 - 数据来自 MySQL 长期归档（不受 Redis 30 天窗口限制）；后端未启用 MySQL 归档时返回 `503`
 
-> 用途：历史趋势图、日报/月报统计。实时/近 30 天的当前小时累计可直接用 WS `devices` 中的 `hour_*` 字段。
+> 用途：日报/月报统计。逐小时明细/实时近 30 天的当前小时累计可直接用 WS `devices` 中的 `hour_*` 字段。
 
 ### 3.2 预测
 

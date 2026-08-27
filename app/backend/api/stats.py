@@ -229,12 +229,12 @@ async def hourly_history(
     start_date: str = Query(..., description="开始时间 (YYYY-MM-DD 或 YYYY-MM-DD:HH)"),
     end_date: str = Query(..., description="结束时间 (YYYY-MM-DD 或 YYYY-MM-DD:HH)"),
 ):
-    """从 MySQL 查询长期小时级车流/人流量 (长期报表).
+    """从 MySQL 查询长期小时级车流/人流量, 返回时间范围总计 (长期报表).
 
     数据由归档调度器定时从 Redis 落库到 hourly_traffic 表, 不受 Redis 30 天
     保留窗口限制. 支持天+时精确范围, 例如 start_date=2026-08-01:01 到
     end_date=2026-08-22:08 (闭区间). 只传日期则按整日查询. 不传 device_id 时
-    按日期+小时聚合所有设备 (全局汇总).
+    聚合所有设备 (全局汇总). 响应仅返回整个时间范围的总计 total, 不含逐小时明细.
     """
     try:
         start_dt, start_hour = _parse_hourly_bound(start_date, 0)
@@ -254,22 +254,17 @@ async def hourly_history(
     except Exception as e:  # noqa: BLE001
         raise HTTPException(503, f"MySQL 查询失败: {e}") from e
 
-    records = []
+    total = {"vehicle_in": 0, "vehicle_out": 0, "person_in": 0, "person_out": 0}
     for r in rows:
-        stat_date = r["stat_date"]
-        records.append({
-            "stat_date": stat_date.isoformat() if hasattr(stat_date, "isoformat") else str(stat_date),
-            "hour": r["hour"],
-            "vehicle_in": r["vehicle_in"],
-            "vehicle_out": r["vehicle_out"],
-            "person_in": r["person_in"],
-            "person_out": r["person_out"],
-        })
+        total["vehicle_in"] += r["vehicle_in"]
+        total["vehicle_out"] += r["vehicle_out"]
+        total["person_in"] += r["person_in"]
+        total["person_out"] += r["person_out"]
     return {
         "device_id": device_id,
         "start": f"{start_dt.isoformat()}:{start_hour:02d}",
         "end": f"{end_dt.isoformat()}:{end_hour:02d}",
-        "records": records,
+        "total": total,
     }
 
 
