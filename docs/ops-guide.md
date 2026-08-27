@@ -247,7 +247,7 @@ http://<backend-host>:8000/static/device-config.html
 - WVP 同步设备截帧预览
 - 计数线/锚点/ROI 可视化绘制
 - 设备启用配置（调用 `POST /api/devices/{id}/enable`）
-- 拥挤判断阈值设置（「最大车辆数」输入框，对应 `max_vehicles` 字段）
+- 拥挤判断阈值设置（「最大车辆数」「最大人数」输入框，对应 `max_vehicles` / `max_persons` 字段）
 
 **业务规则配置页**（无需启用 WVP 也可访问）：
 
@@ -303,14 +303,22 @@ http://<backend-host>:8000/static/business-rules.html
 
 | 变量 | 默认值 | 说明 | 必填 | 生产建议值 |
 |------|--------|------|------|-----------|
-| `CONGESTION_MIN_FLOW` | `5.0` | 拥挤判定车流速度阈值（辆/分钟）：每分钟跨线车辆数低于此值视为车流速度过低 | 否 | `5.0`（车流量大的路口可调低，如 `3.0`） |
-| `ROI_REPORT_INTERVAL` | `2.0` | AI 上报 ROI 内车辆数的间隔（秒） | 否 | `2.0` |
+| `CONGESTION_MIN_FLOW` | `5.0` | 车辆拥挤判定车流速度阈值（辆/分钟）：每分钟跨线车辆数低于此值视为车流速度过低 | 否 | `5.0`（车流量大的路口可调低，如 `3.0`） |
+| `PERSON_CONGESTION_MIN_FLOW` | `10.0` | 人流拥挤判定人流速度阈值（人/分钟） | 否 | `10.0` |
+| `CONGESTION_VEHICLE_WEIGHT` | `0.5` | 人车混合区域：车辆拥挤度权重 | 否 | `0.5` |
+| `CONGESTION_PERSON_WEIGHT` | `0.5` | 人车混合区域：人流拥挤度权重 | 否 | `0.5` |
+| `CONGESTION_THRESHOLD` | `0.5` | 人车混合区域：加权拥挤度阈值（0-1），达到即判拥挤 | 否 | `0.5` |
+| `ROI_REPORT_INTERVAL` | `2.0` | AI 上报 ROI 内车辆/人员数的间隔（秒） | 否 | `2.0` |
 
-> **拥挤判定口径（双阈值）**：`ROI 内车辆数 >= 设备.max_vehicles` 且 `车流速度 < CONGESTION_MIN_FLOW` 判定为拥挤。两者均需满足，避免把「车多但仍在流动」误判为拥堵。
+> **拥挤判定口径（双维度加权）**：
 >
-> **车流速度口径**：AI 在 60 秒滑动窗口内统计 `VehicleEnter/Exit` 跨线事件次数，折算为每分钟车流量（辆/分钟），非真实车速（km/h）——不需要像素↔米标定，阈值全局通用。
+> - **车辆拥挤**：`ROI 内车辆数 >= 设备.max_vehicles` 且 `车流速度 < CONGESTION_MIN_FLOW`。
+> - **人流拥挤**：`ROI 内人数 >= 设备.max_persons` 且 `人流速度 < PERSON_CONGESTION_MIN_FLOW`。
+> - **人车混合**（两个阈值都配置）：各维度拥挤度（0-1）= `0.5×数量饱和度 + 0.5×速度因子`，综合拥挤度 = 按 `CONGESTION_VEHICLE_WEIGHT / CONGESTION_PERSON_WEIGHT` 加权，`综合拥挤度 >= CONGESTION_THRESHOLD` 判定拥挤。
 >
-> **设备维度**：拥挤判断按设备开启（运维页面「最大车辆数」输入框，或启流 API `max_vehicles` 字段），未配置该阈值的设备不做拥挤判定，但仍上报数据供查询。
+> **车流速度口径**：AI 在 60 秒滑动窗口内统计跨线事件次数，折算为每分钟量（辆/分钟、人/分钟），非真实车速（km/h）——不需要像素↔米标定，阈值全局通用。
+>
+> **设备维度**：拥挤判断按设备开启（运维页面「最大车辆数」「最大人数」输入框，或启流 API `max_vehicles` / `max_persons` 字段），均未配置阈值的设备不做拥挤判定，但仍上报数据供查询。
 
 #### 告警配置
 
@@ -447,6 +455,10 @@ counting:                  # 越线计数参数 (counter.py)
   ...
 congestion:                # 拥挤判断参数
   congestion_min_flow: 5.0
+  person_congestion_min_flow: 10.0
+  congestion_vehicle_weight: 0.5
+  congestion_person_weight: 0.5
+  congestion_threshold: 0.5
   roi_report_interval: 2.0
 police:                    # 警力分配算法参数
   demand_weight_current: 0.3
@@ -764,7 +776,7 @@ ROI 启用时，计数器将**计数线自动裁剪到 ROI 多边形内**，只�
 
 ### 拥挤判断（ROI 内车辆数）
 
-ROI 同时是**拥挤判断的区域车辆统计范围**（见「拥挤告警」小节）：AI 每 2 秒统计一次中心点落在 ROI 内的车辆（car/truck/bus）数并上报，后端结合每分钟车流量按双阈值判定拥挤。未配置 ROI 时统计全画面车辆数（向后兼容）。设置方式：运维页面填写「最大车辆数」（`max_vehicles`）开启。
+ROI 同时是**拥挤判断的区域数量统计范围**（见「拥挤告警」小节）：AI 每 2 秒统计一次中心点落在 ROI 内的车辆（car/truck/bus）数与人员（person）数并上报，后端结合每分钟车/人流量按双维度加权判定拥挤。未配置 ROI 时统计全画面（向后兼容）。设置方式：运维页面填写「最大车辆数」（`max_vehicles`）开启车辆拥挤、「最大人数」（`max_persons`）开启人流拥挤。
 
 ---
 
@@ -872,20 +884,20 @@ AI 管道内置 `AnomalyMonitor`（见 `app/ai/anomaly.py`），周期采样 + �
 
 > 未收到过心跳的新注册设备不判定离线（避免误报）。
 
-#### 拥挤告警（双阈值，事件驱动）
+#### 拥挤告警（双维度加权，事件驱动）
 
-AI 周期上报 + 后端双阈值判定（见 `app/backend/core/congestion.py`）：
+AI 周期上报 + 后端双维度加权判定（见 `app/backend/core/congestion.py`）：
 
 | 阶段 | 触发条件 | 级别 | 消息示例 |
 |------|---------|------|---------|
-| `onset`（进入拥挤） | `roi_vehicles >= max_vehicles` 且 `vehicle_flow_per_min < CONGESTION_MIN_FLOW` | critical | `设备 xxx 拥堵: 区域车辆 12/10 且车流速度 3.0 辆/分钟 (低于 5.0)` |
-| `recovery`（解除拥挤） | 不再满足双阈值 | info | `设备 xxx 拥堵解除: 区域车辆 4 车流速度 20.0 辆/分钟` |
+| `onset`（进入拥挤） | 车辆拥挤 / 人流拥挤 / 人车混合加权综合判定成立（见上方「拥挤判定口径」） | critical | `设备 xxx 拥堵: 区域车辆 12/10 且车流速度 3.0 辆/分钟 (低于 5.0)` / `设备 xxx 人流拥堵: 区域人数 220/200 且人流速度 3.0 人/分钟 (低于 10.0)` / `设备 xxx 人车混合拥堵: 综合拥挤度 0.62 (车辆 12/10 人流 220/200)` |
+| `recovery`（解除拥挤） | 不再满足判定条件 | info | `设备 xxx 拥堵解除: 综合拥挤度 0.30` |
 
-- **车流速度** = AI 最近 60 秒跨线事件次数折算为每分钟车流量（`app/ai/pipeline.py` 滑动窗口）
-- **区域车辆数** = AI 每 2 秒（`ROI_REPORT_INTERVAL`）统计的 ROI 内瞬时车辆数（`app/ai/counter.py:count_roi_vehicles`）
+- **车流/人流速度** = AI 最近 60 秒跨线事件次数折算为每分钟量（`app/ai/pipeline.py` 滑动窗口）
+- **区域车辆数/人数** = AI 每 2 秒（`ROI_REPORT_INTERVAL`）统计的 ROI 内瞬时车辆数/人数（`app/ai/counter.py:count_roi_vehicles` / `count_roi_persons`）
 - **状态机去抖**：Redis 记录拥挤状态（`sc:congestion:state:{device_id}`），仅状态转移时产生告警，避免刷屏
-- 告警经 `GET /api/alerts` 查询、后端 `/ws`（`type: alert`）推送，前端据此在设备卡片展示「拥挤/已解除」
-- 需设备配置 `max_vehicles > 0`（运维页面「最大车辆数」）才启用
+- 告警经 `GET /api/alerts` 查询、后端 `/ws`（`type: alert`）推送，前端据此在设备卡片展示「拥挤/已解除」及维度（车辆/人流/混合）
+- 需设备配置 `max_vehicles > 0`（车辆）和/或 `max_persons > 0`（人流）（运维页面「最大车辆数」「最大人数」）才启用
 
 #### 告警去重机制
 
@@ -1050,7 +1062,8 @@ curl -X POST http://localhost:8000/api/devices/GB-3402000000-3402000000132000000
     "count_only": null,
     "camera_type": "vehicle",
     "roi_coords": "0.1,0.1,0.9,0.1,0.9,0.9,0.1,0.9",
-    "max_vehicles": 10
+    "max_vehicles": 10,
+    "max_persons": 200
   }'
 ```
 
@@ -1060,7 +1073,8 @@ curl -X POST http://localhost:8000/api/devices/GB-3402000000-3402000000132000000
 - `count_only`：`null`=双向计数，`enter`=只计进入，`exit`=只计离开（Pydantic `Literal` 校验，仅接受小写枚举值，`Enter`/`in`/`both` 等会返回 422）
 - `camera_type`：`null`=全部检测，`vehicle`=只检测机动车，`person`=只检测人流（同样 `Literal` 校验）
 - `roi_coords`：ROI 多边形顶点 `x1,y1,x2,y2,...`（归一化 0-1，至少 3 顶点，可选）
-- `max_vehicles`：拥挤判断阈值（ROI 内最大车辆数，`>0` 时开启该设备拥挤判断，可选；运维页面「最大车辆数」输入框对应此字段）
+- `max_vehicles`：车辆拥挤判断阈值（ROI 内最大车辆数，`>0` 时开启车辆拥挤判断，可选；运维页面「最大车辆数」输入框对应此字段）
+- `max_persons`：人流拥挤判断阈值（ROI 内最大人数，`>0` 时开启人流拥挤判断；与 `max_vehicles` 同时配置则人车加权综合，可选；运维页面「最大人数」输入框对应此字段）
 
 > 📌 **单向车道 `count_only` 配置要点**：车流单向车道应设 `count_only=enter`（只产生 `VehicleEnter`），此时 `current_vehicles` 为累计进入数（无 `Exit` 对冲，为单向场景预期语义），勿误判为「只增不减异常」。人流摄像头恒为双向计数（`count_only=null`），`Enter`/`Exit` 自然对冲 `current_persons`。该参数仅过滤事件生成，不影响事件对实时统计的累加逻辑。
 
@@ -1323,13 +1337,13 @@ redis-cli get sc:prediction:latest:total
 # 查看最新警力方案
 redis-cli get sc:police:plan:latest
 
-# 查看设备拥挤上报数据（最近一次 ROI 车辆数 + 每分钟车流量）
+# 查看设备拥挤上报数据（最近一次 ROI 车辆数/人数 + 每分钟车/人流量）
 redis-cli hgetall sc:congestion:device:GB-xxx-xxx
 
 # 查看设备拥挤状态（1=拥挤, 0=正常）
 redis-cli get sc:congestion:state:GB-xxx-xxx
 
-# 查询拥挤数据 REST 接口（拥挤字段已随设备统计返回: roi_vehicles / vehicle_flow_per_min / person_flow_per_min / congested）
+# 查询拥挤数据 REST 接口（拥挤字段已随设备统计返回: roi_vehicles / roi_persons / vehicle_flow_per_min / person_flow_per_min / vehicle_congested / person_congested / congestion_score / congested）
 curl -s "http://localhost:8000/api/stats/devices" | python -m json.tool
 
 # 查看告警去重 key（TTL）
@@ -1466,7 +1480,7 @@ docker compose -p smartcity exec redis redis-cli dbsize
 | 今日累计 | `sc:realtime:daily:{YYYYMMDD}` | Hash：当日进出累计 | 90 天 |
 | N 分钟区间 | `sc:realtime:interval:{YYYYMMDDHHMM}` | Hash：区间计数（供预测） | (序列长度+10)*间隔*60 秒 |
 | 逐设备人数 | `sc:realtime:device:{device_id}` | Hash：设备在场人数 | 24 小时 |
-| 拥挤上报数据 | `sc:congestion:device:{device_id}` | Hash：最近一次 ROI 车辆数 + 每分钟车流量 + 上报时间 | 7200 秒 |
+| 拥挤上报数据 | `sc:congestion:device:{device_id}` | Hash：最近一次 ROI 车辆数/人数 + 每分钟车/人流量 + 上报时间 | 7200 秒 |
 | 拥挤状态 | `sc:congestion:state:{device_id}` | String：拥挤状态（`1`=拥挤，`0`=正常） | 86400 秒 |
 | 告警列表 | `sc:alerts` | List：最近 1000 条告警 | 无（LTRIM 保留 1000 条） |
 | 越线事件历史 | `sc:events` | List：最近 2000 条越线事件（`VehicleEnter/Exit`、`PersonEnter/Exit`） | 无（LTRIM 保留 2000 条） |

@@ -1,7 +1,7 @@
 # 前端对接 API 文档
 
 > 智慧交管拥堵治理预警监控平台
-> 版本: 0.9.0 · 更新日期: 2026-08-23
+> 版本: 0.11.0 · 更新日期: 2026-08-27
 
 ---
 
@@ -24,14 +24,14 @@
 
 ## 1. 服务概述
 
-系统由两个独立服务组成，前端统一通过 **业务后端** 对接，AI 分析服务一般不直接暴露给前端。
+系统由两个独立服务组成，前端统一通过 **业务后端** 对接，AI 分析服务**不对前端开放**。
 
 | 服务 | 默认端口 | 说明 | 对前端是否暴露 |
 |------|---------|------|---------------|
 | 业务后端 (backend) | `8000` | 设备管理、统计、告警、预测、警力分配、WebSocket 推送、CORS | ✅ 是 |
-| AI 分析服务 (ai) | `8001` | 视频拉流、检测跟踪、越线计数、视频异常识别、WebSocket 推送 | ⚠️ 仅 WebSocket |
+| AI 分析服务 (ai) | `8001` | 视频拉流、检测跟踪、越线计数、视频异常识别、WebSocket 推送 | ❌ 否（前端统一经后端 8000） |
 
-> **建议**：前端 REST 请求全部发往后端 `8000`；实时画面/事件流连接 AI 服务 `8001` 的 WebSocket；统计/告警/预测/警力方案订阅后端 `8000` 的 WebSocket。
+> **建议**：前端 REST 请求与 WebSocket 统一发往业务后端 `8000`；**不直接连接 AI 服务**（AI 服务不对前端开放，其消息结构仅供后端集成参考，见 §9.1）。
 
 ### 运维工具
 
@@ -133,7 +133,8 @@ POST /api/devices
 | `count_only` | string | ❌ | 计数方向过滤：`null`=双向计数，`"enter"`=只计 Enter，`"exit"`=只计 Exit（仅接受小写枚举值，Pydantic 校验拒绝 `Enter`/`in`/`both` 等） |
 | `camera_type` | string | ❌ | 摄像头类型：`null`=全部检测，`"vehicle"`=只检测机动车，`"person"`=只检测人流（含非机动车）（仅接受小写枚举值） |
 | `roi_coords` | string | ❌ | ROI 多边形 `"x1,y1,x2,y2,..."`，归一化 0-1，至少 3 个顶点。仅在多边形内的目标参与计数 |
-| `max_vehicles` | int | ❌ | 拥挤判断阈值：ROI 内最大车辆数（`>0` 时开启该设备拥挤判断，见 §4.4） |
+| `max_vehicles` | int | ❌ | 车辆拥挤阈值：ROI 内最大车辆数（`>0` 时开启车辆拥挤判断，见 §4.4） |
+| `max_persons` | int | ❌ | 人流拥挤阈值：ROI 内最大人数（`>0` 时开启人流拥挤判断；与 `max_vehicles` 同时配置则人车加权综合，见 §4.4） |
 | `gb_device_id` | string | ❌ | 国标设备 ID（WVP 同步设备自动填写，手动注册留空）|
 | `gb_channel_id` | string | ❌ | 国标通道 ID（WVP 同步设备自动填写，手动注册留空）|
 
@@ -150,7 +151,8 @@ POST /api/devices
   "count_only": null,
   "camera_type": "vehicle",
   "roi_coords": "0.05,0.6,0.95,0.6,0.95,0.95,0.05,0.95",
-  "max_vehicles": 10
+  "max_vehicles": 10,
+  "max_persons": 200
 }
 ```
 
@@ -183,12 +185,15 @@ GET /api/devices
     "camera_type": "vehicle",
     "roi_coords": "0.05,0.6,0.95,0.6,0.95,0.95,0.05,0.95",
     "max_vehicles": 10,
+    "max_persons": 200,
     "gb_device_id": "",
     "gb_channel_id": "",
     "status": "registered",
     "last_heartbeat": "2026-08-08T10:00:00+00:00",
     "longitude": 116.397128,
-    "latitude": 39.916527
+    "latitude": 39.916527,
+    "category": "城墙出入口便道监控点位",
+    "category": "城墙出入口便道监控点位",
   }
 ]
 ```
@@ -197,6 +202,7 @@ GET /api/devices
 |------|------|------|
 | `longitude` | float \| null | 设备经度（按设备名称匹配 `data/device_geo.json`，未匹配为 `null`）|
 | `latitude` | float \| null | 设备纬度（同上）|
+| `category` | string \| null | 点位分类（按设备名称匹配 `data/device_category.json`，未匹配为 `null`）|
 
 > 经纬度用于前端地图打点。匹配规则：以设备 `name` 精确匹配地理库；匹配不到的设备经纬度为 `null`。
 
@@ -301,7 +307,8 @@ POST /api/devices/{device_id}/enable
 | `count_only` | string | ❌ | `enter`/`exit` 单向过滤 |
 | `camera_type` | string | ❌ | `vehicle`/`person` |
 | `roi_coords` | string | ❌ | ROI 多边形 `"x1,y1,x2,y2,..."` |
-| `max_vehicles` | int | ❌ | 拥挤判断阈值：ROI 内最大车辆数（`>0` 时开启拥挤判断，见 §4.4） |
+| `max_vehicles` | int | ❌ | 车辆拥挤阈值：ROI 内最大车辆数（`>0` 时开启车辆拥挤判断，见 §4.4） |
+| `max_persons` | int | ❌ | 人流拥挤阈值：ROI 内最大人数（`>0` 时开启人流拥挤判断；与 `max_vehicles` 同时配置则人车加权综合，见 §4.4） |
 
 **响应** `200 OK`
 ```json
@@ -430,7 +437,7 @@ GET /api/stats/realtime
 
 ### 4.2 各设备分别计数
 
-返回所有注册设备的分别计数（当前在场 + 今日累计 + 当前小时内车流/人流 + 拥挤状态），含设备名称和状态。
+返回所有注册设备的分别计数（当前在场 + 今日累计 + 当前小时内车流/人流 + 拥挤状态），含设备名称、状态和经纬度。
 
 ```
 GET /api/stats/devices
@@ -446,6 +453,10 @@ GET /api/stats/devices
     "camera_type": "vehicle",
     "status": "online",
     "max_vehicles": 10,
+    "max_persons": null,
+    "longitude": 116.397128,
+    "latitude": 39.916527,
+    "category": "城墙出入口便道监控点位",
     "current_vehicles": 12,
     "current_persons": 0,
     "today_vehicle_in": 85,
@@ -458,8 +469,14 @@ GET /api/stats/devices
     "hour_person_in": 0,
     "hour_person_out": 0,
     "roi_vehicles": 12,
+    "roi_persons": 0,
     "vehicle_flow_per_min": 34.0,
     "person_flow_per_min": 0.0,
+    "vehicle_congested": false,
+    "person_congested": false,
+    "vehicle_score": 0.5,
+    "person_score": 0.0,
+    "congestion_score": 0.5,
     "congested": false
   },
   {
@@ -468,6 +485,10 @@ GET /api/stats/devices
     "camera_type": "person",
     "status": "online",
     "max_vehicles": null,
+    "max_persons": 200,
+    "longitude": 116.391,
+    "latitude": 39.904,
+    "category": null,
     "current_vehicles": 0,
     "current_persons": 156,
     "today_vehicle_in": 0,
@@ -480,8 +501,14 @@ GET /api/stats/devices
     "hour_person_in": 312,
     "hour_person_out": 288,
     "roi_vehicles": 0,
+    "roi_persons": 156,
     "vehicle_flow_per_min": 0.0,
     "person_flow_per_min": 24.0,
+    "vehicle_congested": false,
+    "person_congested": false,
+    "vehicle_score": 0.0,
+    "person_score": 0.39,
+    "congestion_score": 0.39,
     "congested": false
   }
 ]
@@ -493,7 +520,11 @@ GET /api/stats/devices
 | `name` | string | 设备名称 |
 | `camera_type` | string | 摄像头类型（`vehicle`/`person`/空）|
 | `status` | string | 设备状态（`online`/`offline`/`synced`/`registered`）|
-| `max_vehicles` | int \| null | 拥挤判断阈值（未配置为 `null`）|
+| `max_vehicles` | int \| null | 车辆拥挤阈值（未配置为 `null`，见 §4.4）|
+| `max_persons` | int \| null | 人流拥挤阈值（未配置为 `null`，见 §4.4）|
+| `longitude` | float \| null | 设备经度（按设备名称匹配 `data/device_geo.json`，未匹配为 `null`）|
+| `latitude` | float \| null | 设备纬度（同上）|
+| `category` | string \| null | 点位分类（按设备名称匹配 `data/device_category.json`，未匹配为 `null`）|
 | `current_vehicles` | int | 该设备当前在场车辆数 |
 | `current_persons` | int | 该设备当前在场人员数 |
 | `today_vehicle_in` | int | 该设备今日车辆进入累计 |
@@ -506,9 +537,15 @@ GET /api/stats/devices
 | `hour_person_in` | int | 该设备**当前小时内**人员进入累计 |
 | `hour_person_out` | int | 该设备**当前小时内**人员离开累计 |
 | `roi_vehicles` | int | 最近一次上报的 ROI 内瞬时车辆数（AI 每 2 秒上报，见 §4.4）|
+| `roi_persons` | int | 最近一次上报的 ROI 内瞬时人员数（同上）|
 | `vehicle_flow_per_min` | float | 最近一次上报的车流速度：最近 60 秒跨线车辆数折算为每分钟车流量（辆/分钟）|
 | `person_flow_per_min` | float | 最近一次上报的人流速度：最近 60 秒跨线人数折算为每分钟人流量（人/分钟）|
-| `congested` | bool | 是否拥挤（双阈值判定，见 §4.4）|
+| `vehicle_congested` | bool | 车辆维度拥挤（`roi_vehicles >= max_vehicles` 且车流速度低于阈值，未配置恒为 `false`）|
+| `person_congested` | bool | 人流维度拥挤（`roi_persons >= max_persons` 且人流速度低于阈值，未配置恒为 `false`）|
+| `vehicle_score` | float | 车辆维度拥挤度（0-1，数量与速度因子各半加权）|
+| `person_score` | float | 人流维度拥挤度（0-1）|
+| `congestion_score` | float | 加权综合拥挤度（0-1，人车混合按权重加权，见 §4.4）|
+| `congested` | bool | 综合是否拥挤（单维度时等于对应维度布尔；人车混合时 `congestion_score >= 阈值`，见 §4.4）|
 
 > 未产生过事件的注册设备也会返回，计数为 0。各设备今日累计按天隔离，跨天自动清零。
 > `hour_*` 为**当前小时累计值**（来自每小时 Hash），与 `*_flow_per_min`（60 秒滑动窗口瞬时速率）不同，两者互补：前者反映本小时累计通过量，后者反映当前速率。
@@ -536,6 +573,9 @@ GET /api/stats/devices/{device_id}
   "camera_type": "vehicle",
   "status": "online",
   "max_vehicles": 10,
+  "max_persons": null,
+  "longitude": 116.397128,
+  "latitude": 39.916527,
   "current_vehicles": 12,
   "current_persons": 0,
   "today_vehicle_in": 85,
@@ -548,8 +588,14 @@ GET /api/stats/devices/{device_id}
   "hour_person_in": 0,
   "hour_person_out": 0,
   "roi_vehicles": 12,
+  "roi_persons": 0,
   "vehicle_flow_per_min": 34.0,
   "person_flow_per_min": 0.0,
+  "vehicle_congested": false,
+  "person_congested": false,
+  "vehicle_score": 0.5,
+  "person_score": 0.0,
+  "congestion_score": 0.5,
   "congested": false
 }
 ```
@@ -563,15 +609,27 @@ GET /api/stats/devices/{device_id}
 
 ### 4.4 拥挤判断
 
-结合**区域车辆个数**（ROI 内瞬时车辆数）与**车流速度**（每分钟车流量）按**双阈值**判定设备是否拥挤。
+结合**区域数量**（ROI 内瞬时车辆数 / 人员数）与**通行速度**（每分钟车流量 / 人流量）按**双维度加权**判定设备拥挤度。
 
-- **车流速度（每分钟车流量）**：AI 在 60 秒滑动窗口内统计 `VehicleEnter/Exit` 跨线事件次数，折算为辆/分钟（车流停滞/缓行时趋近 0）。
-- **人流量（每分钟人流量）**：AI 在 60 秒滑动窗口内统计 `PersonEnter/Exit` 跨线事件次数，折算为人/分钟，与车流速度同机制上报（供人流速率展示，不参与拥挤判定）。
-- **区域车辆个数**：AI 每 2 秒统计一次 ROI 内当前跟踪到的车辆（car/truck/bus）数，上报后端。
-- **拥挤判定**：`roi_vehicles >= max_vehicles` 且 `vehicle_flow_per_min < CONGESTION_MIN_FLOW`（默认 5 辆/分钟）时判定为拥挤。两者均需超过阈值，避免把「车多但仍在流动」误判为拥堵。
-- **状态机去抖**：后端记录各设备拥挤状态（`sc:congestion:state:{device_id}`），仅在状态转移时产生告警——进入拥挤触发 `critical` 告警（onset），解除拥挤触发 `info` 告警（recovery）。
+- **通行速度**：AI 在 60 秒滑动窗口内统计跨线事件次数折算为每分钟量——车流（`VehicleEnter/Exit`，辆/分钟）、人流（`PersonEnter/Exit`，人/分钟）。停滞/缓行时趋近 0。
+- **区域数量**：AI 每 `ROI_REPORT_INTERVAL`（默认 2 秒）统计一次 ROI 内当前跟踪到的车辆（car/truck/bus）数与人员（person）数，上报后端。
 
-> **开启方式**：设备注册（§3.1）或启流（§3.7）时设置 `max_vehicles > 0`（运维页面「最大车辆数」输入框）。未配置则不做拥挤判定，但 AI 仍会上报数据（供查询）。
+**单维度判定**（只配置了 `max_vehicles` 或只配置了 `max_persons`）：
+
+- **车辆拥挤**：`roi_vehicles >= max_vehicles` 且 `vehicle_flow_per_min < congestion_min_flow`（默认 5 辆/分钟）。
+- **人流拥挤**：`roi_persons >= max_persons` 且 `person_flow_per_min < person_congestion_min_flow`（默认 10 人/分钟）。
+
+**人车混合判定**（`max_vehicles` 与 `max_persons` 同时配置）：
+
+- 各维度连续拥挤度（0-1）：`维度分数 = 0.5 × 数量饱和度(min(1, 数量/阈值)) + 0.5 × 速度因子(1 - min(1, 速度/速度下限))`。
+- 综合拥挤度：`congestion_score = congestion_vehicle_weight × vehicle_score + congestion_person_weight × person_score`（默认权重 0.5/0.5，自动归一化）。
+- 综合判定：`congested = congestion_score >= congestion_threshold`（默认 0.5）。
+
+所有阈值与权重位于 `configs/business_rules.yaml`（`congestion` 分组），保存即热重载。
+
+- **状态机去抖**：后端记录各设备拥挤状态（`sc:congestion:state:{device_id}`），仅在状态转移时产生告警——进入拥挤触发 `critical` 告警（onset），解除拥挤触发 `info` 告警（recovery）。告警消息按触发维度区分（车辆拥堵 / 人流拥堵 / 人车混合拥堵）。
+
+> **开启方式**：设备注册（§3.1）或启流（§3.7）时设置 `max_vehicles > 0`（车辆拥挤）和/或 `max_persons > 0`（人流拥挤）（运维页面「最大车辆数」「最大人数」输入框）。两者均未配置则不做拥挤判定，但 AI 仍会上报数据（供查询）。
 
 #### 拥挤数据上报（AI → 后端，周期调用）
 
@@ -587,12 +645,13 @@ POST /api/stats/congestion
 |------|------|------|------|
 | `device_id` | string | ✅ | 设备 ID |
 | `roi_vehicles` | int | ✅ | ROI 内瞬时车辆个数（≥0）|
+| `roi_persons` | int | ❌ | ROI 内瞬时人员个数（≥0，默认 0）|
 | `vehicle_flow_per_min` | float | ✅ | 最近 60 秒跨线次数折算的每分钟车流量（≥0）|
 | `person_flow_per_min` | float | ❌ | 最近 60 秒跨线人数折算的每分钟人流量（≥0，默认 0）|
 
 **请求示例**
 ```json
-{ "device_id": "cam-gate-north", "roi_vehicles": 12, "vehicle_flow_per_min": 34.0, "person_flow_per_min": 0.0 }
+{ "device_id": "cam-gate-north", "roi_vehicles": 12, "roi_persons": 0, "vehicle_flow_per_min": 34.0, "person_flow_per_min": 0.0 }
 ```
 
 **响应** `200 OK`
@@ -601,14 +660,22 @@ POST /api/stats/congestion
   "device_id": "cam-gate-north",
   "congested": false,
   "roi_vehicles": 12,
+  "roi_persons": 0,
   "vehicle_flow_per_min": 34.0,
-  "max_vehicles": 10
+  "person_flow_per_min": 0.0,
+  "max_vehicles": 10,
+  "max_persons": 0,
+  "vehicle_congested": false,
+  "person_congested": false,
+  "vehicle_score": 0.5,
+  "person_score": 0.0,
+  "congestion_score": 0.5
 }
 ```
 
 **错误** `404` 设备不存在。
 
-> 拥挤数据无需独立查询端点：`roi_vehicles`、`vehicle_flow_per_min`、`person_flow_per_min`、`congested` 已随 §4.2 / §4.3 设备统计返回；产生告警时经 §5 告警 API 与后端 `/ws`（`type: alert`，`category: congestion`）推送。
+> 拥挤数据无需独立查询端点：`roi_vehicles`、`roi_persons`、`vehicle_flow_per_min`、`person_flow_per_min`、`vehicle_congested`、`person_congested`、`vehicle_score`、`person_score`、`congestion_score`、`congested` 已随 §4.2 / §4.3 设备统计返回；产生告警时经 §5 告警 API 与后端 `/ws`（`type: alert`，`category: congestion`）推送。
 
 ### 4.5 长期报表（MySQL 归档）
 
@@ -728,16 +795,16 @@ GET /api/alerts?limit={limit}
 | `person_saturate_warning` | `current_persons` | 8000 | warning | 游客接近饱和 |
 | `person_saturate_critical` | `current_persons` | 10000 | critical | 人流饱和 |
 
-#### 拥挤告警（双阈值，事件驱动）
+#### 拥挤告警（双维度加权，事件驱动）
 
-拥挤告警不走 `rules.yaml`，由 AI 周期上报 + 后端双阈值判定（见 §4.4）触发：
+拥挤告警不走 `rules.yaml`，由 AI 周期上报 + 后端双维度加权判定（见 §4.4）触发：
 
 | rule_id | level | 触发时机 | 说明 |
 |---------|-------|---------|------|
-| `congestion_{device_id}` | critical | onset（进入拥挤） | `roi_vehicles >= max_vehicles` 且车流速度低于阈值 |
+| `congestion_{device_id}` | critical | onset（进入拥挤） | 车辆拥挤 / 人流拥挤 / 人车混合加权综合判定成立 |
 | `congestion_{device_id}` | info | recovery（解除拥挤） | 状态转移回正常 |
 
-告警对象含额外字段：`category="congestion"`、`phase`（`onset`/`recovery`）、`device_id`、`vehicle_flow_per_min`。前端可经 `GET /api/alerts` 与后端 `/ws`（`type: alert`）接收，在设备卡片上展示「拥挤」/「已解除」状态。
+告警对象含额外字段：`category="congestion"`、`phase`（`onset`/`recovery`）、`device_id`、`roi_vehicles`、`roi_persons`、`vehicle_flow_per_min`、`person_flow_per_min`、`congestion_score`、`vehicle_congested`、`person_congested`、`max_vehicles`、`max_persons`。前端可经 `GET /api/alerts` 与后端 `/ws`（`type: alert`）接收，在设备卡片上展示「拥挤」/「已解除」状态。
 
 ### 5.3 视频异常上报（AI → 后端）
 
@@ -1146,24 +1213,24 @@ GET /api/events?limit={limit}
 
 ## 9. WebSocket 实时推送
 
-系统提供**两个** WebSocket 端点，前端按需连接：
+系统提供**两个** WebSocket 端点；**前端只连接业务后端端点**（AI 服务不对前端开放，其消息仅供后端集成参考）：
 
-| 端点 | 地址 | 推送内容 |
-|------|------|---------|
-| AI 服务 | `ws://<ai-host>:8001/ws` | 越线事件 `crossing_event`、跟踪轨迹 `tracks`、视频异常 `video_anomaly` |
-| 业务后端 | `ws://<backend-host>:8000/ws` | 实时统计 `stats`、告警 `alert`、预测 `prediction`、警力方案 `police_plan` |
+| 端点 | 地址 | 推送内容 | 前端 |
+|------|------|---------|------|
+| AI 服务 | `ws://<ai-host>:8001/ws` | 越线事件 `crossing_event`、跟踪轨迹 `tracks`、视频异常 `video_anomaly` | ❌ 不直接对接 |
+| 业务后端 | `ws://<backend-host>:8000/ws` | 实时统计 `stats`、告警 `alert`、预测 `prediction`、警力方案 `police_plan` | ✅ 主通道 |
 
-两个端点均为服务端单向推送，前端无需上行消息（服务端会忽略客户端上行）。连接断开后需前端自行重连（建议指数退避，并在断连时提示用户）。
+推送均为服务端单向，前端无需上行消息（服务端会忽略客户端上行）。连接断开后需前端自行重连（建议指数退避，并在断连时提示用户）。
 
-### 9.1 AI 服务 WebSocket
+### 9.1 AI 服务 WebSocket（不对前端开放，仅供后端集成参考）
 
 ```
 ws://<ai-host>:8001/ws
 ```
 
-连接建立后服务端持续推送 JSON 消息，前端无需发送任何消息（服务端会忽略客户端上行消息）。连接断开后需前端自行重连。
+连接建立后服务端持续推送 JSON 消息，连接方无需发送任何消息（服务端会忽略上行消息）。连接断开后需自行重连。
 
-> 建议前端实现自动重连机制（指数退避），并在断连时提示用户。
+> 建议后端集成方实现自动重连机制（指数退避），并在断连时提示用户。
 
 #### 越线事件 `crossing_event`
 
@@ -1285,7 +1352,7 @@ ws://<backend-host>:8000/ws
 
 #### 实时统计 `stats`
 
-每 2 秒心跳推送（或无其他消息时填充），格式同 `GET /api/stats/realtime`。
+连接后立即推送一次，之后每 2 秒（无其他消息时）推送一次。`data` 为全局统计，`devices` 为**所有设备完整明细**（设备信息 + 人流/车流 + 拥挤状态 + 经纬度，同 `GET /api/stats/devices`）。
 
 ```json
 {
@@ -1300,11 +1367,58 @@ ws://<backend-host>:8000/ws
     "active_devices": 3,
     "updated_at": "2026-08-02T14:05:00+00:00"
   },
+  "devices": [
+    {
+      "device_id": "cam-gate-north",
+      "name": "北门摄像头",
+      "camera_type": "vehicle",
+      "status": "online",
+      "max_vehicles": 10,
+      "max_persons": null,
+      "longitude": 116.397128,
+      "latitude": 39.916527,
+    "category": "城墙出入口便道监控点位",
+      "current_vehicles": 12,
+      "current_persons": 0,
+      "today_vehicle_in": 85,
+      "today_vehicle_out": 73,
+      "today_person_in": 0,
+      "today_person_out": 0,
+      "hour": 14,
+      "hour_vehicle_in": 8,
+      "hour_vehicle_out": 5,
+      "hour_person_in": 0,
+      "hour_person_out": 0,
+      "roi_vehicles": 12,
+      "roi_persons": 0,
+      "vehicle_flow_per_min": 34.0,
+      "person_flow_per_min": 0.0,
+      "vehicle_congested": false,
+      "person_congested": false,
+      "vehicle_score": 0.5,
+      "person_score": 0.0,
+      "congestion_score": 0.5,
+      "congested": false
+    }
+  ],
   "timestamp": "2026-08-02T14:05:00+00:00"
 }
 ```
 
-> 💡 前端大屏可优先订阅此后端 `stats` 推送，无需轮询 `GET /api/stats/realtime`。
+**`data` 字段**（全局合计，格式同 `GET /api/stats/realtime`）：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `current_vehicles` | int | 当前在场车辆数（总车流）|
+| `current_persons` | int | 当前在场人员数（总人流）|
+| `today_vehicle_in` / `today_vehicle_out` | int | 今日车辆进入/离开累计 |
+| `today_person_in` / `today_person_out` | int | 今日人员进入/离开累计 |
+| `active_devices` | int | 活跃设备数 |
+| `updated_at` | string | 最后更新时间（ISO 8601）|
+
+**`devices` 数组元素字段**（每设备，同 `GET /api/stats/devices`）：`device_id`、`name`、`camera_type`、`status`、`max_vehicles`、`max_persons`、`longitude`、`latitude`、`category`、`current_vehicles/persons`、`today_*`、`hour`、`hour_*`、`roi_vehicles`、`roi_persons`、`vehicle_flow_per_min`、`person_flow_per_min`、`vehicle_congested`、`person_congested`、`vehicle_score`、`person_score`、`congestion_score`、`congested`。未产生事件的设备计数为 0。
+
+> 💡 前端大屏**只需订阅此 `stats` 消息**即可同时获得：总人流/总车流（`data`）+ 各设备人流/车流/设备信息/拥挤状态/经纬度（`devices`），无需再轮询 `GET /api/stats/realtime` 或 `GET /api/stats/devices`。
 
 #### 告警 `alert`
 
@@ -1359,17 +1473,14 @@ ws://<backend-host>:8000/ws
 
 ### 9.3 前端处理建议
 
-- 根据 `type` 字段分发处理；建议同时连接 AI `/ws`（事件流）与后端 `/ws`（统计/告警/预测/警力）。
-- AI `/ws`：
-  - `crossing_event`：用于实时事件流展示、弹窗告警、计数器动画。
-  - `tracks`：用于在视频画面上叠加目标框（高频消息，建议用 `requestAnimationFrame` 节流渲染）。
-  - `video_anomaly`：用于在摄像头画面层叠加异常提示（低频，仅在状态转移时推送）。
+- 前端**只连接后端 `/ws`**（AI `/ws` 不对前端开放），根据 `type` 字段分发处理。
 - 后端 `/ws`：
-  - `stats`：刷新大屏数字卡片（替代轮询）。
+  - `stats`：`data` 刷新大屏数字卡片（总人流/总车流），`devices` 更新设备卡片/地图（每设备人流/车流/拥挤状态/经纬度），替代轮询。
   - `alert`：告警列表与弹窗（含视频异常告警）。
   - `prediction`：更新预测趋势展示。
   - `police_plan`：更新警力分配可视化。
 - 按 `device_id` 区分多路摄像头。
+- AI `/ws` 消息（`crossing_event` / `tracks` / `video_anomaly`）仅供后端集成方参考：越线事件可转 `GET /api/events` 查询、拥挤/视频异常会经后端 `alert` 推送。
 
 ---
 
@@ -1515,6 +1626,8 @@ AI 服务支持的目标检测类别（`_DETECTION_CLASSES`）：
 ## 13. 接入示例
 
 ### 13.1 JavaScript — 注册设备并监听事件
+
+> 注：本示例第 2 步连接 AI `/ws` 的代码**仅供后端集成参考**；前端不直接连接 AI 服务，事件数据经 `GET /api/events` 查询、告警经后端 `/ws` 的 `alert` 推送（见 §9.3）。
 
 ```javascript
 // 1. 注册设备
