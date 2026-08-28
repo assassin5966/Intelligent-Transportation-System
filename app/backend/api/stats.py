@@ -255,7 +255,16 @@ async def hourly_history(
         raise HTTPException(503, f"MySQL 查询失败: {e}") from e
 
     total = {"vehicle_in": 0, "vehicle_out": 0, "person_in": 0, "person_out": 0}
+    records = []
     for r in rows:
+        records.append({
+            "stat_date": r["stat_date"].isoformat() if hasattr(r["stat_date"], "isoformat") else str(r["stat_date"]),
+            "hour": int(r["hour"]),
+            "vehicle_in": int(r["vehicle_in"]),
+            "vehicle_out": int(r["vehicle_out"]),
+            "person_in": int(r["person_in"]),
+            "person_out": int(r["person_out"]),
+        })
         total["vehicle_in"] += r["vehicle_in"]
         total["vehicle_out"] += r["vehicle_out"]
         total["person_in"] += r["person_in"]
@@ -264,6 +273,7 @@ async def hourly_history(
         "device_id": device_id,
         "start": f"{start_dt.isoformat()}:{start_hour:02d}",
         "end": f"{end_dt.isoformat()}:{end_hour:02d}",
+        "records": records,
         "total": total,
     }
 

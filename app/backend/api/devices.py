@@ -98,9 +98,12 @@ def _load_geo() -> dict:
 def geo_by_name(name: str) -> tuple[Optional[float], Optional[float]]:
     """按设备名称查经纬度, 未匹配到返回 (None, None).
 
+    匹配时忽略空格: device_geo.json 的设备名为 'GAJK-2648和阳南门出口路南以东85米'
+    (无空格), 而注册名可能带空格, 与 allocator 的去空格匹配保持一致.
+
     供设备 API 与统计/WebSocket 推送共用 (前端地图打点).
     """
-    geo = _load_geo().get(name or "")
+    geo = _load_geo().get((name or "").replace(" ", ""))
     if not geo:
         return None, None
     return geo.get("longitude"), geo.get("latitude")
@@ -130,9 +133,11 @@ def _load_categories() -> dict:
 def category_by_name(name: str) -> Optional[str]:
     """按设备名称查点位分类, 未匹配到或分类为空返回 None.
 
+    匹配时忽略空格 (同 geo_by_name).
+
     供设备 API 与统计/WebSocket 推送共用 (前端设备卡片分类展示).
     """
-    cat = _load_categories().get(name or "")
+    cat = _load_categories().get((name or "").replace(" ", ""))
     return cat or None
 
 
@@ -198,8 +203,30 @@ async def _forward_to_ai(method: str, path: str, json_body: Optional[dict] = Non
 def _capture_frame_sync(url: str, max_frames: int = 30) -> Optional[bytes]:
     """同步拉流截一帧, 返回 JPEG bytes. 失败返回 None.
 
-    网络流开头可能有空帧, 最多读 max_frames 帧找有效帧.
+    优先用 ffmpeg 截帧 (低延迟参数, 对低帧率流如 1fps mock 稳定快速),
+    失败再回退 cv2 (兼容无 ffmpeg 环境).
     """
+    try:
+        import subprocess
+
+        result = subprocess.run(
+            [
+                "ffmpeg", "-hide_banner", "-loglevel", "error",
+                "-rtsp_transport", "tcp",
+                "-fflags", "nobuffer", "-flags", "low_delay",
+                "-probesize", "32", "-analyzeduration", "0",
+                "-i", url,
+                "-frames:v", "1", "-f", "image2pipe", "-vcodec", "mjpeg",
+                "-q:v", "3", "-",
+            ],
+            capture_output=True,
+            timeout=20,
+        )
+        if result.returncode == 0 and result.stdout:
+            return result.stdout
+    except Exception:  # noqa: BLE001
+        pass
+
     import cv2  # 后端与 AI 共用镜像含 opencv; 惰性导入避免启动依赖
 
     cap = cv2.VideoCapture(url)
@@ -343,7 +370,7 @@ async def snapshot(device_id: str):
                 raise HTTPException(502, "WVP 点播失败, 无法获取流地址")
             jpeg = await asyncio.wait_for(
                 asyncio.to_thread(_capture_frame_sync, stream_url),
-                timeout=15.0,
+                timeout=25.0,
             )
         except asyncio.TimeoutError:
             raise HTTPException(504, "截帧超时 (流可能未就绪, 请重试)")
@@ -356,7 +383,7 @@ async def snapshot(device_id: str):
             raise HTTPException(400, "设备未配置 stream_url, 无法截帧")
         jpeg = await asyncio.wait_for(
             asyncio.to_thread(_capture_frame_sync, stream_url),
-            timeout=15.0,
+            timeout=25.0,
         )
 
     if jpeg is None:
