@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>智慧交管拥堵治理预警监控平台</title>
+
+    <!-- 高德安全密钥（2021/12 后必备，生产请替换为自己的 key） -->
+    <script>
+        window._AMapSecurityConfig = { securityJsCode: '14375423ab47bc05eb1e1c9e2e9a246c' };
+    </script>
+    <!-- 高德 JS API 2.0（Web 端 Key 已填；生产环境请替换为你自己的 key） -->
+    <script src="https://webapi.amap.com/maps?v=2.0&key=fe781f1f6180f074f74f4813b480e4ab"></script>
+    <!-- 高德 AMapUI 组件库：字体图标标注 SimpleMarker + 信息窗体 SimpleInfoWindow -->
+    <script src="https://webapi.amap.com/ui/1.1/main.js"></script>
+    <!-- ECharts 5.x（CDN 全局 echarts，大屏科技感图表渲染） -->
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
+</head>
+
+<body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.js"></script>
+</body>
+
+</html>

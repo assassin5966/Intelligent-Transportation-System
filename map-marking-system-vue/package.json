@@ -1,0 +1,19 @@
+{
+  "name": "map-marking-system-vue",
+  "version": "1.0.0",
+  "private": true,
+  "description": "智慧交管拥堵治理预警监控平台 · 基于 api(1).md 的完整 Vue3 前端对接实现",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build:prod",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "vue": "^3.4.21"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.0.4",
+    "vite": "^5.2.0"
+  }
+}
