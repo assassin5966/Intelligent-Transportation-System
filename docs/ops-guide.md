@@ -38,6 +38,7 @@
 |------|------|------|------|---------|
 | 8000 | TCP | 业务后端 (FastAPI) | REST API + WebSocket | docker-compose.yml `backend` |
 | 8001 | TCP | AI 分析服务 | 视频流注册/管理/WS 推送 | docker-compose.yml `ai` |
+| 5173 | TCP | 大屏前端 (nginx) | 大屏页面 + 反代后端 API/WS（映射容器 80） | docker-compose.yml `frontend` |
 | 16379 | TCP | Redis | 实时状态存储（映射容器 6379） | docker-compose.yml `redis` |
 | 3306 | TCP | MySQL | 小时级统计长期归档 | docker-compose.yml `mysql` |
 | 8554 | TCP | MediaMTX RTSP | 测试用 RTSP 服务器 | docker-compose.yml `rtsp-server` |
@@ -111,6 +112,7 @@ docker tag docker.1ms.run/library/redis:7-alpine redis:7-alpine
 |--------|------|---------|------|------|
 | `ai` | smart-city-platform:latest | `python -m app.ai.service` | 8001 | AI 分析服务（YOLO11/BoT-SORT/越线计数/异常识别） |
 | `backend` | smart-city-platform:latest | `uvicorn app.backend.main:app --host 0.0.0.0 --port 8000` | 8000 | 业务后端（REST API/WebSocket/告警/预测/警力分配） |
+| `frontend` | dt-frontend:latest | nginx（托管构建产物 + 反代后端） | 5173->80 | 大屏前端（Vue3 构建产物） |
 | `redis` | redis:7-alpine | `redis-server --appendonly yes` | 16379->6379 | 实时状态存储（AOF 持久化） |
 | `rtsp-server` | bluenviron/mediamtx:latest | 默认 | 8554/1935/8888 | MediaMTX RTSP 测试服务器 |
 | `rtsp-streamer-vehicle` | smart-city-platform:latest | ffmpeg 推流 | - | 测试用车辆识别视频推流 |
@@ -118,6 +120,77 @@ docker tag docker.1ms.run/library/redis:7-alpine redis:7-alpine
 | `ai-processor` | smart-city-platform:latest | `python /app/tool/video_processor.py` | - | 离线视频处理器（测试用） |
 
 > 生产环境仅需启动 `ai`、`backend`、`redis` 三个核心服务；`rtsp-*` 和 `ai-processor` 仅供测试。
+
+#### 前端容器化部署（大屏展示）
+
+前端（`map-marking-system-vue`，Vue3 + Vite 纯 SPA）采用多阶段 Dockerfile 独立构建：node:20 阶段安装依赖并执行 `npm run build` 产出 `dist/`，nginx:alpine 阶段托管静态产物并反代后端，产物不依赖 Node 运行时。
+
+**挂载说明**：`frontend` 服务将宿主机 `nginx.conf` 与 `dist/` 以**只读 bind mount** 挂载进容器，覆盖镜像内快照。改配置或产物后**无需重建镜像**：
+
+```yaml
+frontend:
+  build: ./map-marking-system-vue
+  ports: ["5173:80"]
+  volumes:
+    - ./map-marking-system-vue/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    - ./map-marking-system-vue/dist:/usr/share/nginx/html:ro
+```
+
+**构建与启动**：
+
+```bash
+# 构建镜像并启动（仅首次需要；内网导入镜像后无需构建）
+docker compose up -d --build frontend
+
+# 日常改配置/产物（挂载模式下即时生效，无需重建）
+vim map-marking-system-vue/nginx.conf            # 改反代/路由/超时等
+docker exec dt-frontend nginx -s reload          # 平滑重载配置
+cd map-marking-system-vue && npm run build        # 重新生成 dist/，刷新浏览器即见
+```
+
+**访问与反代**：浏览器访问 `http://<host>:5173`（nginx 容器内 80，宿主机映射 5173 与开发端口一致）。前端为同源请求（`API_BASE = location.origin`），nginx 完成路径分发（`map-marking-system-vue/nginx.conf`）：
+
+| 路径 | 处理 |
+|------|------|
+| `/` | 静态资源 + SPA history 路由回退 `try_files ... /index.html` |
+| `/api/`、`/static/` | 反代 `http://backend:8000`（REST API / 运维页面） |
+| `/ws` | WebSocket 升级反代 `http://backend:8000`（`Upgrade`/`Connection` 头，长连接超时 1h） |
+
+高德地图 SDK / ECharts 经 `index.html` 外网 CDN 加载，无需代理。`/api`、`/static`、`/ws` 反代目标用 compose 服务名 `backend`，须与后端同处一个 compose 网络（`frontend` 服务已 `depends_on: backend`）。
+
+**验证**：
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:5173/            # 200 静态页
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:5173/api/stats/realtime   # 200 反代后端
+curl -s -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
+  -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
+  -o /dev/null -w '%{http_code}\n' http://localhost:5173/ws                # 101 升级成功
+```
+
+##### 内网/离线部署（CentOS 9 amd64 等）
+
+前端镜像为 `linux/amd64`（构建机 x86_64 与主流服务器兼容），可用 `docker save/load` 离线迁移，**内网无需 npm / 外网**：
+
+```bash
+# ① 外网机器（或可联网开发机）构建并导出镜像
+docker compose build frontend
+docker save dt-frontend:latest | gzip > dt-frontend.tar.gz     # 约 20M
+docker image inspect dt-frontend:latest --format '{{.Os}}/{{.Architecture}}'   # 确认 linux/amd64
+
+# ② 拷贝 dt-frontend.tar.gz + nginx.conf + dist/ 到内网机器
+#    (挂载模式会覆盖镜像内快照, 因此三个文件都要带; 不要只拷 tar 包)
+
+# ③ 内网机器加载并启动
+docker load < dt-frontend.tar.gz
+docker compose up -d frontend          # 需先准备同结构的 docker-compose.yml
+```
+
+> **首次构建需外网**：Dockerfile 构建阶段的 `npm install` 要访问 npm registry，内网机器无法执行 `docker compose build`。必须由外网机器构建好镜像后 `docker save` 导出；内网通过 `docker load` 导入后，日常运维（改 nginx.conf / 重新构建 dist）完全不依赖外网。
+>
+> **纯镜像部署**：若内网不带挂载文件（去掉 volumes），则直接用镜像内快照，但每次改前端都需重新打包镜像，不推荐。
+
+> 与开发模式（本机 `npm run dev` + vite proxy）行为一致：前端始终同源访问后端，局域网 IP 与 localhost 均可正常使用。
 
 #### 环境变量配置
 
@@ -1525,6 +1598,8 @@ tar xzf backup/models-20260808.tar.gz
 | 警力配置 | `configs/police.yaml` | 警力区域 + 总警力初始配置 |
 | 主编排 | `docker-compose.yml` | 服务编排 |
 | Dockerfile | `Dockerfile` | 镜像构建 |
+| 前端镜像构建 | `map-marking-system-vue/Dockerfile` | 前端镜像构建（多阶段） |
+| 前端反代配置 | `map-marking-system-vue/nginx.conf` | nginx 托管 + `/api` `/ws` 反代后端 |
 
 > WVP 信令平台与 ZLMediaKit 为外部独立部署组件，其配置由 WVP 侧自行备份，不在本项目备份清单内。
 
