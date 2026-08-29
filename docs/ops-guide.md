@@ -779,6 +779,23 @@ docker compose logs -f rtsp-streamer-vehicle
 docker compose restart backend ai
 ```
 
+### 接口验收测试（pytest）
+
+针对运行中后端的接口契约验收，覆盖 health / stats / devices / events / alerts / police / device-info / config / prediction / WebSocket 全接口（20 项）。
+
+```bash
+# 本地后端验收
+pytest tests/test_api_http.py -v
+
+# 内网部署验收（指定远程后端地址）
+BACKEND_BASE_URL=http://192.168.1.10:8000 pytest tests/test_api_http.py -v
+```
+
+设计要点：
+- 只读断言（状态码 + 关键字段），不耦合具体数值，后端数据变化不影响结果
+- 写操作仅测"非法请求被拒绝"路径（400/422），不产生数据副作用
+- 后端不可达时自动 skip，不会误报失败
+
 ### 端口清单与冲突说明
 
 | 端口 | 归属 | 说明 |

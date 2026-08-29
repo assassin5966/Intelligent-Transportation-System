@@ -59,3 +59,5 @@ Thumbs.db
 CLAUDE.md
 *.mp4
 *.tar.gz
+# ---- 部署产物 (镜像包/挂载文件, 拷贝到内网用, 不入库) ----
+deploy/
