@@ -1,11 +1,13 @@
 """实时统计 API."""
 from datetime import date, datetime
+from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
 
 from pydantic import BaseModel, Field
 
 from ...common.business_rules import get_rule
+from ...common import device_info
 from ...common.config import settings
 from ...common.redis_client import get_redis
 from ...schemas.events import RealtimeStats
@@ -46,90 +48,160 @@ async def device_stats():
     return await build_all_device_stats_rows()
 
 
+def _infer_camera_type(category: Optional[str]) -> Optional[str]:
+    """按点位分类推断 camera_type (卡口/车→vehicle, 便道/人→person)."""
+    cat = category or ""
+    if "卡口" in cat or "车" in cat:
+        return "vehicle"
+    if "便道" in cat or "人" in cat:
+        return "person"
+    return None
+
+
+def _zero_stats_row(now: datetime) -> dict:
+    """注册了但未产生事件的设备, 计数为 0."""
+    return {
+        "current_vehicles": 0,
+        "current_persons": 0,
+        "today_vehicle_in": 0,
+        "today_vehicle_out": 0,
+        "today_person_in": 0,
+        "today_person_out": 0,
+        "hour": now.hour,
+        "hour_vehicle_in": 0,
+        "hour_vehicle_out": 0,
+        "hour_person_in": 0,
+        "hour_person_out": 0,
+    }
+
+
+async def _build_device_row(
+    pt: dict,
+    rdev: Optional[dict],
+    stats_map: dict[str, dict],
+    congestion_map: dict[str, dict],
+    now: datetime,
+) -> dict:
+    """由 device_info 点位 + Redis 设备(可为 None) 构建一行完整统计.
+
+    pt:   device_info 缓存条目 (name/category/longitude/latitude/region)
+    rdev: Redis 设备 hash (None = 未注册/无流)
+    异常状态规则 (ws 无数据/未注册 → abnormal, 推送在 stats.devices 内):
+      - 无对应 Redis 设备 (未注册, 无流)           → abnormal
+      - 已注册但状态非 online/running (synced/registered/offline) → abnormal
+      - 已在线但未产生统计数据 (无信息)            → abnormal
+    """
+    if rdev:
+        did = rdev.get("id", "")
+        raw_status = rdev.get("status", "")
+        max_v_raw = rdev.get("max_vehicles", "")
+        max_p_raw = rdev.get("max_persons", "")
+        camera_type = rdev.get("camera_type", "") or _infer_camera_type(pt.get("category"))
+    else:
+        did = pt["name"]  # 未注册点位以名称作 device_id (唯一)
+        raw_status = ""
+        max_v_raw = ""
+        max_p_raw = ""
+        camera_type = _infer_camera_type(pt.get("category"))
+    try:
+        max_vehicles = int(max_v_raw) if max_v_raw else None
+    except (TypeError, ValueError):
+        max_vehicles = None
+    try:
+        max_persons = int(max_p_raw) if max_p_raw else None
+    except (TypeError, ValueError):
+        max_persons = None
+    lng, lat = pt.get("longitude"), pt.get("latitude")
+    if lng is None or lat is None:
+        lng, lat = geo_by_name(pt["name"])
+    row: dict = {
+        "device_id": did,
+        "name": pt["name"],
+        "camera_type": camera_type or "",
+        "status": raw_status,
+        "max_vehicles": max_vehicles,
+        "max_persons": max_persons,
+        "longitude": lng,
+        "latitude": lat,
+        "category": pt.get("category"),
+        "region": pt.get("region") or "大同古城",
+    }
+    s = stats_map.get(did)
+    if s:
+        row.update(s)
+        if not raw_status:
+            row["status"] = "online"  # 未注册但已有统计 (历史残留) -> 视为在线
+    else:
+        row.update(_zero_stats_row(now))
+    # 异常状态: 无注册设备 / 未在线 / 无统计数据 -> abnormal (前端标黄展示)
+    if not rdev or raw_status not in ("online", "running") or s is None:
+        row["status"] = "abnormal"
+    c = congestion_map.get(did)
+    if c:
+        row["roi_vehicles"] = c["roi_vehicles"]
+        row["roi_persons"] = c.get("roi_persons", 0)
+        row["vehicle_flow_per_min"] = c["vehicle_flow_per_min"]
+        row["person_flow_per_min"] = c["person_flow_per_min"]
+        row.update(await _congestion_result(row, c))
+    else:
+        row["roi_vehicles"] = 0
+        row["roi_persons"] = 0
+        row["vehicle_flow_per_min"] = 0.0
+        row["person_flow_per_min"] = 0.0
+        row["congested"] = False
+        row["vehicle_congested"] = False
+        row["person_congested"] = False
+        row["vehicle_score"] = 0.0
+        row["person_score"] = 0.0
+        row["congestion_score"] = 0.0
+    return row
+
+
 async def build_all_device_stats_rows() -> list[dict]:
-    """构建所有注册设备的完整统计行 (配置 + 计数 + 拥挤 + 经纬度).
+    """构建所有注册设备的完整统计行 (配置 + 计数 + 拥挤 + 经纬度/分类/区域/异常状态).
+
+    设备集合 = device_info 表全量点位 (前端地图展示全部注册点位):
+      1. 读 Redis 设备配置表, 按归一化名称索引 (含流/状态/阈值);
+      2. 逐点位匹配: 有运行设备且产生统计 -> 正常数据; 否则 status=abnormal (无流/无数据);
+      3. MySQL 未启用/表空时回落 Redis 设备集合 (兼容本地开发, 行为同旧版).
 
     同时供 REST GET /api/stats/devices 与后端 WebSocket /ws 的 `devices` 字段复用,
-    保证前端订阅 WebSocket 即可拿全: 设备信息 / 人流 / 车流 / 拥挤状态 / 经纬度.
+    保证前端订阅 WebSocket 即可拿全: 设备信息 / 人流 / 车流 / 拥挤状态 / 经纬度 / 异常状态.
     """
     redis = get_redis()
     now = datetime.now()
-    # 1. 读所有注册设备配置 (含名称/类型/状态/拥挤阈值/经纬度)
-    devices: list[dict] = []
+    # 1. 读所有注册设备配置 (含名称/类型/状态/拥挤阈值), 按归一化名称索引
+    dev_by_name: dict[str, dict] = {}
     async for key in redis.scan_iter(f"{_DEVICE_KEY_PREFIX}*"):
         data = await redis.hgetall(key)
         if data:
-            max_v_raw = data.get("max_vehicles", "")
-            max_p_raw = data.get("max_persons", "")
-            try:
-                max_vehicles = int(max_v_raw) if max_v_raw else None
-            except (TypeError, ValueError):
-                max_vehicles = None
-            try:
-                max_persons = int(max_p_raw) if max_p_raw else None
-            except (TypeError, ValueError):
-                max_persons = None
-            lng, lat = geo_by_name(data.get("name", ""))
-            devices.append({
-                "device_id": data.get("id", ""),
-                "name": data.get("name", ""),
-                "camera_type": data.get("camera_type", ""),
-                "status": data.get("status", ""),
-                "max_vehicles": max_vehicles,
-                "max_persons": max_persons,
-                "longitude": lng,
-                "latitude": lat,
-                "category": category_by_name(data.get("name", "")),
-            })
-    if not devices:
-        return []
-    # 2. 批量读各设备统计 (一次 pipeline)
+            dev_by_name[device_info.normalize(data.get("name", ""))] = data
+    # 2. 批量读各设备统计 (一次 pipeline) + 各设备最新拥挤数据
     stats_map: dict[str, dict] = {s["device_id"]: s for s in await get_all_device_stats()}
-    # 3. 读各设备最新拥挤数据 (ROI 车辆数 + 车流速度)
     congestion_map: dict[str, dict] = {c["device_id"]: c for c in await latest_congestion()}
-    # 4. 合并配置 + 统计 + 拥挤数据
-    result = []
-    for dev in devices:
-        did = dev["device_id"]
-        s = stats_map.get(did)
-        row: dict = {**dev}
-        if s:
-            row.update(s)
-        else:
-            # 注册了但未产生事件的设备, 计数为 0
-            row.update({
-                "current_vehicles": 0,
-                "current_persons": 0,
-                "today_vehicle_in": 0,
-                "today_vehicle_out": 0,
-                "today_person_in": 0,
-                "today_person_out": 0,
-                "hour": now.hour,
-                "hour_vehicle_in": 0,
-                "hour_vehicle_out": 0,
-                "hour_person_in": 0,
-                "hour_person_out": 0,
-            })
-        c = congestion_map.get(did)
-        if c:
-            row["roi_vehicles"] = c["roi_vehicles"]
-            row["roi_persons"] = c.get("roi_persons", 0)
-            row["vehicle_flow_per_min"] = c["vehicle_flow_per_min"]
-            row["person_flow_per_min"] = c["person_flow_per_min"]
-            row.update(await _congestion_result(row, c))
-        else:
-            row["roi_vehicles"] = 0
-            row["roi_persons"] = 0
-            row["vehicle_flow_per_min"] = 0.0
-            row["person_flow_per_min"] = 0.0
-            row["congested"] = False
-            row["vehicle_congested"] = False
-            row["person_congested"] = False
-            row["vehicle_score"] = 0.0
-            row["person_score"] = 0.0
-            row["congestion_score"] = 0.0
-        result.append(row)
-    return result
+    # 3. 点位集合: device_info 全量点位 (表空/未启用时回落 Redis 设备集合)
+    points = device_info.list_cached()
+    if points:
+        return [
+            await _build_device_row(
+                pt, dev_by_name.get(device_info.normalize(pt["name"])),
+                stats_map, congestion_map, now,
+            )
+            for pt in points
+        ]
+    return [
+        await _build_device_row(
+            {
+                "name": data.get("name", ""),
+                "category": None,
+                "longitude": None,
+                "latitude": None,
+                "region": "大同古城",
+            },
+            data, stats_map, congestion_map, now,
+        )
+        for data in dev_by_name.values()
+    ]
 
 
 async def _congestion_result(row: dict, c: dict) -> dict:

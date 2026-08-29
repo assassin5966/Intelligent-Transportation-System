@@ -77,9 +77,11 @@ def evaluate_congestion(
     )
 
     vehicle_count = _clamped_factor(roi_vehicles, max_vehicles, vehicle_active)
-    vehicle_flow = 1.0 - _clamped_factor(vehicle_flow_per_min, min_flow, vehicle_active)
+    # 维度未配置阈值时不参与拥挤度: 速度因子须为 0,
+    # 否则 1.0 - _clamped_factor(..., active=False)=1.0 会让该维度虚报 0.5 分
+    vehicle_flow = 1.0 - _clamped_factor(vehicle_flow_per_min, min_flow, vehicle_active) if vehicle_active else 0.0
     person_count = _clamped_factor(roi_persons, max_persons, person_active)
-    person_flow = 1.0 - _clamped_factor(person_flow_per_min, person_min_flow, person_active)
+    person_flow = 1.0 - _clamped_factor(person_flow_per_min, person_min_flow, person_active) if person_active else 0.0
     vehicle_score = 0.5 * vehicle_count + 0.5 * vehicle_flow
     person_score = 0.5 * person_count + 0.5 * person_flow
 
