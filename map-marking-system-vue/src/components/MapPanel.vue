@@ -12,7 +12,7 @@
 </template>
 
 <script setup>
-import { onMounted, onBeforeUnmount, ref, watch } from 'vue'
+import { onMounted, onBeforeUnmount, ref, computed, watch } from 'vue'
 import { useDevices } from '../composables/useDevices.js'
 import { useMapControl } from '../composables/useMapControl.js'
 import { useToast } from '../composables/useToast.js'
@@ -129,107 +129,115 @@ function congColorClass(score) {
   if (score >= 0.33) return 'y'
   return 'g'
 }
-
-// —— 点位流量状态（按点位类型分流模拟实时）——
-// 卡口 → 车辆数据：speed(km/h) / daily(veh/D) / hourly(veh/H) / current(veh)
-// 便道 → 行人数据：speed(m/min) / daily(ped/d) / hourly(ped/h) / current(ped) / density(ped/m²) / flow=Q·K·v
-// 点位数据本身无流量字段，按 id 哈希做确定性基准，再由定时器做轻微随机游走，
-// 模拟「实时」流量变化；speed 按类型阈值 → 拥堵/通畅四档状态。（需求 #1+图片 1+2）
-const VEH_FLOW_THRESHOLD = 28   // km/h，车辆低于此值判定拥堵
-const PED_FLOW_THRESHOLD = 22   // m/min，行人低于此值判定拥堵
-const flowState = {}            // id -> { ...type-specific }
-let hoverPointId = null         // 当前悬浮点位（用于实时刷新时保留 hover 态）
-
-function hashId(s) {
-  let h = 0
-  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0
-  return h
-}
-function seedFlow(p) {
-  const h = hashId(p.id)
-  if (p.type === '卡口') {
-    flowState[p.id] = {
-      kind: 'veh',
-      speed: 18 + (h % 47),     // 18~64 km/h
-      daily: 800 + (h % 9200),  // veh/D 800~10000
-      hourly: 40 + (h % 360),   // veh/H 40~400
-      current: 5 + (h % 55)     // 当前 veh 5~60
-    }
-  } else {
-    // 便道 = 行人：v_p(m/min) / K_p(ped/m²) / Q_p = K_p · v_p (ped/h)
-    const vp = 10 + (h % 45)            // 10~54 m/min
-    const kp = 0.3 + ((h >> 4) % 27) / 10 // 0.3~3.0 ped/m²
-    const qp = Math.round(kp * vp * 60)  // ped/h = K · v · 60
-    flowState[p.id] = {
-      kind: 'ped',
-      speed: vp, daily: 2000 + (h % 48000), hourly: qp, current: 8 + (h % 120),
-      density: kp, flow: qp
-    }
-  }
-  return flowState[p.id]
-}
-function getFlow(p) {
-  if (!flowState[p.id] || flowState[p.id].kind !== (p.type === '卡口' ? 'veh' : 'ped')) seedFlow(p)
-  return flowState[p.id]
-}
-// 状态分级（四档）：畅通/缓行(拥挤)/拥堵/严重拥堵
-function flowLevel(p) {
-  const f = getFlow(p)
-  const t = p.type === '卡口' ? VEH_FLOW_THRESHOLD : PED_FLOW_THRESHOLD
-  // 车辆：<10 严重拥堵 / 10-20 拥堵 / 20-40 缓行 / >40 畅通（参考图片 1）
-  // 行人：<10 严重拥挤 / 10-20 拥堵 / 20-40 拥挤(人多多走走停停) / >40 畅通（参考图片 2）
-  const s = f.speed
-  if (p.type === '卡口') {
-    if (s < 10) return 'severe'
-    if (s < 20) return 'congested'
-    if (s < t)  return 'slow'
-    return 'free'
-  }
-  if (s < 10) return 'severe'
-  if (s < 20) return 'congested'
-  if (s < t)  return 'crowd'  // 缓行(车多，不算真正拥堵)
-  return 'free'
-}
-// 车流状态色：四档（红/橙/黄/绿），与图片 1+2 图例一致
-function flowColor(p) {
-  const lv = flowLevel(p)
-  return lv === 'severe' ? 'r' : (lv === 'congested' ? 'r' : (lv === 'slow' || lv === 'crowd' ? 'y' : 'g'))
+// 拥挤档位(原始类) → CSS 全类名（'r'/'y'/'g' → red/yellow/green；其余(含异常灰态) → gray）
+// 供车流卡/详情卡/实时刷新着色统一使用（buildTipHtml / buildFlowTipHtml / updateFlowTipContent）
+function flowColorCls(c) {
+  if (c === 'r') return 'red'
+  if (c === 'y') return 'yellow'
+  if (c === 'g') return 'green'
+  return 'gray'
 }
 
-// —— 点位实时信息解析：优先取 WebSocket /ws stats.devices（按 id 匹配），无则保底写死 ——
+// —— 点位实时信息解析：优先取 WebSocket /ws stats.devices（按 id 匹配），无则按异常灰态展示 ——
 // 统一返回「点位信息视图」，供标点着色 / 详情卡 / 车流卡 / 实时刷新统一消费：
-//   · WS 命中：status / 综合拥挤度(congestion_score) / 实时计数 / 今日·本小时累计 全部来自 WS；
-//     车速由 congestion_score 反推（越拥堵车速越低），保证可视化连贯且数据驱动。
-//   · WS 未命中（无连接 / 该点位不在 WS 列表）：回退 CITY_WALL_POINTS 写死字段 + 模拟流量。
-const WALL_IDS = new Set(CITY_WALL_POINTS.map((p) => p.id))
+//   · WS 命中且在线：实时计数 / 今日·本小时累计 / 拥挤度 全部来自 WS 真实字段；
+//   · WS 未命中或状态非 online（abnormal/offline/syncing）：一律异常灰态展示，不展示速度等
+//     无法统计的派生指标（速度显示已按需求删除）。
+
+// —— 点位数据源（v0.12 修复：不再写死设备信息）——
+// 地图上展示的城墙/卡口点位，其「设备信息」（名称、经纬度、分类、状态、类型）以后端为准：
+//   · 后端设备存在时（/api/devices 返回 + WS stats.devices 推送 longitude/latitude），
+//     点位由 backendWallPoints() 从 dev.devices 动态映射，id/desc(名称)/coord(经纬度)/
+//     category(分类)/status(状态)/camera_type(类型) 全部来自后端；
+//   · 后端不可用（无设备/离线）时才回退 CITY_WALL_POINTS（由 data/device_geo.json 生成的离线兜底，
+//     与后端地理库同源），保证无后端时页面仍可展示。
+function gateOf(name) {
+  if (!name) return '大同古城'
+  for (const [g, kw] of [['和阳门', '和阳'], ['永泰门', '永泰'], ['清远门', '清远'], ['武定门', '武定']]) {
+    if (name.includes(kw)) return g
+  }
+  return '大同古城'
+}
+function dirOf(name) {
+  if (name && name.includes('入口')) return '入口'
+  if (name && name.includes('出口')) return '出口'
+  return '其他'
+}
+function backendWallPoints() {
+  const list = []
+  dev.devices.forEach((d) => {
+    if (!d || !d.id) return
+    // 一键切换「不显示离线设备」：仅保留在线设备（online）
+    if (!dev.showOffline && d.status !== 'online') return
+    const pos = dev.positions[d.id]
+    if (!pos || !Number.isFinite(pos.lng) || !Number.isFinite(pos.lat)) return
+    const isKakou = d.camera_type === 'vehicle' || /卡口/.test(d.category || '')
+    list.push({
+      id: d.id,
+      desc: d.name || d.id,
+      type: isKakou ? '卡口' : '便道',
+      gate: gateOf(d.name),
+      direction: dirOf(d.name),
+      coord: [pos.lng, pos.lat],
+      lastActive: '',
+      status: d.status || 'syncing',
+      typeLabel: isKakou ? '车行' : '人行',
+      count: 0,
+      category: d.category || '',
+      camera_type: d.camera_type || ''
+    })
+  })
+  return list
+}
+// 当前生效的点位源（后端优先，离线兜底其次）
+const wallPoints = computed(() => {
+  const back = backendWallPoints()
+  return back.length ? back : CITY_WALL_POINTS
+})
+const WALL_IDS = computed(() => new Set(wallPoints.value.map((p) => p.id)))
+function findPoint(id) { return wallPoints.value.find((p) => p.id === id) }
 
 function statusTextOf(level, isVeh) {
+  if (level === 'offline') return '离线'
+  if (level === 'abnormal') return '异常'
   if (level === 'severe') return isVeh ? '严重拥堵' : '严重拥挤'
   if (level === 'congested') return '拥堵'
   if (level === 'slow' || level === 'crowd') return isVeh ? '缓行' : '拥挤'
   return '畅通'
 }
 
+let hoverPointId = null         // 当前悬浮点位（用于实时刷新时保留 hover 态）
+
 /**
  * 点位实时信息解析（统一入口，供标点/详情卡/车流卡/实时刷新消费）
  * ---------------------------------------------------------------------------
- * 优先级：WebSocket /ws `stats.devices`（按 device_id == 点位 id 匹配）> CITY_WALL_POINTS 写死 + 模拟流量。
- *   · WS 命中：直接采用其真实统计字段 ——
+ * 优先级：WebSocket /ws `stats.devices`（按 device_id == 点位 id 匹配）> 点位源状态。
+ *   · WS 命中且 online：直接采用其真实统计字段 ——
  *       current_vehicles / current_persons
  *       today_vehicle_in/out、today_person_in/out
  *       hour_vehicle_in/out、hour_person_in/out、hour
  *       vehicle_flow_per_min、person_flow_per_min
  *       congestion_score、vehicle_congested、person_congested、congested、status
- *     展示派生量（current/daily/hourly/speed/congCls/level）全部由上述真实字段计算，不引入模拟值。
- *   · WS 未命中（无连接 / 该点位不在 WS 列表 / 报错）：回退 CITY_WALL_POINTS 写死字段 + getFlow() 模拟流量。
- *     保底数据仅作占位，绝不被写入或覆盖 WS 真实数据（见 tickFlow 守卫）。
+ *   · WS 未命中或状态非 online：一律返回异常灰态（abnormal），不展示速度等无法统计的派生指标。
  */
 function resolvePointInfo(p) {
   const isVeh = p.type === '卡口'
   const ws = dev.statsById[p.id] || null
-  console.log('resolvePointInfo', p, ws)
   if (ws) {
-    // —— 真实 WebSocket 统计（v0.11.0 stats.devices）——
+    const status = ws.status || p.status
+    // —— 异常/离线点位：灰态展示，不再派生速度等模拟指标 ——
+    if (status !== 'online') {
+      return {
+        fromWs: true, source: 'ws', isVeh, kind: isVeh ? 'veh' : 'per',
+        status, abnormal: true,
+        current: 0, daily: 0, dailyIn: 0, dailyOut: 0, hourly: 0, hourlyIn: 0, hourlyOut: 0,
+        congScore: 0, congCls: 'gray', level: status === 'offline' ? 'offline' : 'abnormal',
+        vehicleFlowPerMin: 0, personFlowPerMin: 0,
+        vehicleCongested: false, personCongested: false,
+        hour: ws.hour || new Date().getHours(), congestionRaw: false
+      }
+    }
+    // —— 在线点位：真实 WebSocket 统计（v0.11.0 stats.devices）——
     const current = isVeh ? (ws.current_vehicles || 0) : (ws.current_persons || 0)
     const dailyIn = isVeh ? (ws.today_vehicle_in || 0) : (ws.today_person_in || 0)
     const dailyOut = isVeh ? (ws.today_vehicle_out || 0) : (ws.today_person_out || 0)
@@ -238,8 +246,6 @@ function resolvePointInfo(p) {
     const hourlyOut = isVeh ? (ws.hour_vehicle_out || 0) : (ws.hour_person_out || 0)
     const hourly = hourlyIn + hourlyOut
     const congScore = ws.congestion_score || 0
-    // 车速按综合拥挤度反推（越堵越慢），保证可视化连贯且数据驱动
-    const speed = Math.round((1 - congScore) * (isVeh ? 60 : 50)) + 8
     const congCls = congScore >= 0.66 ? 'r' : (congScore >= 0.33 ? 'y' : 'g')
     // 拥堵分级：优先以各维度 congested 标志，其次综合分
     const vCong = !!ws.vehicle_congested
@@ -250,16 +256,11 @@ function resolvePointInfo(p) {
     else if (congScore >= 0.66) level = 'congested'
     else if (congScore >= 0.33) level = 'slow'
     else level = 'free'
-    let density = 0, flow = 0
-    if (!isVeh) {
-      density = +((current || 0) / 50).toFixed(2)
-      flow = Math.round(density * speed * 60)
-    }
     return {
-      fromWs: true, source: 'ws', isVeh, kind: isVeh ? 'veh' : 'ped',
-      status: ws.status || p.status,
+      fromWs: true, source: 'ws', isVeh, kind: isVeh ? 'veh' : 'per',
+      status, abnormal: false,
       current, daily, dailyIn, dailyOut, hourly, hourlyIn, hourlyOut,
-      speed, congScore, congCls, level, density, flow,
+      congScore, congCls, level,
       vehicleFlowPerMin: ws.vehicle_flow_per_min || 0,
       personFlowPerMin: ws.person_flow_per_min || 0,
       vehicleCongested: vCong, personCongested: pCong,
@@ -267,17 +268,13 @@ function resolvePointInfo(p) {
       congestionRaw: !!ws.congested
     }
   }
-  // —— 保底占位：CITY_WALL_POINTS 写死字段 + 模拟流量（仅报错/无数据时启用，绝不覆盖 WS）——
-  const f = getFlow(p)
-  const lv = flowLevel(p)
-  const isCong = lv === 'severe' || lv === 'congested'
-  const congCls = isCong ? 'r' : (lv === 'slow' || lv === 'crowd' ? 'y' : 'g')
+  // —— 保底占位：无 WS 数据 → 一律按异常灰态展示（不模拟速度/流量）——
+  const status = p.status || 'abnormal'
   return {
-    fromWs: false, source: 'fallback', isVeh, kind: isVeh ? 'veh' : 'ped',
-    status: p.status,
-    current: f.current, daily: f.daily, dailyIn: 0, dailyOut: 0,
-    hourly: f.hourly, hourlyIn: 0, hourlyOut: 0,
-    speed: f.speed, congScore: 0, congCls, level: lv, density: f.density || 0, flow: f.flow || 0,
+    fromWs: false, source: 'fallback', isVeh, kind: isVeh ? 'veh' : 'per',
+    status: status === 'online' ? 'abnormal' : status, abnormal: true,
+    current: 0, daily: 0, dailyIn: 0, dailyOut: 0, hourly: 0, hourlyIn: 0, hourlyOut: 0,
+    congScore: 0, congCls: 'gray', level: status === 'offline' ? 'offline' : 'abnormal',
     vehicleFlowPerMin: 0, personFlowPerMin: 0,
     vehicleCongested: false, personCongested: false, hour: new Date().getHours(), congestionRaw: false
   }
@@ -290,7 +287,7 @@ function renderDevices() {
   for (const k in markerMap) delete markerMap[k]
 
   dev.devices.forEach((d) => {
-    if (WALL_IDS.has(d.id)) return  // 城墙点位由 renderDefaultMarkers 单独渲染，避免双层标点
+    if (WALL_IDS.value.has(d.id)) return  // 城墙点位由 renderDefaultMarkers 单独渲染，避免双层标点
     const pos = dev.positions[d.id] || CITY[current].center
     // 防御：严格数值类型校验坐标（Number.isFinite 不做隐式转换，排除 null/''/字符串/布尔），
     // 非法则跳过，避免 AMap lngLatToContainer 报 Pixel(NaN, NaN) 中断整批渲染
@@ -404,7 +401,9 @@ function buildPinContent(p, mode = false) {
   const info = resolvePointInfo(p)
   const cls = mode === 'active' ? ' active' : (mode === 'hover' ? ' hover' : '')
   const colorCls = info.congCls === 'r' ? 'red' : (info.congCls === 'y' ? 'yellow' : 'green')
-  const stCls = info.status === 'online' ? 'online' : (info.status === 'offline' ? 'offline' : 'syncing')
+  const stCls = info.status === 'online' ? 'online'
+    : (info.status === 'offline' ? 'offline'
+      : (info.status === 'abnormal' ? 'abnormal' : 'syncing'))
   return (
     `<div class="cam-pin ${typeCls} s-${stCls}${cls}">` +
     `<div class="pin">${camIcon}</div>` +
@@ -416,7 +415,7 @@ function buildPinContent(p, mode = false) {
 // —— 重置所有 pin 为非激活态 ——
 function resetPinActive() {
   pointMarkers.forEach((it) => {
-    const p = CITY_WALL_POINTS.find((pp) => pp.id === it.id)
+    const p = findPoint(it.id)
     if (p) setMarkerMode(it.marker, p, false)
   })
 }
@@ -424,7 +423,7 @@ function resetPinActive() {
 // 仅刷新已渲染城墙点位的实时着色（WS 推送后即时反映，不重建 DOM）
 function refreshWallPointPins() {
   pointMarkers.forEach((it) => {
-    const p = CITY_WALL_POINTS.find((pp) => pp.id === it.id)
+    const p = findPoint(it.id)
     if (!p) return
     const mode = selectedPointId.value === p.id ? 'active' : (hoverPointId === p.id ? 'hover' : false)
     setMarkerMode(it.marker, p, mode)
@@ -567,7 +566,9 @@ function setRegionSelectCallback(fn) { onRegionSelected = fn }
 // 优化：渐变头部带类型徽章 / 图标化字段标签 / 经纬度展示 / 数值高亮 / CSS 分隔线
 function buildTipHtml(p) {
   const info = resolvePointInfo(p)
-  const statusText = info.status === 'online' ? '在线' : (info.status === 'offline' ? '离线' : '待验证')
+  const statusText = info.status === 'online' ? '在线'
+    : (info.status === 'offline' ? '离线'
+      : (info.status === 'abnormal' ? '异常' : '待验证'))
   const countLabel = p.typeLabel === '人行' ? '人流' : '车流'
   const typeBadge = p.type === '卡口'
     ? `<span class="tip-badge tip-badge-kakou">卡口</span>`
@@ -623,15 +624,23 @@ function buildTipHtml(p) {
     (() => {
       const f = resolvePointInfo(p)
       const isVeh = f.isVeh
-      const isCong = f.congCls === 'r'
-      const colorCls = f.congCls === 'r' ? 'red' : (f.congCls === 'y' ? 'yellow' : 'green')
+      const colorCls = flowColorCls(f.congCls)
       const statusText = statusTextOf(f.level, isVeh)
-      // 车辆版：日过车 / 小时过车 / 实时 veh + 速度
+      // 异常/离线点位：不展示流量详情，仅提示状态
+      if (f.abnormal) {
+        return (
+          `<div class="tip-flow tip-flow-veh">` +
+          `<div class="tip-flow-title">📡 设备状态</div>` +
+          `<div class="tip-flow-row"><span class="tip-flow-k">状态</span><span class="tip-flow-v"><b>${statusText}</b>（无实时数据）</span></div>` +
+          `<div class="tip-flow-status tip-flow-status-gray">${statusText}</div>` +
+          `</div>`
+        )
+      }
+      // 车辆版：日过车 / 小时过车 / 实时 veh
       if (isVeh) {
         return (
           `<div class="tip-flow tip-flow-veh">` +
           `<div class="tip-flow-title">🚗 车流量详情</div>` +
-          `<div class="tip-flow-row"><span class="tip-flow-k">平均车速</span><span class="tip-flow-v"><b>${f.speed}</b> km/h</span></div>` +
           `<div class="tip-flow-row"><span class="tip-flow-k">日过车(veh/d)</span><span class="tip-flow-v"><b>${f.daily.toLocaleString()}</b> veh/D</span></div>` +
           `<div class="tip-flow-row"><span class="tip-flow-k">小时过车(veh/h)</span><span class="tip-flow-v"><b>${f.hourly.toLocaleString()}</b> veh/H</span></div>` +
           `<div class="tip-flow-row"><span class="tip-flow-k">实时计数(veh)</span><span class="tip-flow-v"><b>${f.current}</b> veh</span></div>` +
@@ -641,33 +650,16 @@ function buildTipHtml(p) {
           `</div>`
         )
       }
-      // 行人版：行人交通三参数 Q_p = K_p · v_p + 经验阈值参考
-      const pedMin = Math.round(f.flow / 60)
+      // 行人版：日/时/分钟/实时计数
+      const perMin = Math.round((f.personFlowPerMin || 0))
       return (
-        `<div class="tip-flow tip-flow-ped">` +
+        `<div class="tip-flow tip-flow-per">` +
         `<div class="tip-flow-title">🚶 人流量详情</div>` +
-        // 三参数主体（参照图片 2）
-        `<div class="tip-3p">` +
-        `<div class="tip-3p-cell"><span class="tip-3p-k">行人流量 Q<sub>p</sub></span><span class="tip-3p-v"><b>${f.flow.toLocaleString()}</b><span class="tip-3p-u">ped/h</span></span></div>` +
-        `<div class="tip-3p-cell"><span class="tip-3p-k">行人平均速度 v<sub>p</sub></span><span class="tip-3p-v"><b>${f.speed}</b><span class="tip-3p-u">m/min</span></span></div>` +
-        `<div class="tip-3p-cell"><span class="tip-3p-k">行人密度 K<sub>p</sub></span><span class="tip-3p-v"><b>${f.density.toFixed(2)}</b><span class="tip-3p-u">ped/m²</span></span></div>` +
-        `</div>` +
-        `<div class="tip-formula">公式：Q<sub>p</sub> = K<sub>p</sub> · v<sub>p</sub> = ${f.density.toFixed(2)} × ${f.speed} × 60 ≈ <b>${f.flow}</b> ped/h</div>` +
-        // 详细数字（按图片 2 单位说明）
-        `<div class="tip-flow-row"><span class="tip-flow-k">日过人 (ped/d)</span><span class="tip-flow-v"><b>${f.daily.toLocaleString()}</b></span></div>` +
-        `<div class="tip-flow-row"><span class="tip-flow-k">小时过人 (ped/h)</span><span class="tip-flow-v"><b>${f.hourly.toLocaleString()}</b></span></div>` +
-        `<div class="tip-flow-row"><span class="tip-flow-k">分钟人流 (ped/min)</span><span class="tip-flow-v"><b>${pedMin}</b></span></div>` +
-        `<div class="tip-flow-row"><span class="tip-flow-k">实时计数 (ped)</span><span class="tip-flow-v"><b>${f.current}</b></span></div>` +
-        `<div class="tip-flow-row"><span class="tip-flow-k">人流速率(人/min)</span><span class="tip-flow-v"><b>${f.personFlowPerMin}</b></span></div>` +
+        `<div class="tip-flow-row"><span class="tip-flow-k">日过人 (per/d)</span><span class="tip-flow-v"><b>${f.daily.toLocaleString()}</b></span></div>` +
+        `<div class="tip-flow-row"><span class="tip-flow-k">小时过人 (per/h)</span><span class="tip-flow-v"><b>${f.hourly.toLocaleString()}</b></span></div>` +
+        `<div class="tip-flow-row"><span class="tip-flow-k">分钟人流 (per/min)</span><span class="tip-flow-v"><b>${perMin}</b></span></div>` +
+        `<div class="tip-flow-row"><span class="tip-flow-k">实时计数 (per)</span><span class="tip-flow-v"><b>${f.current}</b></span></div>` +
         `<div class="tip-flow-row"><span class="tip-flow-k">统计小时</span><span class="tip-flow-v"><b>${f.hour}:00</b></span></div>` +
-        // 经验阈值参考（按图片 2 表格）
-        `<div class="tip-threshold">` +
-        `<div class="tip-threshold-title">📊 经验阈值参考</div>` +
-        `<div class="tip-threshold-row ${f.daily < 12000 ? 'on' : ''}"><span>小区出入口</span><span>5000-12000 ped/d</span><span class="tip-threshold-state">畅通</span></div>` +
-        `<div class="tip-threshold-row ${f.daily >= 20000 && f.daily < 40000 ? 'on' : ''}"><span>公园/景区</span><span>20000-40000</span><span class="tip-threshold-state">拥挤</span></div>` +
-        `<div class="tip-threshold-row ${f.daily >= 40000 && f.daily < 70000 ? 'on' : ''}"><span>商圈热门</span><span>40000-70000</span><span class="tip-threshold-state">拥堵</span></div>` +
-        `<div class="tip-threshold-row ${f.daily >= 70000 ? 'on' : ''}"><span>大型节假日</span><span>70000+</span><span class="tip-threshold-state">严重拥堵</span></div>` +
-        `</div>` +
         `<div class="tip-flow-status tip-flow-status-${colorCls}">${statusText}</div>` +
         `</div>`
       )
@@ -683,21 +675,36 @@ function buildTipHtml(p) {
 // —— 点位流量提示框 HTML（默认初始化即显示）——
 // 按点位类型分流：
 //   卡口（车辆）：平均车速(km/h) / 日过车(veh/D) / 小时过车(veh/H) / 实时 veh
-//   便道（行人）：平均速度(m/min) / 日过人(ped/d) / 小时过人(ped/h) / 实时 ped
+//   便道（行人）：平均速度(m/min) / 日过人(per/d) / 小时过人(per/h) / 实时 per
 // 一次显示 4 个数值（需求 #2，参照图片 1+2 综合格式）
 function buildFlowTipHtml(p) {
   const info = resolvePointInfo(p)
   const isVeh = info.isVeh
-  const colorCls = info.congCls === 'r' ? 'red' : (info.congCls === 'y' ? 'yellow' : 'green')
+  const colorCls = flowColorCls(info.congCls)
   const statusText = statusTextOf(info.level, isVeh)
   const typeBadge = p.type === '卡口'
     ? `<span class="flow-tag flow-tag-kakou">卡口</span>`
     : `<span class="flow-tag flow-tag-biandao">便道</span>`
-  const speedUnit = isVeh ? 'km/h' : 'm/min'
-  const dailyLabel = isVeh ? '日过车(veh/d)' : '日过人(ped/d)'
-  const hourlyLabel = isVeh ? '时过车(veh/h)' : '时过人(ped/h)'
-  const curUnit = isVeh ? 'veh' : 'ped'
-  // 紧凑两行：标题行（色点 + 名称 + 类型 + 状态胶囊）/ 指标行（速度·日·时·实时 内联分隔）
+  const dailyLabel = isVeh ? '日过车(veh/d)' : '日过人(per/d)'
+  const hourlyLabel = isVeh ? '时过车(veh/h)' : '时过人(per/h)'
+  const curUnit = isVeh ? 'veh' : 'per'
+  // 异常点位：仅标题 + 异常胶囊，不展示流量指标（无实时数据）
+  if (info.abnormal) {
+    return (
+      `<div class="cam-flow flow-compact tip-monitor" data-flow="${colorCls}" data-kind="${info.kind}" data-id="${p.id}">` +
+      `<div class="flow-head">` +
+      `<span class="flow-dot flow-dot-${colorCls}"></span>` +
+      `<span class="flow-title" title="${p.desc}">${p.desc}</span>` +
+      typeBadge +
+      `<span class="flow-pill flow-pill-${colorCls}">${statusText}</span>` +
+      `</div>` +
+      `<div class="flow-metrics">` +
+      `<span class="fm"><b>—</b><i>无实时数据</i></span>` +
+      `</div>` +
+      `</div>`
+    )
+  }
+  // 紧凑两行：标题行（色点 + 名称 + 类型 + 状态胶囊）/ 指标行（日·时·实时·速率 内联分隔）
   return (
     `<div class="cam-flow flow-compact tip-monitor" data-flow="${colorCls}" data-kind="${info.kind}" data-id="${p.id}">` +
     `<div class="flow-head">` +
@@ -707,8 +714,6 @@ function buildFlowTipHtml(p) {
     `<span class="flow-pill flow-pill-${colorCls}">${statusText}</span>` +
     `</div>` +
     `<div class="flow-metrics">` +
-    `<span class="fm"><b class="flow-speed-val" data-id="${p.id}">${info.speed}</b><i>${speedUnit}</i></span>` +
-    `<span class="fm-sep"></span>` +
     `<span class="fm"><b data-fld="daily">${info.daily.toLocaleString()}</b><i>${dailyLabel}</i></span>` +
     `<span class="fm-sep"></span>` +
     `<span class="fm"><b data-fld="hourly">${info.hourly.toLocaleString()}</b><i>${hourlyLabel}</i></span>` +
@@ -758,26 +763,15 @@ function loadAMapUIModules() {
   return amapUIPromise
 }
 
-// —— 点位标记：优先 AMapUI SimpleMarker（字体图标标注），否则回退自定义 Marker ——
-// SimpleMarker 的 iconTheme/iconStyle 为预设主题色（blue/green/orange/red/purple），
-// iconLabel.innerHTML 放置矢量图标（车/人），即"字体图标标注（Marker 的图标标注形式）"。
+// —— 点位标记：SVG 图标 Marker（SimpleMarker 方案已弃用）——
 const ICON_CAR = `<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M5 11l1.5-4.6A2 2 0 0 1 8.4 5h7.2a2 2 0 0 1 1.9 1.4L19 11h1a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1h-1v1a1 1 0 0 1-2 0v-1H7v1a1 1 0 0 1-2 0v-1H4a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1h1zm2.2-.6L6 13h12l-1.2-2.6A.8.8 0 0 0 16 9.8H8a.8.8 0 0 0-.8.6zM7.5 15.2a1.2 1.2 0 1 0 0 .01zM16.5 15.2a1.2 1.2 0 1 0 0 .01z"/></svg>`
 const ICON_USER = `<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zm0 2c-4 0-7 2-7 5v1h14v-1c0-3-3-5-7-5z"/></svg>`
 
-// 点位标记配色（数据驱动：状态 + 车流等级），映射 SimpleMarker 预设主题色
-function markerColorName(p, mode) {
-  if (mode === 'active') return 'purple'  // 紫色高亮选中态
-  if (mode === 'hover') return 'orange'   // 悬停提亮
-  if (p.status === 'offline' || p.status === 'syncing') return 'blue' // 蓝（离线/待验证）
-  const lv = flowLevel(p)
-  const isCong = lv === 'severe' || lv === 'congested'
-  if (isCong) return 'red'               // 红（拥堵）
-  if (lv === 'slow' || lv === 'crowd') return 'orange' // 黄（缓行/拥挤）
-  return 'green'                          // 绿（畅通）
-}
 function markerTitle(p) {
   const info = resolvePointInfo(p)
-  const st = info.status === 'online' ? '在线' : info.status === 'syncing' ? '待验证' : '离线'
+  const st = info.status === 'online' ? '在线'
+    : info.status === 'abnormal' ? '异常'
+      : info.status === 'offline' ? '离线' : '待验证'
   return `${p.desc}｜${p.gate}·${p.direction}｜${st}`
 }
 // 创建点位标记
@@ -811,7 +805,7 @@ function setMarkerMode(mk, p, mode) {
 function updateClickTip() {
   if (!map || !clickTipLayer) return
   if (current !== 'datong' || !selectedPointId.value) { clickTipLayer.update([]); return }
-  const p = CITY_WALL_POINTS.find((pp) => pp.id === selectedPointId.value)
+  const p = findPoint(selectedPointId.value)
   if (!p) { clickTipLayer.update([]); return }
   const pt = map.lngLatToContainer(new AMap.LngLat(p.coord[0], p.coord[1]))
   clickTipLayer.update([{ id: p.id, x: pt.x, y: pt.y, html: buildTipHtml(p) }])
@@ -828,7 +822,8 @@ function closeClickTip() {
 function openFlowTips() {
   closeFlowTips()
   if (!map || current !== 'datong') return
-  if (!CITY_WALL_POINTS || CITY_WALL_POINTS.length === 0) return
+  const pts = wallPoints.value
+  if (!pts || pts.length === 0) return
   if (!flowTipLayer) return
   updateFlowTips()
 }
@@ -839,9 +834,10 @@ function closeFlowTips() {
 function updateFlowTips() {
   if (!map || !flowTipLayer) return
   if (current !== 'datong') { flowTipLayer.update([]); return }
-  if (!CITY_WALL_POINTS || CITY_WALL_POINTS.length === 0) { flowTipLayer.update([]); return }
+  const pts = wallPoints.value
+  if (!pts || pts.length === 0) { flowTipLayer.update([]); return }
   const items = []
-  const sorted = sortPointsByPriority(CITY_WALL_POINTS)
+  const sorted = sortPointsByPriority(pts)
   for (const p of sorted) {
     if (!p.coord || !isFinite(p.coord[0]) || !isFinite(p.coord[1])) continue
     const pt = map.lngLatToContainer(new AMap.LngLat(p.coord[0], p.coord[1]))
@@ -853,14 +849,13 @@ function updateFlowTips() {
 function updateFlowTipContent() {
   if (!flowTipLayer) return
   flowTipLayer.updateFlowText((card, id) => {
-    const p = CITY_WALL_POINTS.find((pp) => pp.id === id)
+    const p = findPoint(id)
     if (!p) return
     const info = resolvePointInfo(p)
-    const colorCls = info.congCls === 'r' ? 'red' : (info.congCls === 'y' ? 'yellow' : 'green')
+    const colorCls = flowColorCls(info.congCls)
     const statusText = statusTextOf(info.level, info.isVeh)
     card.setAttribute('data-flow', colorCls)
     const dot = card.querySelector('.flow-dot'); if (dot) dot.className = 'flow-dot flow-dot-' + colorCls
-    const sp = card.querySelector('.flow-speed-val'); if (sp) sp.textContent = info.speed
     // 实时刷新各数值文本（WS 推送后同步，不重建 DOM）：日/时累计、实时计数、每分钟速率
     const setFld = (k, v) => { const el = card.querySelector('[data-fld="' + k + '"]'); if (el) el.textContent = v }
     setFld('daily', info.daily.toLocaleString())
@@ -878,12 +873,13 @@ function renderDefaultMarkers() {
   clearPointMarkers()
   if (!map) return
   if (current !== 'datong') return // 非大同区域不显示城墙点位
-  if (!CITY_WALL_POINTS || CITY_WALL_POINTS.length === 0) {
+  const pts = wallPoints.value
+  if (!pts || pts.length === 0) {
     push('该区域暂无监控点位', 'warn'); return
   }
   try {
     // 按优先级排序：城门顺序 → 类型优先级（卡口>便道）→ 方向（入口>出口>其他）
-    const sorted = sortPointsByPriority(CITY_WALL_POINTS)
+    const sorted = sortPointsByPriority(pts)
     sorted.forEach((p) => {
       // 无效坐标兜底：跳过不渲染，避免 Marker 异常
       if (!p.coord || !isFinite(p.coord[0]) || !isFinite(p.coord[1])) {
@@ -907,7 +903,7 @@ function renderDefaultMarkers() {
     // 重建后若仍有选中点位（视角重置等场景），保持其 pin 激活
     if (selectedPointId.value) {
       pointMarkers.forEach((it) => {
-        const p = CITY_WALL_POINTS.find((pp) => pp.id === it.id)
+        const p = findPoint(it.id)
         if (p) setMarkerMode(it.marker, p, it.id === selectedPointId.value)
       })
     }
@@ -937,7 +933,7 @@ function selectPoint(id) {
   selectedPointId.value = id
   // 仅高亮选中 pin（地图标点，独立于提示框层）
   pointMarkers.forEach((it) => {
-    const p = CITY_WALL_POINTS.find((pp) => pp.id === it.id)
+    const p = findPoint(it.id)
     if (p) setMarkerMode(it.marker, p, it.id === id ? 'active' : false)
   })
   // 在独立的 clickTipLayer 中渲染该点「详细交互卡」（buildTipHtml 原始大卡样式 + 连接线），初始各点位 tip 完全不变
@@ -1034,18 +1030,26 @@ function applyTheme() {
   if (clickTipLayer) clickTipLayer.setLineColor(c.regionStroke)
   if (el) requestAnimationFrame(() => { el.style.opacity = '1' })
 }
+/** 地图视角/容器变化后重投影 TipLayer（连接线 + 卡片），保持提示框与箭头始终指向点位。
+ *  3D 视图下俯仰角(pitch)改变会使 AMap 标点按 3D 投影移动，若不重投影，提示框 DOM 层
+ *  会停留在旧屏幕坐标 → 状态窗口/箭头偏离点位（仅平移/缩放不受影响）。 */
+function reprojectTips() {
+  if (!map) return
+  updateFlowTips(); updateClickTip()
+}
 function resetView(silent) {
   if (!map) return
   map.setPitch(free3D ? 72 : CITY[current].pitch); map.setRotation(0)
-  if (!silent) console.log('视角已重置')
+  reprojectTips()
 }
-function setTopView() { if (!map) return; free3D = false; map.setPitch(0) }
-function setOblique() { if (!map) return; free3D = false; map.setPitch(CITY[current].pitch) }
-function toggleFree3D() { if (!map) return; free3D = !free3D; map.setPitch(free3D ? 72 : CITY[current].pitch) }
+function setTopView() { if (!map) return; free3D = false; map.setPitch(0); reprojectTips() }
+function setOblique() { if (!map) return; free3D = false; map.setPitch(CITY[current].pitch); reprojectTips() }
+function toggleFree3D() { if (!map) return; free3D = !free3D; map.setPitch(free3D ? 72 : CITY[current].pitch); reprojectTips() }
 function fitRange() {
   const b = CITY[current] && CITY[current].bounds
   if (!map || !b) return
   map.setBounds(new AMap.Bounds(b[0], b[1]), false, [60, 60, 60, 60])
+  reprojectTips()
 }
 
 // —— 初始化辅助：等待高德 SDK 就绪（避免 onMounted 早于 SDK 加载完成导致地图不显示）——
@@ -1084,35 +1088,17 @@ function renderStaticLayers() {
     })
 }
 
-// —— 模拟实时流量：定时轻微随机游走，刷新点位状态色与 tip 数值（需求 #1）——
+// —— 定时刷新：WS 每 2s 推送驱动为主，此处兜底重绘点位灰/彩状态与 tip 数值 ——
 let flowTimer = null
 function tickFlow() {
-  CITY_WALL_POINTS.forEach((p) => {
-    // 仅维护「无 WebSocket 真实数据」点位的模拟流量（保底占位）；
-    // 已被 WS 驱动的点位不在此处更新，杜绝模拟值覆盖真实数据
-    if (dev.statsById[p.id]) return
-    const f = getFlow(p)
-    // 速度 ±3 随机游走，按类型限制范围（车辆 8~70 km/h，行人 5~60 m/min）
-    const isVeh = p.type === '卡口'
-    const smin = isVeh ? 8 : 5
-    const smax = isVeh ? 70 : 60
-    let s = f.speed + Math.round((Math.random() - 0.5) * 6)
-    s = Math.max(smin, Math.min(smax, s))
-    f.speed = s
-    f.daily += Math.round(Math.random() * 12)
-    f.hourly = Math.max(10, f.hourly + Math.round((Math.random() - 0.5) * 8))
-    f.current = Math.max(0, f.current + Math.round((Math.random() - 0.5) * 3))
-    // 行人派生量同步：v_p 变 → Q_p 跟着变（Q_p = K_p · v_p · 60）
-    if (!isVeh) f.flow = Math.round(f.density * f.speed * 60)
-  })
-  // 1) 刷新所有点位标记颜色（保留 hover / active 态）：WS 驱动的点位渲染真实数据，保底点位渲染模拟数据
+  // 1) 刷新所有点位标记颜色（保留 hover / active 态）
   pointMarkers.forEach((it) => {
-    const p = CITY_WALL_POINTS.find((pp) => pp.id === it.id)
+    const p = findPoint(it.id)
     if (!p) return
     const mode = selectedPointId.value === p.id ? 'active' : (hoverPointId === p.id ? 'hover' : false)
     setMarkerMode(it.marker, p, mode)
   })
-  // 2) 直接更新已渲染默认信息窗体内的车流数值（经 updateFlowTipContent 重建各窗体内容）
+  // 2) 直接更新已渲染默认信息窗体内的车流数值
   updateFlowTipContent()
 }
 function startFlowTicker() {
@@ -1238,8 +1224,18 @@ onMounted(async () => {
 
 
     // 4) 关键：静态叠加层（区域 + 点位）独立渲染，不等待设备加载，
-    //    确保初始化即显示区域边界与点位标记（与切换区域行为一致）
-    renderStaticLayers()
+    //    确保初始化即显示区域边界与点位标记（与切换区域行为一致）。
+    //    注意：AMap 3D 视图首帧未就绪时投影会返回 NaN（报 Pixel(NaN, 0)），
+    //    初始同步渲染与设备到达时的 watcher 都可能早于地图就绪 → 丢失圈地/点位。
+    //    故统一改为等 map 'complete' 后再渲染；兜底定时器保证个别环境 complete
+    //    不触发时也尽量渲染一次（不重复执行）。
+    let staticDone = false
+    const renderStaticOnce = () => {
+      if (staticDone) return
+      staticDone = true
+      try { renderStaticLayers() } catch (e) { console.error('[renderStaticLayers] 失败：', e) }
+    }
+    setTimeout(renderStaticOnce, 4000)
 
     // 5) 容器尺寸兜底：下一帧若布局已完成，触发一次 resize 修正
     //    （避免初始化时容器尚未就绪导致地图空白，切换时容器已就绪故正常）
@@ -1255,10 +1251,13 @@ onMounted(async () => {
 
     // 地图事件：move/zoom/rotate 后重新投影 TipLayer（连接线 + 卡片位置随地图变化重绘）
     // flowTipLayer 与 clickTipLayer 均为 DOM 覆盖层，不随地图自动重投影，需手动触发
-    map.on('complete', () => { updateFlowTips(); updateClickTip() })
+    map.on('complete', () => { renderStaticOnce(); updateFlowTips(); updateClickTip() })
     map.on('moveend', () => { updateFlowTips(); updateClickTip() })
     map.on('zoomend', () => { updateFlowTips(); updateClickTip() })
     map.on('rotatechange', () => { updateFlowTips(); updateClickTip() })
+    // 3D 俯仰角 / 容器尺寸变化同样会改变点位投影，缺省会导致提示框与箭头偏离点位
+    map.on('pitchchange', () => { updateFlowTips(); updateClickTip() })
+    map.on('resize', () => { updateFlowTips(); updateClickTip() })
 
     // 7) 启动模拟实时车流：定时刷新点位红/蓝标识与 tip 数值（需求 #1）
     startFlowTicker()
@@ -1292,6 +1291,12 @@ watch(
   () => renderDevices()
 )
 watch(() => dev.statsById, () => { renderDevices(); updateFlowTipContent(); refreshWallPointPins(); if (selectedPointId.value) updateClickTip() }, { deep: true })
+
+// 点位源变化（后端设备加载/经纬度更新）→ 重建城墙点位标点与流量卡片（数据源由离线兜底切换为后端设备时）
+watch(
+  () => wallPoints.value.map((p) => p.id + ':' + p.status + ':' + (p.coord ? p.coord.join(',') : '')).join('|'),
+  () => { renderDefaultMarkers(); openFlowTips() }
+)
 
 // 主题变化 → 同步底图瓦片 / 区域叠加 / 控件配色
 watch(theme, () => applyTheme())

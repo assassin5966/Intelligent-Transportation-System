@@ -149,7 +149,6 @@ function connectBackend() {
   backendWs.onmessage = (e) => {
     try {
       const msg = JSON.parse(typeof e.data === 'string' ? e.data : '')
-      console.log('[WS] 收到消息===========》：', msg)
       dispatch(msg)
     } catch { /* 忽略非法帧 */ }
   }

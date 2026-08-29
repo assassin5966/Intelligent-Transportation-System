@@ -215,8 +215,8 @@ select#styleSelect {
 /* ==================== 左右两侧卡片栏 ==================== */
 .side-col {
     position: fixed;
-    top: 73px !important;
-    bottom: 0 !important;
+    top: 73px;
+    bottom: 0;
     width: 360px;
     z-index: 850;
     display: flex;
@@ -455,6 +455,7 @@ select#styleSelect {
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: 12px;
     padding: 0 24px;
     background: linear-gradient(180deg, rgba(6, 16, 32, .97), rgba(6, 18, 32, .74));
     border-bottom: 1px solid rgba(0, 225, 255, .45);
@@ -505,16 +506,20 @@ select#styleSelect {
 }
 
 .top-left {
-    flex: 1 1 0;
+    /* flex-grow 3:4(右) 使"标题→第一个选择框"间距较默认缩小约 25%,
+       右侧按钮/时钟更多, 让右侧多吸收留白, 视觉更均衡 */
+    flex: 3 1 0;
     min-width: 0;
 }
 
 .top-center {
     flex: 0 0 auto;
+    gap: 10px;
+    min-width: 0;
 }
 
 .top-right {
-    flex: 1 1 0;
+    flex: 4 1 0;
     justify-content: flex-end;
     flex-direction: row;
     align-items: center;
@@ -536,6 +541,9 @@ select#styleSelect {
     letter-spacing: 3px;
     margin-left: 10px;
     text-shadow: 0 0 12px rgba(0, 225, 255, .55);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 @keyframes spin {
@@ -602,20 +610,6 @@ select#styleSelect {
     font-weight: 700;
 }
 
-.clock-divider {
-    width: 1px;
-    height: 34px;
-    background: rgba(0, 225, 255, .25);
-}
-
-.clock-status {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    font-size: 11px;
-    color: #9fb8e0;
-}
-
 .clock-date {
     color: #9fd8ff;
     font-size: 12px;
@@ -627,15 +621,152 @@ select#styleSelect {
     font-size: 13px;
 }
 
-/* —— 顶栏右侧：主题切换 + 业务规则 入口（紧凑按钮，不增加顶栏高度） —— */
+/* —— 顶栏右侧：设备管理/计数启流/业务规则 + 主题切换（紧凑按钮，不增加顶栏高度） —— */
 .top-right {
-    gap: 10px;
+    gap: 12px;
 }
 
 .top-actions {
     display: flex;
     align-items: center;
     gap: 8px;
+    min-width: 0;
+}
+
+.top-actions .tool-btn {
+    padding: 6px 10px;
+    font-size: 12.5px;
+}
+
+/* ==================== 顶栏自适应间距 (桌面 / 平板 / 移动) ==================== */
+/* 中等屏(≤1500): 留白本就有限, 左/右 flex 恢复 1:1, 避免标题区间距被过度压缩 */
+@media (max-width: 1500px) {
+    .top-left,
+    .top-right {
+        flex: 1 1 0;
+    }
+    .topbar {
+        padding: 0 18px;
+    }
+}
+
+/* 平板 (768–1279px): 单行紧凑, 压缩留白与字号, 保持功能完整 */
+@media (max-width: 1279px) and (min-width: 768px) {
+    .topbar {
+        height: 64px;
+        padding: 0 14px;
+        gap: 10px;
+    }
+    .top-logo {
+        font-size: 24px;
+    }
+    .top-sub {
+        font-size: 14px;
+        letter-spacing: 2px;
+        margin-left: 8px;
+    }
+    .top-center,
+    .top-right {
+        gap: 8px;
+    }
+    .top-actions {
+        gap: 6px;
+    }
+    .top-center .tool-btn,
+    .top-center select {
+        font-size: 12px;
+        padding: 5px 9px;
+    }
+    .top-actions .tool-btn {
+        padding: 5px 8px;
+        font-size: 12px;
+    }
+    .top-action {
+        height: 32px;
+        padding: 0 9px;
+        font-size: 12px;
+    }
+    .clock-panel {
+        padding: 5px 10px;
+    }
+    .clock-time {
+        font-size: 22px;
+    }
+    .spacer {
+        width: 4px;
+    }
+}
+
+/* 移动 (≤767px): 顶栏换行为多行, 控制区居中换行, 压缩字号; 地图侧栏/角标随之下移 */
+@media (max-width: 767px) {
+    .topbar {
+        height: auto;
+        min-height: 0;
+        padding: 8px 12px;
+        gap: 8px 12px;
+        flex-wrap: wrap;
+        align-content: flex-start;
+    }
+    .top-left {
+        flex: 1 1 auto;
+        min-width: 0;
+    }
+    .top-right {
+        flex: 1 1 auto;
+        justify-content: flex-end;
+        flex-wrap: wrap;
+        gap: 6px;
+    }
+    .top-logo {
+        font-size: 20px;
+    }
+    .top-sub {
+        font-size: 13px;
+        letter-spacing: 1px;
+        margin-left: 6px;
+    }
+    .top-center {
+        order: 3;
+        flex: 1 1 100%;
+        justify-content: center;
+        flex-wrap: wrap;
+        gap: 6px;
+    }
+    .top-center .tool-btn,
+    .top-center select {
+        font-size: 12px;
+        padding: 5px 8px;
+    }
+    .top-actions {
+        gap: 6px;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+    }
+    .top-actions .tool-btn {
+        padding: 5px 7px;
+        font-size: 12px;
+    }
+    .clock-panel {
+        padding: 4px 8px;
+    }
+    .clock-time {
+        font-size: 18px;
+    }
+    .clock-date-row {
+        font-size: 10px;
+        gap: 5px;
+    }
+    /* 两~三行顶栏高度约 130~150px, 下方浮层下移避免遮挡 */
+    .side-col {
+        top: 148px;
+    }
+    .corner.tl,
+    .corner.tr {
+        top: 148px;
+    }
+    #errTip {
+        top: 148px;
+    }
 }
 
 .top-action {
@@ -711,7 +842,7 @@ select#styleSelect {
     top: 96px;
     bottom: 62px;
     width: 360px;
-    gap: 14px;
+    gap: 12px;
 }
 
 .card {
@@ -1652,6 +1783,25 @@ select#styleSelect {
     background: #ffd166;
 }
 
+/* 异常状态（ws 无数据 / 未在线）：灰点 + 呼吸脉冲，与"待验证/同步中"区分开 */
+.cam-pin.s-abnormal .badge {
+    background: #8a93a6;
+    box-shadow: 0 0 0 rgba(138, 147, 166, .7);
+    animation: abnormal-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes abnormal-pulse {
+    0%,
+    100% {
+        box-shadow: 0 0 0 0 rgba(138, 147, 166, .55);
+        transform: scale(1);
+    }
+    50% {
+        box-shadow: 0 0 0 6px rgba(138, 147, 166, 0);
+        transform: scale(1.15);
+    }
+}
+
 /* 流量状态标识：拥堵红 / 缓行黄 / 畅通绿（按四档流量级别，实时变化） */
 .cam-pin .badge.flow-red {
     background: #ff4d4f;
@@ -1666,6 +1816,12 @@ select#styleSelect {
 .cam-pin .badge.flow-green {
     background: #4dd599;
     box-shadow: 0 0 8px rgba(77, 213, 153, .75);
+}
+
+/* 异常（无实时数据）：灰点，不参与拥堵配色 */
+.cam-pin .badge.flow-gray {
+    background: #8a93a6;
+    box-shadow: none;
 }
 
 /* 悬停 / 点击反馈 */
@@ -1910,6 +2066,12 @@ select#styleSelect {
     border: 1px solid rgba(77, 213, 153, .4);
 }
 
+.flow-pill-gray {
+    background: rgba(138, 147, 166, .16);
+    color: #aab4c8;
+    border: 1px solid rgba(138, 147, 166, .45);
+}
+
 /* 内联指标行：数值 + 单位，细分隔线区隔，单行紧凑展示 */
 .flow-metrics {
     display: flex;
@@ -2096,6 +2258,12 @@ select#styleSelect {
     background: rgba(77, 213, 153, .14);
     color: #7fe2b1;
     border: 1px solid rgba(77, 213, 153, .4);
+}
+
+.tip-flow-status.tip-flow-status-gray {
+    background: rgba(138, 147, 166, .16);
+    color: #aab4c8;
+    border: 1px solid rgba(138, 147, 166, .45);
 }
 
 /* —— 行人三参数（Q_p / v_p / K_p，参照图片 2）—— */
@@ -3104,24 +3272,6 @@ select#styleSelect {
     box-shadow: 0 0 8px #00e1ff;
 }
 
-.ws-dot {
-    width: 9px;
-    height: 9px;
-    border-radius: 50%;
-    display: inline-block;
-    margin-right: 6px;
-}
-
-.ws-dot.on {
-    background: #5fe39a;
-    box-shadow: 0 0 6px #5fe39a;
-}
-
-.ws-dot.off {
-    background: #ff6b6b;
-    box-shadow: 0 0 6px #ff6b6b;
-}
-
 /* ============================================================================
  * 主题系统（深色 / 浅色）—— 通过 CSS 变量 + [data-theme] 驱动
  * ----------------------------------------------------------------------------
@@ -3427,14 +3577,6 @@ select#styleSelect,
 .clock-week {
     background: var(--c-accent-soft);
     color: var(--c-accent);
-}
-
-.clock-divider {
-    background: var(--c-border);
-}
-
-.clock-status {
-    color: var(--c-text-dim);
 }
 
 .clock-date {

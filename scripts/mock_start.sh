@@ -358,7 +358,7 @@ PT1_RESP=$(curl -s -X POST "http://localhost:8000/api/devices" \
         "stream_url": "rtsp://rtsp-server:8554/vehicle",
         "line_coords": "0.3,0.5,0.7,0.5",
         "anchor_coords": "0.5,0.6",
-        "camera_type": "person"
+        "camera_type": "vehicle"
     }')
 echo "  点位1: $PT1_RESP"
 
@@ -367,7 +367,7 @@ sleep 1
 log_info "启流点位1..."
 curl -s -X POST "http://localhost:8000/api/devices/mock-pt1-gajk2648/enable" \
     -H "Content-Type: application/json" \
-    -d '{"line_coords":"0.3,0.5,0.7,0.5","anchor_coords":"0.5,0.6","camera_type":"person"}' | python3 -m json.tool 2>/dev/null || true
+    -d '{"line_coords":"0.3,0.5,0.7,0.5","anchor_coords":"0.5,0.6","camera_type":"vehicle"}' | python3 -m json.tool 2>/dev/null || true
 
 sleep 2
 

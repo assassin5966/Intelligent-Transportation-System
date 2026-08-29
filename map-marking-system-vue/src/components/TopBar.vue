@@ -8,10 +8,8 @@
     </div>
 
     <div class="top-center">
-      <select id="citySelect" :value="city" @change="onCity">
+      <select id="citySelect" :value="city" @change="onCity" title="监控区域">
         <option value="datong">大同 · 古城</option>
-        <option value="yungangshiku">大同 · 云冈石窟</option>
-        <option value="xian">西安 · 雁塔</option>
       </select>
       <select id="styleSelect" :value="style" @change="onStyle" title="底图配色">
         <option v-for="o in styleOptions" :key="o.value" :value="o.value">{{ o.label }}</option>
@@ -22,19 +20,22 @@
       <button class="tool-btn" @click="mapCtl.setOblique()">🔜 斜视</button>
       <button class="tool-btn" @click="mapCtl.fitRange()">📐 适配范围</button>
       <button class="tool-btn" id="freeBtn" @click="mapCtl.toggleFree3D()">🧊 自由3D</button>
-      <button class="tool-btn primary" @click="mapCtl.startAdd()">➕ 添加设备</button>
     </div>
 
     <div class="top-right">
       <div class="top-actions">
+        <button class="tool-btn" :class="{ active: dev.state.showOffline }"
+          @click="dev.toggleShowOffline()" title="一键切换：地图是否显示离线/异常设备">
+          {{ dev.state.showOffline ? '🗺 显示离线' : '🗺 隐藏离线' }}
+        </button>
+        <button class="tool-btn primary" @click="goOps('device-info.html')">🛠 设备管理</button>
+        <button class="tool-btn" @click="goOps('device-config.html')">📡 计数启流</button>
+        <button class="tool-btn" @click="goOps('business-rules.html')">⚙ 业务规则</button>
+        <span class="spacer"></span>
         <button class="top-action" @click="toggleTheme"
           :title="theme === 'dark' ? '切换到浅色模式' : '切换到深色模式'">
           <span class="ta-ic">{{ theme === 'dark' ? '☀️' : '🌙' }}</span>
           <span class="ta-lb">{{ theme === 'dark' ? '浅色模式' : '深色模式' }}</span>
-        </button>
-        <button class="top-action" @click="rulesOpen = true"
-          title="业务规则配置（计数/告警/拥挤/警力/预测/异常/跟踪）">
-          <span class="ta-ic">⚙</span><span class="ta-lb">业务规则</span>
         </button>
       </div>
       <div class="clock-panel">
@@ -45,30 +46,22 @@
             <span class="clock-week" ref="weekEl">周-</span>
           </div>
         </div>
-        <div class="clock-divider"></div>
-        <div class="clock-status">
-          <span><i class="ws-dot" :class="rt.state.wsBackend ? 'on' : 'off'"></i>后端WS</span>
-          <span><i class="ws-dot" :class="rt.state.restMode ? 'on' : 'off'"></i>REST兜底</span>
-        </div>
       </div>
     </div>
   </div>
-
-  <BusinessRulesPanel :open="rulesOpen" @close="rulesOpen = false" />
 </template>
 
 <script setup>
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { useMapControl } from '../composables/useMapControl.js'
-import { useRealtime } from '../composables/useRealtime.js'
 import { useTheme } from '../composables/useTheme.js'
-import BusinessRulesPanel from './BusinessRulesPanel.vue'
+import { useDevices } from '../composables/useDevices.js'
+import { API_BASE } from '../api/config.js'
 
 const { mapCtl } = useMapControl()
-const rt = useRealtime()
+const dev = useDevices()
 const { theme, toggleTheme } = useTheme()
 
-const rulesOpen = ref(false)
 const city = ref('datong')
 const style = ref(theme.value === 'dark' ? 'amap://styles/blue' : 'amap://styles/normal')
 const cv = ref(null)
@@ -94,6 +87,11 @@ const styleOptions = computed(() => STYLE_OPTIONS[theme.value] || STYLE_OPTIONS.
 
 function onCity(e) { city.value = e.target.value; mapCtl.changeCity(e.target.value) }
 function onStyle(e) { style.value = e.target.value; mapCtl.changeStyle(e.target.value) }
+
+/** 打开后端运维页面 (设备管理 / 计数启流 / 业务规则), 新标签页以免丢失大屏 */
+function goOps(file) {
+  window.open(`${API_BASE}/static/${file}`, '_blank')
+}
 
 // 主题切换时，底图配色选择器回到当前主题的默认样式（实际换瓦片由 MapPanel 的 theme watch 完成）
 watch(theme, (t) => {

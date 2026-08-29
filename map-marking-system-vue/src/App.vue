@@ -10,7 +10,7 @@
     <StatBoard />
 
     <!-- 底部操作提示 -->
-    <div class="op-tip">右键拖动旋转 · 滚轮缩放 · 左键平移 · 点「➕ 添加设备」后单击地图落点</div>
+    <div class="op-tip">右键拖动旋转 · 滚轮缩放 · 左键平移 · 点击标点查看设备详情</div>
 
     <!-- 全局 Toast 与加载遮罩 -->
     <ToastHost />

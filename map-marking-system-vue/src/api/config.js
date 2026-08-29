@@ -8,9 +8,11 @@
  * 前端所有 REST 请求与实时推送均发往后端 8000。
  */
 
-// 业务后端基地址（生产替换为真实域名，如 https://dashboard.example.com）
-// 默认值对齐 api(5).md §3.6 示例宿主 172.16.168.9；可用 VITE_API_BASE 覆盖。
-export const API_BASE = import.meta.env.VITE_API_BASE || 'http://172.16.168.9:8000'
+// 业务后端基地址。优先级：
+//   1. VITE_API_BASE 环境变量（跨域部署时显式指定）；
+//   2. 同源地址（默认）：开发环境经 vite.config.js 代理转发到后端 8000（localhost/局域网 IP 均可用）；
+//      生产同源部署（页面由后端/网关提供）时直接命中后端。
+export const API_BASE = import.meta.env.VITE_API_BASE || location.origin
 
 // AI 分析服务基地址（v0.11.0：AI 服务不对前端开放，前端不连接此地址）。
 // 仅保留常量以兼容可能的内部/调试用途，正常前端链路不使用。
@@ -32,9 +34,9 @@ export const USE_MOCK =
 // 优雅降级开关：仅当真实接口调用【失败】时，自动回退到内置 Mock 数据。
 // 成功响应不会被替换，因此完全不影响真实接口对接；
 // 用于「后端挂了 / 网络异常 / 返回空体」时，保证页面列表/详情/表单交互仍可完整流畅运行。
-//   - 默认开启（接口不可用时自动兜底）；
-//   - 关闭：VITE_MOCK_FALLBACK=false 或 URL 加 ?fallback=0；
-//   - 强制开启：?fallback=1。
+//   - 默认关闭（接口不可用时不回退，直连真实后端；避免 mock 假数据伪装成真实数据）；
+//   - 开启：VITE_MOCK_FALLBACK=true 或 URL 加 ?fallback=1；
+//   - 强制关闭：?fallback=0。
 const _qp = new URLSearchParams(location.search)
 const _fb = _qp.get('fallback')
 export const MOCK_FALLBACK =

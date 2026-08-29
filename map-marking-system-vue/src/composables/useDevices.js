@@ -22,7 +22,8 @@ const state = reactive({
   statsById: {},      // { [deviceId]: 实时计数 }
   positions: {},      // { [deviceId]: {lng,lat} } 前端地图落点（文档无此字段）
   loading: false,
-  selectedId: null
+  selectedId: null,
+  showOffline: true   // 是否在地图显示离线/异常设备（一键切换）
 })
 
 // 用户手动拖拽过的设备：WS 经纬度落点不覆盖其手动位置（仅前端交互用）
@@ -220,11 +221,17 @@ function setPosition(id, lng, lat) {
 
 function select(id) { state.selectedId = id }
 
+/** 一键切换：地图是否显示离线/异常设备（只显示 online 设备时返回 false） */
+function toggleShowOffline() {
+  state.showOffline = !state.showOffline
+  return state.showOffline
+}
+
 /** 合并后的设备视图（含实时计数） */
 function merged() {
   return state.devices.map((d) => ({ ...d, stat: state.statsById[d.id] || null }))
 }
 
 export function useDevices() {
-  return { state, load, refreshStats, applyWsDevices, create, remove, configure, setPosition, select, merged }
+  return { state, load, refreshStats, applyWsDevices, create, remove, configure, setPosition, select, merged, toggleShowOffline }
 }
