@@ -12,6 +12,7 @@ from typing import Optional
 
 import yaml
 
+from ...common import device_info
 from ...common.business_rules import get_rule
 from ...common.config import settings
 from ...common.logger import logger
@@ -24,13 +25,21 @@ _PLAN_KEY = f"{settings.redis_prefix}:police:plan:latest"
 
 # 设备配置 key (含 name 等注册信息, 见 devices.py)
 _DEVICE_CFG_PREFIX = f"{settings.redis_prefix}:device:"
-# 设备经纬度映射缓存: 名称(去空格) -> (longitude, latitude) (来自 data/device_geo.json)
+# 设备经纬度映射缓存: 名称(去空格) -> (longitude, latitude)
+# 优先来自 MySQL 设备信息表 (运维页面可增删改查); 未启用/未加载时回落旧 device_geo.json
 _GEO_FILE = Path(__file__).resolve().parents[3] / "data" / "device_geo.json"
 _geo_cache: Optional[dict] = None
 
 
 def _load_device_geo() -> dict:
-    """加载 data/device_geo.json (名称去空格), 返回 {名称: (经度, 纬度)}."""
+    """返回 {名称(去空格): (经度, 纬度)}.
+
+    优先读 MySQL 设备信息表内存缓存 (已迁入, 运维页面维护); 未启用/未加载
+    (本地开发, MYSQL_ENABLED=false) 时回落旧 device_geo.json.
+    """
+    cached = device_info.geo_map()
+    if cached:
+        return cached
     global _geo_cache
     if _geo_cache is None:
         try:

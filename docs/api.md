@@ -193,18 +193,17 @@ GET /api/devices
     "longitude": 116.397128,
     "latitude": 39.916527,
     "category": "城墙出入口便道监控点位",
-    "category": "城墙出入口便道监控点位",
   }
 ]
 ```
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `longitude` | float \| null | 设备经度（按设备名称匹配 `data/device_geo.json`，未匹配为 `null`）|
+| `longitude` | float \| null | 设备经度（按设备名称匹配设备信息表 `device_info`，未匹配为 `null`）|
 | `latitude` | float \| null | 设备纬度（同上）|
-| `category` | string \| null | 点位分类（按设备名称匹配 `data/device_category.json`，未匹配为 `null`）|
+| `category` | string \| null | 点位分类（同上）|
 
-> 经纬度用于前端地图打点。匹配规则：以设备 `name` 精确匹配地理库；匹配不到的设备经纬度为 `null`。
+> 经纬度/分类用于前端地图打点与卡片展示。匹配规则：以设备 `name` 去空格后匹配 `device_info` 表（MySQL，数据源自 `data/device_geo.json` + `data/device_category.json` 固化导入，运维页面可增删改查；MySQL 未启用时回落 JSON）；匹配不到为 `null`。
 
 ### 3.3 删除设备
 
@@ -231,7 +230,7 @@ DELETE /api/devices/{device_id}
 ### 3.4 WVP 设备同步
 
 手动触发一次 WVP 设备同步（与后台 `wvp_sync` 定时任务同一逻辑，需 `WVP_ENABLED=true`）。
-新增通道入表 `status=synced`（不自动启流）；WVP 侧离线则停 AI pipeline 并标 `offline`；恢复则重新启流。
+新增通道仅登记 `device_info` 表已注册设备（`status=synced`，不自动启流）；未注册通道跳过（不拉流/不计数）；已入表但 `device_info` 不再注册则停 AI pipeline 并从设备表移除；WVP 侧离线则停 AI pipeline 并标 `offline`；恢复则重新启流。
 
 ```
 POST /api/devices/sync
@@ -257,7 +256,7 @@ GET /api/devices/{device_id}/stream
 { "device_id": "GB-34020000001320000001-34020000001320000002", "stream_url": "http://zlm/live/xxx.flv", "stream_id": "xxx", "longitude": 116.397128, "latitude": 39.916527 }
 ```
 
-> `longitude` / `latitude`：按设备名称匹配 `data/device_geo.json`，未匹配为 `null`（同 §3.2）。
+> `longitude` / `latitude`：按设备名称匹配 `device_info` 表，未匹配为 `null`（同 §3.2）。
 
 **错误** `503` WVP 未启用 / `404` 设备不存在 / `400` 非 WVP 同步设备 / `502` WVP 点播失败。
 
@@ -395,6 +394,74 @@ await fetch(`http://backend:8000/api/devices/${deviceId}/enable`, {
 
 > ⚠️ 计数线应画在车流/人流**必经的截面**上（如门口、路口横截面），锚点点击在你想计为"Enter（进）"的那一侧。详见 §11.3 方向判定逻辑。
 
+### 3.9 设备信息管理（device-info，运维页面）
+
+独立于展示链路的运维 CRUD 接口，管理 MySQL `device_info` 表（设备名称/经纬度/分类/点位编号/区域）。展示链路（设备列表 §3.2、统计 §4、WebSocket §9）读取同一份内存缓存，CRUD 后立即生效。配套运维页面 `http://<backend-host>:8000/static/device-info.html`（由 `device-config.html` 链接进入）。
+
+> **数据来源**：`device_info` 表为空时，后端启动自动从 `data/device_geo.json` + `data/device_category.json` 种子导入（云冈类/JTKK 设备不入库），`point_id`（设备名称汉字前编号）已固化在 `device_category.json`，无需再读 Excel。
+> **MySQL 未启用**（`MYSQL_ENABLED=false`）时全部返回 `503`。
+> **WVP 联动**：新增/变更/删除设备后自动触发一次 WVP 同步（后台任务），新注册设备若与 WVP 在线通道同名则立即入表（见 §3.4）。
+
+#### GET /api/device-info
+
+返回全部设备信息（运维表格）。
+
+**响应** `200 OK`
+
+```json
+[
+  {
+    "id": 1,
+    "name": "GAJK-2648和阳南门出口路南以东85米",
+    "point_id": "GAJK-2648",
+    "category": "城墙出入口便道监控点位",
+    "longitude": 113.312302,
+    "latitude": 40.090118,
+    "status": "已验证",
+    "region": "大同古城",
+    "updated_at": "2026-08-29T10:00:00"
+  }
+]
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `point_id` | string \| null | 点位编号（设备名称汉字前编号，如 `GAJK-2648`）|
+| `category` | string \| null | 点位分类 |
+| `longitude` / `latitude` | float \| null | 设备经纬度 |
+| `status` | string \| null | 验证状态（已验证/待验证）|
+| `region` | string \| null | 区域（默认 大同古城）|
+
+#### POST /api/device-info
+
+新增设备信息（`name` 唯一，去空格匹配，同名覆盖）。云冈类设备（`point_id` 或名称以 `JTKK` 开头、或名称含"云冈"）返回 `400`。
+
+**请求体**
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `name` | string | ✅ | 设备名称（唯一）|
+| `point_id` | string | ❌ | 点位编号（如 `GAJK-2648`）|
+| `category` | string | ❌ | 点位分类 |
+| `longitude` | float | ❌ | 经度（-180~180）|
+| `latitude` | float | ❌ | 纬度（-90~90）|
+| `status` | string | ❌ | 验证状态 |
+| `region` | string | ❌ | 区域（默认 大同古城）|
+
+**响应** `201 Created` → `{ "status": "created", "name": "<归一化名称>" }`
+
+#### PUT /api/device-info/{name}
+
+更新设备信息（未传字段保留原值）。`404` 设备不存在。
+
+**响应** `200 OK` → `{ "status": "updated", "name": "<归一化名称>" }`
+
+#### DELETE /api/device-info/{name}
+
+删除设备信息。删除后下次 WVP 同步自动停 AI 管道并从设备表移除对应设备（见 §3.4）。`404` 设备不存在。
+
+**响应** `200 OK` → `{ "status": "deleted", "name": "<归一化名称>" }`
+
 ---
 
 ## 4. 实时统计 API
@@ -522,9 +589,9 @@ GET /api/stats/devices
 | `status` | string | 设备状态（`online`/`offline`/`synced`/`registered`）|
 | `max_vehicles` | int \| null | 车辆拥挤阈值（未配置为 `null`，见 §4.4）|
 | `max_persons` | int \| null | 人流拥挤阈值（未配置为 `null`，见 §4.4）|
-| `longitude` | float \| null | 设备经度（按设备名称匹配 `data/device_geo.json`，未匹配为 `null`）|
+| `longitude` | float \| null | 设备经度（按设备名称匹配 `device_info` 表，未匹配为 `null`）|
 | `latitude` | float \| null | 设备纬度（同上）|
-| `category` | string \| null | 点位分类（按设备名称匹配 `data/device_category.json`，未匹配为 `null`）|
+| `category` | string \| null | 点位分类（同上）|
 | `current_vehicles` | int | 该设备当前在场车辆数 |
 | `current_persons` | int | 该设备当前在场人员数 |
 | `today_vehicle_in` | int | 该设备今日车辆进入累计 |
@@ -925,7 +992,7 @@ GET /api/prediction/health
 
 基于「区域注册 + 总警力设置 + 三阶段分配算法」（需求计算 → 比例分配+最小保障 → 贪心最近优先调度），自动产出各区域目标警力与调动方案。所有接口挂载在 `/api/police` 下。
 
-> **摄像头就近归区**：分配计算时，每个摄像头（注册名称匹配 `data/device_geo.json` 且有经纬度者）自动归属**距离最近的区域中心**（最近邻分类），区域在場人数 = 归属该区域的摄像头人数之和；区域无归属摄像头且显式 `device_id` 绑定设备有数据时以绑定设备兜底。
+> **摄像头就近归区**：分配计算时，每个摄像头（注册名称匹配 `device_info` 表且有经纬度者）自动归属**距离最近的区域中心**（最近邻分类），区域在場人数 = 归属该区域的摄像头人数之和；区域无归属摄像头且显式 `device_id` 绑定设备有数据时以绑定设备兜底。
 
 ### 7.1 注册警力区域
 
@@ -986,7 +1053,7 @@ GET /api/police/regions
 ]
 ```
 
-> 📌 `longitude` / `latitude` 为区域实际经纬度（前端地图标注区域用）；`center_x` / `center_y` 为归一化坐标（警力调度移动距离计算用）。默认 4 区域配置来自 `configs/police.yaml`（按 `data/device_geo.json` 城墙方位聚类）。
+> 📌 `longitude` / `latitude` 为区域实际经纬度（前端地图标注区域用）；`center_x` / `center_y` 为归一化坐标（警力调度移动距离计算用）。默认 4 区域配置来自 `configs/police.yaml`（按设备信息表经纬度，即 `data/device_geo.json` 数据，城墙方位聚类）。
 
 ### 7.3 删除区域
 

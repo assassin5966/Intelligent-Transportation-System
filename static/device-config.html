@@ -46,6 +46,12 @@
 
 <h1>设备计数配置工具</h1>
 
+<div class="nav" style="margin-bottom:12px;">
+  <a href="/static/device-config.html">设备计数配置</a>
+  <a href="/static/device-info.html">设备信息管理</a>
+  <a href="/static/business-rules.html">业务规则配置</a>
+</div>
+
 <div class="row">
   <label>后端地址</label>
   <input id="baseUrl" value="http://localhost:8000" style="width:240px">
@@ -94,6 +100,7 @@
   画完后点「启流计数」提交配置并启动 AI 推理管道。
 </div>
 
+<script src="config.js"></script>
 <script>
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
@@ -106,6 +113,10 @@ let img = null;
 let clicks = []; // [{x, y}] 前两个=线端点, 第三个=锚点
 let roiClicks = []; // [{x, y}] ROI 多边形顶点
 let isRoiMode = false;
+
+// 后端地址默认取 static/config.js 配置; 未配置则同源(页面由后端 /static 提供)
+baseUrl = ((window.OPS_CONFIG && window.OPS_CONFIG.API_BASE) || window.location.origin).replace(/\/$/, '');
+document.getElementById('baseUrl').value = baseUrl;
 
 function api(path, options = {}) {
   return fetch(baseUrl + path, options).then(async r => {

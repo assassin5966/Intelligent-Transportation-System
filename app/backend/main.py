@@ -11,7 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from ..common.config import settings
 from ..common.logger import logger
 from ..common.redis_client import close_redis
-from .api import alerts, config_rules, devices, events, police, stats, ws
+from .api import alerts, config_rules, device_info, devices, events, police, stats, ws
 
 
 @asynccontextmanager
@@ -71,6 +71,19 @@ async def lifespan(app: FastAPI):
         archive_started = True
     except Exception as e:  # noqa: BLE001
         logger.warning(f"MySQL 归档调度器未启动: {e}")
+
+    # 设备信息表 (名称/经纬度/分类): MySQL 建表 + 空表种子导入 (排除云冈类) + 加载内存缓存.
+    # 展示链路经 geo_by_name/category_by_name 读缓存; MySQL 未启用时回落到 JSON, 不阻塞启动.
+    try:
+        from ..common import device_info as device_info_store
+
+        if settings.mysql_enabled:
+            await device_info_store.ensure_table()
+            # 表空时统一初始化: device_geo.json (经纬度/状态) + device_category.json (分类/点位编号) 种子导入 (排除云冈类)
+            await device_info_store.initialize_if_empty()
+            await device_info_store.reload_cache()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"设备信息表初始化失败: {e} (展示链路将回落 JSON)")
 
     yield
 
@@ -145,6 +158,7 @@ app.include_router(stats.router)
 app.include_router(events.router)
 app.include_router(alerts.router)
 app.include_router(devices.router)
+app.include_router(device_info.router)
 app.include_router(police.router)
 app.include_router(ws.router)
 app.include_router(config_rules.router)

@@ -12,6 +12,7 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel
 
+from ...common import device_info
 from ...common.config import settings
 from ...common.logger import logger
 from ...common.redis_client import get_redis
@@ -98,11 +99,17 @@ def _load_geo() -> dict:
 def geo_by_name(name: str) -> tuple[Optional[float], Optional[float]]:
     """按设备名称查经纬度, 未匹配到返回 (None, None).
 
+    优先读 MySQL 设备信息表 (已迁入, 运维页面可增删改查); 未启用/未加载时
+    回落旧 device_geo.json (兼容本地开发, 只读不写).
+
     匹配时忽略空格: device_geo.json 的设备名为 'GAJK-2648和阳南门出口路南以东85米'
     (无空格), 而注册名可能带空格, 与 allocator 的去空格匹配保持一致.
 
     供设备 API 与统计/WebSocket 推送共用 (前端地图打点).
     """
+    row = device_info.get(name)
+    if row is not None:
+        return row["longitude"], row["latitude"]
     geo = _load_geo().get((name or "").replace(" ", ""))
     if not geo:
         return None, None
@@ -116,27 +123,41 @@ _CATEGORY_FILE = Path(__file__).resolve().parents[3] / "data" / "device_category
 
 
 def _load_categories() -> dict:
-    """加载设备点位分类映射 (带模块级缓存, 首次读取后复用)."""
+    """加载设备点位分类映射 (带模块级缓存, 首次读取后复用).
+
+    值兼容两种形态 (归一化为 {名称: 分类字符串}):
+      - 旧版字符串: "设备名": "分类"
+      - 新版对象:   "设备名": {"category": "分类", "point_id": "GAJK-2648"}
+    """
     global _category_cache
     if _category_cache is None:
+        raw: dict = {}
         try:
             if _CATEGORY_FILE.exists():
-                _category_cache = json.loads(_CATEGORY_FILE.read_text(encoding="utf-8"))
-            else:
-                _category_cache = {}
+                raw = json.loads(_CATEGORY_FILE.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError) as e:
             logger.warning(f"读取 device_category.json 失败: {e}")
-            _category_cache = {}
+        _category_cache = {}
+        for name, val in raw.items():
+            if name.startswith("_"):
+                continue  # 元信息键 (如 _meta)
+            _category_cache[name] = val.get("category") if isinstance(val, dict) else val
     return _category_cache
 
 
 def category_by_name(name: str) -> Optional[str]:
     """按设备名称查点位分类, 未匹配到或分类为空返回 None.
 
+    优先读 MySQL 设备信息表 (已迁入, 运维页面可增删改查); 未启用/未加载时
+    回落旧 device_category.json (兼容本地开发, 只读不写).
+
     匹配时忽略空格 (同 geo_by_name).
 
     供设备 API 与统计/WebSocket 推送共用 (前端设备卡片分类展示).
     """
+    row = device_info.get(name)
+    if row is not None:
+        return row["category"]
     cat = _load_categories().get((name or "").replace(" ", ""))
     return cat or None
 

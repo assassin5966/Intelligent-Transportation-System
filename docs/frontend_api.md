@@ -122,8 +122,8 @@
 | `status` | string | 设备状态：`online` / `offline` / `synced` / `registered` |
 | `max_vehicles` | int \| null | 车辆拥挤阈值（未配置为 `null`，`>0` 才做车辆拥挤判断）|
 | `max_persons` | int \| null | 人流拥挤阈值（未配置为 `null`，`>0` 才做人流拥挤判断）|
-| `longitude` / `latitude` | float \| null | 设备经纬度（按设备名称匹配地理库，未匹配为 `null`）|
-| `category` | string \| null | 点位分类（如「城墙出入口便道监控点位」「城墙入口车辆卡口点位」，按设备名称匹配 `data/device_category.json`，未匹配为 `null`）|
+| `longitude` / `latitude` | float \| null | 设备经纬度（按设备名称匹配 `device_info` 表，未匹配为 `null`）|
+| `category` | string \| null | 点位分类（如「城墙出入口便道监控点位」「城墙入口车辆卡口点位」，按设备名称匹配 `device_info` 表，未匹配为 `null`）|
 | `current_vehicles` / `current_persons` | int | 该设备当前在场车辆数 / 人员数 |
 | `today_*` | int | 该设备今日进出累计（`today_vehicle_in/out`、`today_person_in/out`）|
 | `hour` | int | 当前小时（0-23）|
@@ -250,8 +250,8 @@ GET /api/stats/hourly/history?device_id={device_id}&start_date={start}&end_date=
 | 时间格式 | ISO 8601（含时区），如 `2026-08-02T14:05:00+00:00` |
 | 设备状态 | `online`（计数中）/ `offline`（WVP 离线）/ `synced`（已同步未启流）/ `registered`（已注册未启流）|
 | `camera_type` | `vehicle`=只计机动车，`person`=只计人流（含非机动车），空=全检测 |
-| 经纬度 | 按设备**名称**匹配地理库，未匹配为 `null`；前端应做空值兜底 |
-| 点位分类 | `category` 按设备**名称**匹配 `data/device_category.json`（由设备信息汇总表提取），未匹配为 `null`，前端按 `null` 显示「未分类」 |
+| 经纬度 | 按设备**名称**匹配 `device_info` 表（数据源自 `data/device_geo.json` 固化导入，未启用 MySQL 时回落 JSON），未匹配为 `null`；前端应做空值兜底 |
+| 点位分类 | `category` 按设备**名称**匹配 `device_info` 表（数据源自 `data/device_category.json` 固化导入），未匹配为 `null`，前端按 `null` 显示「未分类」 |
 | 拥挤度 | `congestion_score` 0-1 连续分（色阶展示）；`congested` 综合布尔。判定：配置 `max_vehicles` 才判车辆拥挤、配置 `max_persons` 才判人流拥挤，两者都配置则按权重（默认 0.5/0.5）加权综合，均未配置则 `congested=false`、`congestion_score=0` |
 
 ---

@@ -14,6 +14,7 @@ from typing import Optional
 
 import httpx
 
+from ...common import device_info
 from ...common.config import settings
 from ...common.logger import logger
 from ...common.redis_client import get_redis
@@ -32,6 +33,16 @@ def _infer_camera_type(name: str) -> Optional[str]:
     if "车" in name or "vehicle" in lower:
         return "vehicle"
     if "人" in name or "person" in lower:
+        return "person"
+    return None
+
+
+def _camera_type_from_category(category: Optional[str]) -> Optional[str]:
+    """按 device_info 点位分类推断 camera_type (卡口/车→vehicle, 便道/人→person)."""
+    cat = category or ""
+    if "卡口" in cat or "车" in cat:
+        return "vehicle"
+    if "便道" in cat or "人" in cat:
         return "person"
     return None
 
@@ -140,12 +151,21 @@ async def sync_once() -> dict:
     running = await _get_ai_running_devices()
     added = started = stopped = recovered = 0
 
-    # 3. 新增通道: 入表 status=synced, 不启流
+    # device_info 已启用时, 启流/入表仅限其注册设备 (其余 WVP 通道不参与拉流/绘制计数)
+    filter_registered = device_info.cache_size() > 0
+
+    # 3. 新增通道: 仅登记 device_info 已注册设备, 其余跳过 (不拉流/不绘制计数)
     for (gb_dev, gb_ch), name in wvp_channels.items():
         if (gb_dev, gb_ch) in local:
             continue
+        if filter_registered and not device_info.is_registered(name):
+            logger.info(f"[WVP同步] 通道 {name} 未在 device_info 注册, 跳过 (不参与拉流/计数)")
+            continue
         device_id = f"GB-{gb_dev}-{gb_ch}"
         camera_type = _infer_camera_type(name)
+        if not camera_type:
+            pt = device_info.get(name)
+            camera_type = _camera_type_from_category(pt.get("category") if pt else None)
         await redis.hset(
             _DEVICE_KEY_PREFIX + device_id,
             mapping={
@@ -169,6 +189,14 @@ async def sync_once() -> dict:
     for (gb_dev, gb_ch), data in local.items():
         device_id = data.get("id", "")
         status = data.get("status", "")
+        # 4.0 非 device_info 注册设备: 停止拉流并从设备表移除 (不参与绘制计数/拉流)
+        if filter_registered and not device_info.is_registered(data.get("name", "")):
+            if status in ("online", "synced") or device_id in running:
+                await _stop_ai_pipeline(device_id)
+            await redis.delete(_DEVICE_KEY_PREFIX + device_id)
+            stopped += 1
+            logger.warning(f"[WVP同步] 设备 {device_id} ({data.get('name', '')}) 未在 device_info 注册, 已停止拉流并移除")
+            continue
         has_line = bool(data.get("line_coords"))
         in_wvp = (gb_dev, gb_ch) in wvp_channels
 

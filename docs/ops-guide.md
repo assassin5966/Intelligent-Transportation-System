@@ -590,10 +590,14 @@ WVP (GB28181) ──→ 后端定时同步 ──→ Redis 设备表 ──→ �
 
 | 情况 | 操作 |
 |------|------|
-| WVP 新通道 | 入表 `status=synced`，**不启流**（等待用户画线配置） |
+| WVP 新通道（已在 `device_info` 注册）| 入表 `status=synced`，**不启流**（等待用户画线配置） |
+| WVP 新通道（未在 `device_info` 注册）| 跳过，不登记、不拉流、不计数 |
+| 已入表但 `device_info` 不再注册 | 停 AI 管道并从设备表移除 |
 | WVP 已离线 | 停 AI 管道，标 `status=offline` |
 | WVP 恢复在线 | `play/start` 拿流地址 → 启 AI 管道 |
 | 在线但 AI 侧没跑（WVP/ZLM 重启后） | 重新 `play/start` → 重新启流 |
+
+> `device_info` 表有数据即启用"仅注册设备"过滤：WVP 通道名去空格后必须与 `device_info.name` 一致才参与拉流/计数（见 `device_info.is_registered()`）。
 
 ### 阶段二：用户配置启流
 
@@ -1030,10 +1034,11 @@ awk -F'|' '{print $2}' logs/$(date +%Y-%m-%d).log | sort | uniq -c | sort -rn
 同步逻辑：
 1. 拉取 WVP 全量在线设备/通道
 2. 与本地 Redis 设备表按 `gb_device_id + gb_channel_id` 比对
-3. 新通道：入表（status=synced），不启流（缺计数线）
-4. 已配置 + WVP 在线 + AI 管道未运行：重新启流
-5. WVP 离线：停 AI 管道，标记 offline
-6. WVP 恢复：重新启流
+3. 新通道：仅 `device_info` 表注册设备入表（status=synced），未注册跳过；不启流（缺计数线）
+4. 已入表但 `device_info` 不再注册：停 AI 管道并移除
+5. 已配置 + WVP 在线 + AI 管道未运行：重新启流
+6. WVP 离线：停 AI 管道，标记 offline
+7. WVP 恢复：重新启流
 
 **手动同步**：
 
@@ -1163,8 +1168,8 @@ regions:
     device_id: "GB-xxx-xxx"                  # 关联摄像头（读取在场人数）
 ```
 
-> - 项目内置默认 4 区域（东-和阳门/南-永泰门/西-清远门/北-武定门），中心坐标与经纬度按 `data/device_geo.json` 城墙方位聚类生成。
-> - **摄像头就近归区**：分配计算时，每个摄像头（名称匹配 `device_geo.json` 有经纬度者）自动归属**距离最近的区域中心**，区域在場人数 = 归属该区域的摄像头人数之和。无需为每个区域手动绑定 `device_id`；某区域无归属摄像头且显式绑定的设备有数据时，以绑定设备兜底。
+> - 项目内置默认 4 区域（东-和阳门/南-永泰门/西-清远门/北-武定门），中心坐标与经纬度按设备信息表经纬度（即 `data/device_geo.json` 数据）城墙方位聚类生成。
+> - **摄像头就近归区**：分配计算时，每个摄像头（名称匹配 `device_info` 表有经纬度者）自动归属**距离最近的区域中心**，区域在場人数 = 归属该区域的摄像头人数之和。无需为每个区域手动绑定 `device_id`；某区域无归属摄像头且显式绑定的设备有数据时，以绑定设备兜底。
 > - 加载逻辑：仅当 Redis 中**尚无对应数据**时写入（HSETNX/SETNX），**不覆盖** API 动态配置。改文件后重启后端生效，但已存在的区域/总警力以 Redis 为准。
 > - 若需全部重新加载，先删掉 Redis 中对应键（`sc:police:regions` / `sc:police:total`）再重启后端。
 > - `GET /api/police/regions` 同时返回 `longitude`/`latitude`（实际经纬度）与 `center_x`/`center_y`（归一化坐标）。

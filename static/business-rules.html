@@ -64,11 +64,13 @@
 
 <div class="nav">
   <a href="/static/device-config.html">← 设备计数配置</a>
+  <a href="/static/device-info.html">设备信息管理</a>
+  <a href="/static/business-rules.html">业务规则配置</a>
 </div>
 
 <div class="row">
   <label>后端地址</label>
-  <input id="baseUrl" value="http://localhost:8000" style="width:240px">
+  <input id="baseUrl" value="" style="width:240px">
   <button onclick="loadRules()">加载配置</button>
   <button class="danger" onclick="resetAll()">全部恢复默认</button>
   <button id="saveBtn" disabled onclick="saveRules()">保存并热重载</button>
@@ -205,7 +207,7 @@ function render(groups) {
     card.innerHTML = html;
     wrap.appendChild(card);
   });
-  document.querySelectorAll('input[type="number"]').forEach(markDirty);
+  document.querySelectorAll('input[data-group]').forEach(markDirty);
 }
 
 function onChange(inp) {

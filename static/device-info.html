@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>设备信息管理 - 运维工具</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: system-ui, sans-serif; background: #1a1a2e; color: #e0e0e0; padding: 20px; }
+  h1 { font-size: 18px; margin-bottom: 16px; color: #8be9fd; }
+  .nav { margin-bottom: 16px; }
+  .nav a { color: #8be9fd; font-size: 13px; text-decoration: none; margin-right: 16px; }
+  .nav a:hover { text-decoration: underline; }
+  .row { display: flex; gap: 12px; margin-bottom: 14px; align-items: center; flex-wrap: wrap; }
+  input, select, button {
+    padding: 6px 12px; border: 1px solid #444; border-radius: 4px;
+    background: #2a2a4e; color: #e0e0e0; font-size: 14px;
+  }
+  input:focus, select:focus { outline: none; border-color: #8be9fd; }
+  button { cursor: pointer; background: #0d7377; border: none; }
+  button:hover { background: #14a085; }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  button.danger { background: #c0392b; }
+  button.danger:hover { background: #e74c3c; }
+  .panel { background: #232344; border: 1px solid #333; border-radius: 8px; padding: 16px; margin-bottom: 18px; }
+  .panel h2 { font-size: 14px; color: #8be9fd; margin-bottom: 12px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { border: 1px solid #333; padding: 8px 10px; text-align: left; }
+  th { background: #2a2a4e; color: #8be9fd; white-space: nowrap; }
+  tr:hover td { background: #2a2a4e; }
+  td.mono { font-family: monospace; }
+  .empty { text-align: center; color: #888; padding: 24px; }
+  #status { margin-top: 12px; font-size: 14px; min-height: 24px; padding: 10px 14px; border-radius: 6px; font-weight: 500; }
+  #status.success { color: #2ecc71; background: rgba(46,204,113,0.18); border: 1px solid rgba(46,204,113,0.5); }
+  #status.error { color: #ff5e5e; background: rgba(231,76,60,0.18); border: 1px solid rgba(231,76,60,0.5); }
+  #status.info { color: #aaa; background: transparent; border: none; }
+  #status.pending { color: #f1c40f; background: rgba(241,196,15,0.15); border: 1px solid rgba(241,196,15,0.4); }
+  #status.success::before { content: '✓ '; font-weight: bold; }
+  #status.error::before { content: '✗ '; font-weight: bold; }
+  #status.pending::before { content: '⏳ '; }
+  .hint { font-size: 12px; color: #888; margin-top: 8px; line-height: 1.6; }
+  label { font-size: 13px; color: #aaa; }
+  .cat-tag { display: inline-block; background: #2a2a4e; border: 1px solid #444; border-radius: 4px; padding: 2px 8px; }
+</style>
+</head>
+<body>
+
+<h1>设备信息管理 - 运维工具</h1>
+<div class="nav">
+  <a href="/static/device-config.html">← 设备计数配置</a>
+  <a href="/static/device-info.html">设备信息管理</a>
+  <a href="/static/business-rules.html">业务规则配置</a>
+</div>
+
+<div class="row">
+  <label>后端地址</label>
+  <input id="baseUrl" value="http://localhost:8000" style="width:240px">
+  <button onclick="loadList()">刷新列表</button>
+</div>
+
+<div class="panel">
+  <h2>设备信息列表</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>设备名称</th>
+        <th>点位编号</th>
+        <th>点位分类</th>
+        <th>经度</th>
+        <th>纬度</th>
+        <th>状态</th>
+        <th>区域</th>
+        <th>更新时间</th>
+        <th style="width:130px">操作</th>
+      </tr>
+    </thead>
+    <tbody id="tableBody"></tbody>
+  </table>
+  <div class="hint">共 <span id="count">0</span> 条设备信息。设备信息存储在 MySQL <code>device_info</code> 表（已从 device_geo.json / device_category.json 迁入），展示页（地图点位/统计卡片）读取同一份数据，此处增删改查即时生效。</div>
+</div>
+
+<div class="panel">
+  <h2 id="formTitle">新增设备信息</h2>
+  <div class="row">
+    <label>设备名称 *</label>
+    <input id="fName" type="text" placeholder="如 GAJK-2648和阳南门出口路南以东85米" style="width:320px">
+    <label>点位编号</label>
+    <input id="fPointId" type="text" placeholder="如 GAJK-2648" style="width:120px">
+    <label>点位分类</label>
+    <input id="fCategory" type="text" list="catList" placeholder="选择或输入分类" style="width:200px">
+    <datalist id="catList">
+      <option value="城墙出入口便道监控点位"></option>
+      <option value="城墙入口车辆卡口点位"></option>
+      <option value="城墙出口车辆卡口点位"></option>
+    </datalist>
+  </div>
+  <div class="row">
+    <label>经度</label>
+    <input id="fLng" type="number" step="0.000001" placeholder="如 113.312302" style="width:140px">
+    <label>纬度</label>
+    <input id="fLat" type="number" step="0.000001" placeholder="如 40.090118" style="width:140px">
+    <label>状态</label>
+    <select id="fStatus" style="width:120px">
+      <option value="">-</option>
+      <option value="已验证">已验证</option>
+      <option value="待验证">待验证</option>
+    </select>
+    <label>区域</label>
+    <input id="fRegion" type="text" value="大同古城" list="regionList" style="width:120px">
+    <datalist id="regionList">
+      <option value="大同古城"></option>
+    </datalist>
+    <button id="saveBtn" onclick="save()">保存</button>
+    <button id="cancelBtn" onclick="resetForm()" style="display:none" class="danger">取消编辑</button>
+  </div>
+  <div class="hint">设备名称唯一，匹配时忽略空格。云冈类设备（JTKK 卡口）暂不支持入库。</div>
+</div>
+
+<div id="status"></div>
+
+<script src="config.js"></script>
+<script>
+const tableBody = document.getElementById('tableBody');
+const statusEl = document.getElementById('status');
+let baseUrl = '';
+let editingName = null; // 编辑中的设备名称 (null = 新增模式)
+
+// 后端地址默认取 static/config.js 配置; 未配置则同源(页面由后端 /static 提供)
+baseUrl = ((window.OPS_CONFIG && window.OPS_CONFIG.API_BASE) || window.location.origin).replace(/\/$/, '');
+document.getElementById('baseUrl').value = baseUrl;
+
+function setStatus(msg, cls = 'info') {
+  statusEl.textContent = msg;
+  statusEl.className = 'status ' + cls;
+}
+
+function api(path, options = {}) {
+  return fetch(baseUrl + path, options).then(async r => {
+    const text = await r.text();
+    let body;
+    try { body = JSON.parse(text); } catch { body = text; }
+    if (!r.ok) throw new Error(typeof body === 'string' ? body : body.detail || r.statusText);
+    return body;
+  });
+}
+
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({
+    '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'
+  }[c]));
+}
+
+function fmt(v) {
+  return (v === null || v === undefined || v === '') ? '-' : v;
+}
+
+async function loadList() {
+  baseUrl = document.getElementById('baseUrl').value;
+  setStatus('加载设备信息列表...', 'pending');
+  try {
+    const list = await api('/api/device-info');
+    tableBody.innerHTML = '';
+    document.getElementById('count').textContent = list.length;
+    if (!list.length) {
+      tableBody.innerHTML = '<tr><td colspan="10" class="empty">暂无设备信息 (MySQL 未启用时显示为空，请启用 MYSQL_ENABLED)</td></tr>';
+      setStatus('加载完成：0 条', 'success');
+      return;
+    }
+    list.forEach(d => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${d.id}</td>
+        <td class="mono">${esc(d.name)}</td>
+        <td>${fmt(esc(d.point_id))}</td>
+        <td>${d.category ? '<span class="cat-tag">' + esc(d.category) + '</span>' : '-'}</td>
+        <td class="mono">${fmt(d.longitude)}</td>
+        <td class="mono">${fmt(d.latitude)}</td>
+        <td>${fmt(esc(d.status))}</td>
+        <td>${fmt(esc(d.region || '大同古城'))}</td>
+        <td class="mono">${fmt(esc(d.updated_at))}</td>
+        <td>
+          <button onclick='edit(${JSON.stringify(d)})'>编辑</button>
+          <button class="danger" onclick="del('${esc(d.name)}')">删除</button>
+        </td>`;
+      tableBody.appendChild(tr);
+    });
+    setStatus(`加载完成：共 ${list.length} 条设备信息`, 'success');
+  } catch (e) {
+    tableBody.innerHTML = '<tr><td colspan="9" class="empty">加载失败</td></tr>';
+    setStatus('加载失败: ' + e.message, 'error');
+  }
+}
+
+function edit(d) {
+  editingName = d.name;
+  document.getElementById('fName').value = d.name;
+  document.getElementById('fPointId').value = d.point_id || '';
+  document.getElementById('fCategory').value = d.category || '';
+  document.getElementById('fLng').value = d.longitude;
+  document.getElementById('fLat').value = d.latitude;
+  document.getElementById('fStatus').value = d.status || '';
+  document.getElementById('fRegion').value = d.region || '大同古城';
+  document.getElementById('formTitle').textContent = `编辑设备信息: ${d.name}`;
+  document.getElementById('cancelBtn').style.display = '';
+  document.getElementById('fName').focus();
+  window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+}
+
+function resetForm() {
+  editingName = null;
+  ['fName', 'fPointId', 'fCategory', 'fLng', 'fLat'].forEach(id => document.getElementById(id).value = '');
+  document.getElementById('fStatus').value = '';
+  document.getElementById('fRegion').value = '大同古城';
+  document.getElementById('formTitle').textContent = '新增设备信息';
+  document.getElementById('cancelBtn').style.display = 'none';
+}
+
+async function save() {
+  baseUrl = document.getElementById('baseUrl').value;
+  const payload = {
+    name: document.getElementById('fName').value.trim(),
+    point_id: document.getElementById('fPointId').value.trim() || null,
+    category: document.getElementById('fCategory').value.trim() || null,
+    longitude: document.getElementById('fLng').value === '' ? null : Number(document.getElementById('fLng').value),
+    latitude: document.getElementById('fLat').value === '' ? null : Number(document.getElementById('fLat').value),
+    status: document.getElementById('fStatus').value || null,
+    region: document.getElementById('fRegion').value.trim() || null
+  };
+  if (!payload.name) { setStatus('设备名称不能为空', 'error'); return; }
+
+  setStatus(editingName ? '正在更新...' : '正在新增...', 'pending');
+  try {
+    if (editingName) {
+      const { name, point_id, category, longitude, latitude, status, region } = payload;
+      await api('/api/device-info/' + encodeURIComponent(editingName), {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ point_id, category, longitude, latitude, status, region })
+      });
+    } else {
+      await api('/api/device-info', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+    }
+    setStatus(`设备「${payload.name}」已保存`, 'success');
+    resetForm();
+    await loadList();
+  } catch (e) {
+    setStatus('保存失败: ' + e.message, 'error');
+  }
+}
+
+async function del(name) {
+  baseUrl = document.getElementById('baseUrl').value;
+  if (!confirm(`确定删除设备信息「${name}」?`)) return;
+  setStatus('正在删除...', 'pending');
+  try {
+    await api('/api/device-info/' + encodeURIComponent(name), { method: 'DELETE' });
+    setStatus(`设备「${name}」已删除`, 'success');
+    if (editingName === name) resetForm();
+    await loadList();
+  } catch (e) {
+    setStatus('删除失败: ' + e.message, 'error');
+  }
+}
+
+// 初始加载
+loadList();
+</script>
+</body>
+</html>

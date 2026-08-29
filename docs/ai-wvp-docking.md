@@ -181,19 +181,140 @@ return resp.json().get("stream_url", "")
 
 | 场景 | 处理 |
 |------|------|
-| WVP 新通道 | 入表 `status=synced`（不自动启流，缺计数线）|
+| WVP 新通道（已在 device_info 注册）| 入表 `status=synced`（不自动启流，缺计数线）|
+| WVP 新通道（未在 device_info 注册）| 跳过，不登记、不拉流、不计数 |
 | 已配置 + WVP 在线 + AI 未跑 | 重新启流（play/start → 启 AI 管道）|
 | WVP 侧离线 | 停 AI 管道，标 `offline` |
 | WVP 恢复 | 重新 play/start 启流 |
+| 已入表但 device_info 不再注册 | 停 AI 管道并从 Redis 设备表删除 |
 
-- 按 `gb_device_id`+`gb_channel_id` 与本地 Redis 设备表比对
-- `camera_type` 从通道名启发式推断（含「车」→vehicle、含「人」→person）
+### 7.1 注册设备白名单（device_info）
+
+同步、启流、计数**只针对 `device_info` 表注册设备**，`device_info` 是权威白名单，Redis 设备表是运行态副本：
+
+- **比对键**：WVP 返回 `(gb_device_id, gb_channel_id) → 通道名`；`device_info` 表没有 gb 字段，只有 `name`，二者靠**通道名去空格后与 `device_info.name` 完全一致**桥接（`device_info.is_registered(name)`），不是按 gb 映射对比。
+- **过滤开关**：`device_info` 表有数据即启用过滤。通道名不在表内 → 新增时跳过；已在表内但 `device_info` 中删除了 → 下次同步自动停 AI 管道并从 Redis 删除。
+- `camera_type` 先按通道名启发式推断（含「车」→vehicle、含「人」→person），推断不出再按 `device_info.category` 兜底（卡口/车→vehicle，便道/人→person）。
+
+### 7.2 Redis 设备表的写入时机
+
+Redis 设备表（`{prefix}:device:{id}`）存**运行时设备配置**（stream_url、计数线、camera_type、gb 映射、status），写入/更新时机：
+
+| 时机 | 来源 | status |
+|------|------|--------|
+| 手动注册 `POST /api/devices` | 用户提交配置（含直接 stream_url）| `registered` |
+| WVP 同步新增通道 | 自动登记（stream_url 为空，待配置计数线）| `synced` |
+| `POST /api/devices/{id}/enable` | 写计数线/锚点/ROI 等配置 | `online` |
+| AI 心跳（[heartbeat.py](file:///Users/bianwei/Desktop/codes/DT/app/backend/core/heartbeat.py)）| 在线/离线判定 | `online` / `offline` |
+| WVP 同步按在线状态改写 | 恢复/离线 | `online` / `offline` |
 
 ---
 
-## 八、设备注册计数参数
+## 八、部署验证：确认从 WVP 拉取设备成功
 
-WVP 同步设备入表后（`status=synced`），调 `POST /api/devices/{id}/enable` 补计数参数启流：
+按「先 WVP 本身 → 再后端 → 再端到端取流」三层验证。前提：`WVP_ENABLED=true`，后端能访问 WVP API 地址，`device_info` 表已注册好设备。
+
+### 8.1 确认配置
+
+| 环境变量 | 说明 |
+|---------|------|
+| `WVP_ENABLED=true` | 总开关 |
+| `WVP_API_URL=http://<wvp-ip>:18080` | 后端**容器视角**可达地址（容器内不能写 `localhost`；WVP 在宿主机时用 `host.docker.internal` 或网关地址）|
+| `WVP_USERNAME` / `WVP_PASSWORD` | WVP 后台账号密码 |
+
+### 8.2 第 1 层：直接测 WVP API（绕过后端，定位问题在 WVP 还是后端）
+
+与 [wvp_client.py](file:///Users/bianwei/Desktop/codes/DT/app/backend/core/wvp_client.py) 完全一致的流程：
+
+```bash
+# 1. 登录拿 token
+TOKEN=$(curl -s -X POST http://<wvp-ip>:18080/api/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"admin"}' \
+  | python3 -c "import sys,json;print(json.load(sys.stdin)['data']['accessToken'])")
+
+# 2. 拉设备列表（应有 online=true 的国标设备）
+curl -s -H "access-token: $TOKEN" \
+  "http://<wvp-ip>:18080/api/device/query/devices?page=1&count=100"
+
+# 3. 对某在线设备拉通道
+curl -s -H "access-token: $TOKEN" \
+  "http://<wvp-ip>:18080/api/device/query/devices/<deviceId>/channels?page=1&count=100"
+
+# 4. 点播，确认能拿到 flv 地址
+curl -s -H "access-token: $TOKEN" \
+  "http://<wvp-ip>:18080/api/play/start/<deviceId>/<channelId>?streamType=sub"
+```
+
+能拿到 flv → WVP 侧正常；拿不到 → 问题在 WVP 本身（设备不在线、账号错、点播失败）。
+
+### 8.3 第 2 层：确认后端同步链路
+
+1. 后端日志应出现 `WVP 登录成功, token 已缓存`、`WVP 设备同步已启动 (每 30s)`、随后 `[WVP同步] 新增设备 GB-xxx` 或 `通道 xxx 未在 device_info 注册, 跳过`。
+2. 手动触发一次同步（立即看结果，不用等 30s）：
+
+```bash
+curl -X POST http://<backend>:8000/api/devices/sync
+```
+
+- 返回 `{"skipped": "wvp_disabled"}` → `WVP_ENABLED` 未生效，查配置。
+- 返回 `{"added": 0, ...}` 且日志全是"未注册跳过" → 见 8.4。
+
+### 8.4 第 3 层：确认 device_info 与 WVP 通道名匹配（最常见问题）
+
+```bash
+curl -s http://<backend>:8000/api/device-info   # 后端注册设备名
+# 与第 2 步拉到的 WVP 通道名对比（名称去空格后必须一致）
+```
+
+WVP 通道名不在 `device_info` 中 → 该通道被跳过、不拉流。在运维页面 / `POST /api/device-info` 补齐设备即可，等下次同步（或重启）生效。
+
+### 8.5 第 4 层：设备入 Redis + 端到端取流
+
+```bash
+# 1. 设备列表应出现 GB-{gb_dev}-{gb_ch}
+curl -s http://<backend>:8000/api/devices
+
+# 2. 截帧（play/start → ffmpeg 截一帧 → stop_play），返回 JPEG 说明取流链路通
+curl -s -o frame.jpg -w "%{http_code}\n" http://<backend>:8000/api/devices/<GB-id>/snapshot
+
+# 3. 取浏览器可播放地址
+curl -s http://<backend>:8000/api/devices/<GB-id>/play
+```
+
+### 8.6 第 5 层：启流验证 AI 拉流
+
+```bash
+curl -X POST http://<backend>:8000/api/devices/<GB-id>/enable \
+  -H "Content-Type: application/json" \
+  -d '{"line_coords":"0.3,0.5,0.7,0.5","anchor_coords":"0.5,0.6","camera_type":"vehicle"}'
+```
+
+返回 `{"status":"online","stream_url":...}` 后检查 AI：
+
+```bash
+curl -s http://<ai-ip>:8001/devices    # 该设备 running=true
+```
+
+之后 `GET /api/stats/realtime` / WebSocket 即可看到事件与计数。
+
+### 8.7 排查对照
+
+| 现象 | 原因 |
+|------|------|
+| `/api/devices/sync` 返回 `wvp_disabled` | `WVP_ENABLED` 未设 true |
+| 登录报错 / 401 | `WVP_API_URL` 不可达（容器内写 localhost）、账号密码错 |
+| 同步日志全是"未注册,跳过" | WVP 通道名与 device_info 名称不一致 |
+| `/snapshot` 502 截帧失败 | 点播拿不到流（查 8.2 第 4 条）；通道不在线 |
+| `/play` 返回地址浏览器打不开 | WVP 返回 flv 的 host 是容器名，需配 `ZLM_PUBLIC_BASE`/`MEDIAMTX_PUBLIC_BASE` 重写 |
+
+> ⚠️ Mock 模式（`scripts/mock_start.sh` 默认 RTSP mock）强制 `WVP_ENABLED=false`，**不能**验证 WVP 链路；测真实 WVP 需直接跑后端并设置上述环境变量。
+
+---
+
+## 九、设备注册计数参数
+
+WVP 同步设备入表后（`status=synced`），调 `POST /api/devices/{id}/enable` 补计数参数启流。前提：该设备名已在 `device_info` 表注册（见 §7.1）。
 
 | 参数 | 必填 | 说明 | 示例 |
 |------|------|------|------|
@@ -207,7 +328,7 @@ WVP 同步设备入表后（`status=synced`），调 `POST /api/devices/{id}/ena
 
 ---
 
-## 九、端到端调用时序
+## 十、端到端调用时序
 
 ### 首次启流
 
@@ -234,7 +355,7 @@ AI cap.read() 失败
 
 ---
 
-## 十、FAQ
+## 十一、FAQ
 
 **Q：本项目要配哪些 IP/port/ID？**
 只需 `.env` 里 `WVP_API_URL`（WVP 管理地址）、`WVP_USERNAME`/`WVP_PASSWORD`（账号密码），向 WVP 部署方索取。流地址的 IP/port 由 WVP play/start 自动返回，ID 由设备同步自动获取，本项目都不用填。
@@ -254,11 +375,11 @@ AI cap.read() 失败
 
 ---
 
-## 十一、运维工具：设备计数配置页面
+## 十二、运维工具：设备计数配置页面
 
 WVP 同步的设备入表后 `status=synced`，但没有计数线配置，AI 不会启流。计数线必须贴合摄像头实际画面，无法自动推断。运维工具页面提供**截帧 -> 画线 -> 启流**的可视化操作流程。
 
-### 11.1 访问
+### 12.1 访问
 
 backend 启动后，浏览器打开：
 
@@ -268,15 +389,16 @@ http://<backend-host>:8000/static/device-config.html
 
 > 页面是单 HTML 文件（[static/device-config.html](file:///Users/bianwei/Desktop/codes/DT/static/device-config.html)），零依赖零构建，由 backend 的 `/static` 静态服务提供。
 
-### 11.2 前置条件
+### 12.2 前置条件
 
 | 条件 | 说明 |
 |------|------|
 | backend + redis 运行中 | `docker compose -p smartcity up -d backend redis` |
 | `WVP_ENABLED=true` | `.env` 中开启，指向已部署的 WVP 地址 |
 | WVP 后台有在线设备 | IPC 已注册到 WVP 且状态在线 |
+| 设备名已在 device_info 注册 | 通道名与 `device_info.name` 去空格一致，否则同步时被跳过（见 §7.1）|
 
-### 11.3 操作流程
+### 12.3 操作流程
 
 ```
 ① 同步设备          ② 截帧              ③ 画线+锚点          ④ 启流计数
@@ -332,7 +454,7 @@ POST /sync          GET /snapshot        画线(2点)+锚点(1点)   POST /enabl
 - 设备状态变为 `online`（绿边按钮），AI 开始拉流推理计数
 - 事件经 `POST /api/events` 回写后端，`GET /api/stats/realtime` 可查看计数
 
-### 11.4 坐标转换（自动）
+### 12.4 坐标转换（自动）
 
 页面自动处理像素坐标 -> 归一化坐标的转换，用户无需计算：
 
@@ -344,7 +466,7 @@ POST /sync          GET /snapshot        画线(2点)+锚点(1点)   POST /enabl
    -> 归一化 = (200/1280, 400/720) = (0.156, 0.556)
 ```
 
-### 11.5 截帧端点 API
+### 12.5 截帧端点 API
 
 ```
 GET /api/devices/{device_id}/snapshot
@@ -359,7 +481,7 @@ GET /api/devices/{device_id}/snapshot
 | 502 | WVP 点播失败或截帧失败 |
 | 504 | 截帧超时（15s，建议重试）|
 
-### 11.6 测试验证
+### 12.6 测试验证
 
 完整流程已通过端到端测试（Mock WVP + 无头浏览器）：
 
