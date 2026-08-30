@@ -1,0 +1,51 @@
+# 内网瓦片服务器 - Docker Compose 方案
+# ======================================
+# 方案 A: Nginx 静态托管（推荐，最简单）
+#   将 download_tiles.py 下载的瓦片放在 ./tiles 目录下，启动即可。
+#
+# 方案 B: TileServer GL（带瓦片预览和样式编辑）
+#   需准备 MBTiles 文件放在 ./data 目录下。
+#   下载地址: https://openmaptiles.org/downloads/ (需注册)
+#   或从 OSM 导出: https://export.osm2pgsql.org/
+#   docker compose -f docker-compose.yml up tileserver-gl
+#
+# 前端配置:
+#   VITE_TILE_URL=http://<内网IP>:8080/tiles/{z}/{x}/{y}.png
+
+services:
+  # ── 方案 A: Nginx 静态托管瓦片 ──
+  nginx-tiles:
+    image: nginx:alpine
+    container_name: tile-server-nginx
+    ports:
+      - "8080:80"
+    volumes:
+      # 瓦片数据目录（download_tiles.py 的输出目录）
+      - ./tiles:/usr/share/nginx/html/tiles:ro
+      # Nginx 配置
+      - ./nginx-tile.conf:/etc/nginx/conf.d/default.conf:ro
+    restart: unless-stopped
+    # 健康检查
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # ── 方案 B: TileServer GL（可选，支持 MBTiles 和样式编辑） ──
+  tileserver-gl:
+    image: maptiler/tileserver-gl:latest
+    container_name: tile-server-gl
+    ports:
+      - "8081:8080"
+    volumes:
+      # 将 MBTiles 文件放在 ./data 目录下
+      - ./data:/data:ro
+      # 可选：自定义配置文件
+      # - ./tileserver-config.json:/data/config.json:ro
+    environment:
+      - TILESERVER_LOG_LEVEL=info
+    restart: unless-stopped
+    profiles:
+      # 默认不启动，需手动指定: docker compose --profile gl up
+      - gl

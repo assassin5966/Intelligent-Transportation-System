@@ -15,6 +15,7 @@
  *   setOption({ ... })  // 传入完整 ECharts option
  */
 import { ref, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
+import * as echarts from 'echarts'
 
 // —— 深色大屏科技感主题配色（与 main.css CSS 变量对齐）——
 export const CHART_THEME = {
@@ -107,14 +108,10 @@ export function useEcharts(opts = {}) {
   let resizeTimer = null    // 防抖 resize 定时器
   let ro = null             // ResizeObserver（容器尺寸变化时自动 resize）
 
-  // 初始化 ECharts 实例
+  // 初始化 ECharts 实例（通过 npm 包引入，无需 CDN）
   function init() {
     if (!chartRef.value || instance) return
-    if (typeof window.echarts === 'undefined') {
-      console.warn('[useEcharts] window.echarts 未加载，请确认 CDN script 已引入')
-      return
-    }
-    instance = window.echarts.init(chartRef.value, null, {
+    instance = echarts.init(chartRef.value, null, {
       renderer: 'canvas',
       useDirtyRect: true   // 脏矩形优化，提升高频更新性能
     })

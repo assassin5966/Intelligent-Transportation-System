@@ -169,6 +169,8 @@ services:
     volumes:
       - ./map-marking-system-vue/nginx.conf:/etc/nginx/conf.d/default.conf:ro
       - ./map-marking-system-vue/dist:/usr/share/nginx/html:ro
+      # 内网离线地图瓦片（下载自 tile-server/download_tiles.py）
+      - ./tile-server/tiles:/var/www/tiles:ro
     depends_on:
       - backend
 
@@ -195,3 +197,7 @@ volumes:
   redis-data:
   model-cache:
   mysql-data:
+
+networks:
+  default:
+    name: dt_default

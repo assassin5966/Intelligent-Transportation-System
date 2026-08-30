@@ -27,13 +27,12 @@ function applyAttr() {
 applyAttr()
 
 /**
- * 地图底图样式：
- *  - 深色主题 → 高德官方深色底图 amap://styles/bluse
- *  - 浅色主题 → 标准浅色底图 amap://styles/normal
- * 主题切换时由 MapPanel 一并 setMapStyle 处理（需求 #5）
+ * 地图底图样式（内网 Leaflet 离线瓦片）：
+ *  - 由 MapPanel 根据主题读取 VITE_TILE_URL 环境变量加载对应瓦片层
+ *  - 此处仅返回主题标识，供 MapPanel 切换瓦片源
  */
 const mapStyle = computed(() =>
-  theme.value === 'dark' ? 'amap://styles/blue' : 'amap://styles/normal'
+  theme.value === 'dark' ? 'dark' : 'light'
 )
 
 /**

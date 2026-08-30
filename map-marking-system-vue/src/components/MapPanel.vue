@@ -13,15 +13,13 @@
 
 <script setup>
 import { onMounted, onBeforeUnmount, ref, computed, watch } from 'vue'
+import L from 'leaflet'
 import { useDevices } from '../composables/useDevices.js'
 import { useMapControl } from '../composables/useMapControl.js'
 import { useToast } from '../composables/useToast.js'
 import { useTheme } from '../composables/useTheme.js'
 import { CITY_WALL_POINTS, sortPointsByPriority } from '../data/cityWallPoints.js'
 import { TipLayer } from '../utils/tipLayer.js'
-// [临时停用] 点位到点位路径高亮功能 —— roadHighlight 渲染器已整体注释，此处 import 一并停用
-// 恢复方式：取消下面一行的注释即可
-// import { getRoadHighlight, buildAdjacencyEdges } from '../utils/roadHighlight.js'
 import DeviceEditor from './DeviceEditor.vue'
 
 const { state: dev, load, create, remove, configure, setPosition, select } = useDevices()
@@ -29,8 +27,20 @@ const { mapCtl } = useMapControl()
 const { push } = useToast()
 const { theme, mapStyle, overlayColors } = useTheme()
 
-// —— 城市配置（与原大屏一致） ——
-// 凸包算法（Andrew monotone chain）：用城墙点位反推大同古城真实轮廓
+// —— 坐标转换工具（Leaflet 使用 [lat, lng]，数据使用 [lng, lat]）——
+function toLatLng(p) { return [p[1], p[0]] }
+function toLatLngArr(pts) { return pts.map(toLatLng) }
+
+// —— 瓦片图层配置（通过环境变量配置内网瓦片服务器地址）——
+// 深色/浅色可分别配置，未配置时默认使用同一地址
+const TILE_URL_LIGHT = import.meta.env.VITE_TILE_URL_LIGHT || import.meta.env.VITE_TILE_URL || 'http://localhost:8080/tiles/{z}/{x}/{y}.png'
+const TILE_URL_DARK  = import.meta.env.VITE_TILE_URL_DARK  || import.meta.env.VITE_TILE_URL || 'http://localhost:8080/tiles/{z}/{x}/{y}.png'
+const TILE_ATTR = import.meta.env.VITE_TILE_ATTR || ''
+
+let tileLayerLight = null  // 浅色瓦片层
+let tileLayerDark = null   // 深色瓦片层
+
+// —— 城市配置 ——
 function computeHull(pts) {
   const p = pts.slice().sort((a, b) => a[0] - b[0] || a[1] - b[1])
   const n = p.length
@@ -48,25 +58,20 @@ function computeHull(pts) {
   }
   return lower.slice(0, -1).concat(upper.slice(0, -1))
 }
-// bounds 矩形转 4 角多边形（云冈/西安：矩形近似区域）
 function boundsToPolygon(b) {
   const [sw, ne] = b
   return [[sw[0], sw[1]], [ne[0], sw[1]], [ne[0], ne[1]], [sw[0], ne[1]]]
 }
 const CITY = {
   yungangshiku: {
-    center: [113.13589, 40.111345], zoom: 15, pitch: 55,
+    center: [113.13589, 40.111345], zoom: 15,
     bounds: [[113.12589, 40.101345], [113.14589, 40.121345]],
-    // 圈地多边形（矩形近似）
     polygon: boundsToPolygon([[113.12589, 40.101345], [113.14589, 40.121345]])
   },
   datong: {
-    // 大同古城：以「古城范围.xlsx」4 角点经纬度构建默认选中区域
     center: [113.3025, 40.09325],
     zoom: 15.68,
-    pitch: 55,
     bounds: [[113.289814, 40.083292], [113.315134, 40.103218]],
-    // 圈地多边形：古城范围 4 角点（西南→西北→东北→东南，顺时针闭合）
     polygon: [
       [113.2899, 40.083292],
       [113.289814, 40.103218],
@@ -75,62 +80,44 @@ const CITY = {
     ]
   },
   xian: {
-    center: [108.9540, 34.2650], zoom: 14, pitch: 50,
+    center: [108.9540, 34.2650], zoom: 14,
     bounds: [[108.9440, 34.2550], [108.9640, 34.2750]],
     polygon: boundsToPolygon([[108.9440, 34.2550], [108.9640, 34.2750]])
   }
 }
 const CITY_NAME = { datong: '大同 · 古城', yungangshiku: '大同 · 云冈石窟', xian: '西安 · 雁塔' }
-const DEFAULT_CITY = 'datong'   // 默认选中区域（初始化即应用，保证首屏有区域渲染）
+const DEFAULT_CITY = 'datong'
 let current = DEFAULT_CITY
-let free3D = false
 
 let map = null
-let regionBorder = null     // 区域主边界（清晰描边 + 淡填充）
-let regionGlow = null       // 边界外发光层（宽描边低透明，模拟荧光辉光）
-let regionMask = null       // 圈外遮罩层（圈外变暗、圈内镂空，高德原生圈地质感）
+let regionBorder = null     // 区域主边界
+let regionGlow = null       // 边界外发光层
+let regionMask = null       // 圈外遮罩层
 let regionLabel = null      // 区域标签
-let regionHit = null       // 区域透明命中面（拦截区域内点击用于选中，不穿透地图）
-let flowTipLayer = null     // 默认车流提示框层（TipLayer DOM 层：SVG 连接线 + 卡片，多实例并存，带碰撞避让）
-let simpleMarkerClass = null     // AMapUI SimpleMarker 类（字体图标标注）
-let simpleInfoWindowClass = null // AMapUI SimpleInfoWindow 类（点击信息窗体）
-let HAS_SIMPLE_MARKER = false   // 运行期探测：AMapUI SimpleMarker 是否可用（否则回退 AMap.Marker）
-let HAS_SIMPLE_IW = false       // 运行期探测：AMapUI SimpleInfoWindow 是否可用（否则回退 AMap.InfoWindow）
-let amapUIPromise = null        // AMapUI 模块加载 Promise（仅加载一次）
-let clickTipLayer = null     // 点击交互提示框层（独立 TipLayer 实例，buildTipHtml 大卡，zIndex 高于 flowTipLayer）
-// [临时停用] 点位到点位路径高亮功能 —— 渲染器实例变量已注释
-// let roadHL = null          // 道路路径高亮渲染器（3D 立体多段折线，沿真实道路）
-const markerMap = {} // deviceId -> AMap.Marker
-// let roadInfoWindow = null  // 点击路径弹出的距离 InfoWindow
+let regionHit = null        // 区域透明命中面
+let flowTipLayer = null     // 默认车流提示框层
+let clickTipLayer = null    // 点击交互提示框层
+const markerMap = {}        // deviceId -> L.marker
 
-// 区域选中状态（地图交互核心）：记录当前选中的城市区域 key，驱动高亮与回调
 const selectedRegion = ref(null)
-
-// 默认城墙点位标记集合（按需点击触发 tip，不再常驻展示）
 const pointMarkers = []
-// 当前选中点位（点击触发 tip 后填充；点击空白/切换城市则清空）
 const selectedPointId = ref(null)
 
-// 本地交互状态
 const addMode = ref(false)
 const editorOpen = ref(false)
 const editorMode = ref('add')
 const editorDevice = ref(null)
 const editorPos = ref(null)
 
-// —— 工具 ——
+// —— 工具函数 ——
 function statusColor(s) {
   return s === 'online' ? 'g' : (s === 'offline' ? 'r' : 'y')
 }
-
-// 综合拥挤度(congestion_score, 0-1) → 着色档位（v0.11.0 WS 字段）
 function congColorClass(score) {
   if (score >= 0.66) return 'r'
   if (score >= 0.33) return 'y'
   return 'g'
 }
-// 拥挤档位(原始类) → CSS 全类名（'r'/'y'/'g' → red/yellow/green；其余(含异常灰态) → gray）
-// 供车流卡/详情卡/实时刷新着色统一使用（buildTipHtml / buildFlowTipHtml / updateFlowTipContent）
 function flowColorCls(c) {
   if (c === 'r') return 'red'
   if (c === 'y') return 'yellow'
@@ -138,19 +125,6 @@ function flowColorCls(c) {
   return 'gray'
 }
 
-// —— 点位实时信息解析：优先取 WebSocket /ws stats.devices（按 id 匹配），无则按异常灰态展示 ——
-// 统一返回「点位信息视图」，供标点着色 / 详情卡 / 车流卡 / 实时刷新统一消费：
-//   · WS 命中且在线：实时计数 / 今日·本小时累计 / 拥挤度 全部来自 WS 真实字段；
-//   · WS 未命中或状态非 online（abnormal/offline/syncing）：一律异常灰态展示，不展示速度等
-//     无法统计的派生指标（速度显示已按需求删除）。
-
-// —— 点位数据源（v0.12 修复：不再写死设备信息）——
-// 地图上展示的城墙/卡口点位，其「设备信息」（名称、经纬度、分类、状态、类型）以后端为准：
-//   · 后端设备存在时（/api/devices 返回 + WS stats.devices 推送 longitude/latitude），
-//     点位由 backendWallPoints() 从 dev.devices 动态映射，id/desc(名称)/coord(经纬度)/
-//     category(分类)/status(状态)/camera_type(类型) 全部来自后端；
-//   · 后端不可用（无设备/离线）时才回退 CITY_WALL_POINTS（由 data/device_geo.json 生成的离线兜底，
-//     与后端地理库同源），保证无后端时页面仍可展示。
 function gateOf(name) {
   if (!name) return '大同古城'
   for (const [g, kw] of [['和阳门', '和阳'], ['永泰门', '永泰'], ['清远门', '清远'], ['武定门', '武定']]) {
@@ -167,29 +141,22 @@ function backendWallPoints() {
   const list = []
   dev.devices.forEach((d) => {
     if (!d || !d.id) return
-    // 一键切换「不显示离线设备」：仅保留在线设备（online）
     if (!dev.showOffline && d.status !== 'online') return
     const pos = dev.positions[d.id]
     if (!pos || !Number.isFinite(pos.lng) || !Number.isFinite(pos.lat)) return
     const isKakou = d.camera_type === 'vehicle' || /卡口/.test(d.category || '')
     list.push({
-      id: d.id,
-      desc: d.name || d.id,
+      id: d.id, desc: d.name || d.id,
       type: isKakou ? '卡口' : '便道',
-      gate: gateOf(d.name),
-      direction: dirOf(d.name),
-      coord: [pos.lng, pos.lat],
-      lastActive: '',
+      gate: gateOf(d.name), direction: dirOf(d.name),
+      coord: [pos.lng, pos.lat], lastActive: '',
       status: d.status || 'syncing',
       typeLabel: isKakou ? '车行' : '人行',
-      count: 0,
-      category: d.category || '',
-      camera_type: d.camera_type || ''
+      count: 0, category: d.category || '', camera_type: d.camera_type || ''
     })
   })
   return list
 }
-// 当前生效的点位源（后端优先，离线兜底其次）
 const wallPoints = computed(() => {
   const back = backendWallPoints()
   return back.length ? back : CITY_WALL_POINTS
@@ -206,26 +173,13 @@ function statusTextOf(level, isVeh) {
   return '畅通'
 }
 
-let hoverPointId = null         // 当前悬浮点位（用于实时刷新时保留 hover 态）
+let hoverPointId = null
 
-/**
- * 点位实时信息解析（统一入口，供标点/详情卡/车流卡/实时刷新消费）
- * ---------------------------------------------------------------------------
- * 优先级：WebSocket /ws `stats.devices`（按 device_id == 点位 id 匹配）> 点位源状态。
- *   · WS 命中且 online：直接采用其真实统计字段 ——
- *       current_vehicles / current_persons
- *       today_vehicle_in/out、today_person_in/out
- *       hour_vehicle_in/out、hour_person_in/out、hour
- *       vehicle_flow_per_min、person_flow_per_min
- *       congestion_score、vehicle_congested、person_congested、congested、status
- *   · WS 未命中或状态非 online：一律返回异常灰态（abnormal），不展示速度等无法统计的派生指标。
- */
 function resolvePointInfo(p) {
   const isVeh = p.type === '卡口'
   const ws = dev.statsById[p.id] || null
   if (ws) {
     const status = ws.status || p.status
-    // —— 异常/离线点位：灰态展示，不再派生速度等模拟指标 ——
     if (status !== 'online') {
       return {
         fromWs: true, source: 'ws', isVeh, kind: isVeh ? 'veh' : 'per',
@@ -237,7 +191,6 @@ function resolvePointInfo(p) {
         hour: ws.hour || new Date().getHours(), congestionRaw: false
       }
     }
-    // —— 在线点位：真实 WebSocket 统计（v0.11.0 stats.devices）——
     const current = isVeh ? (ws.current_vehicles || 0) : (ws.current_persons || 0)
     const dailyIn = isVeh ? (ws.today_vehicle_in || 0) : (ws.today_person_in || 0)
     const dailyOut = isVeh ? (ws.today_vehicle_out || 0) : (ws.today_person_out || 0)
@@ -247,7 +200,6 @@ function resolvePointInfo(p) {
     const hourly = hourlyIn + hourlyOut
     const congScore = ws.congestion_score || 0
     const congCls = congScore >= 0.66 ? 'r' : (congScore >= 0.33 ? 'y' : 'g')
-    // 拥堵分级：优先以各维度 congested 标志，其次综合分
     const vCong = !!ws.vehicle_congested
     const pCong = !!ws.person_congested
     const dimCong = isVeh ? vCong : pCong
@@ -264,11 +216,9 @@ function resolvePointInfo(p) {
       vehicleFlowPerMin: ws.vehicle_flow_per_min || 0,
       personFlowPerMin: ws.person_flow_per_min || 0,
       vehicleCongested: vCong, personCongested: pCong,
-      hour: ws.hour || new Date().getHours(),
-      congestionRaw: !!ws.congested
+      hour: ws.hour || new Date().getHours(), congestionRaw: !!ws.congested
     }
   }
-  // —— 保底占位：无 WS 数据 → 一律按异常灰态展示（不模拟速度/流量）——
   const status = p.status || 'abnormal'
   return {
     fromWs: false, source: 'fallback', isVeh, kind: isVeh ? 'veh' : 'per',
@@ -280,17 +230,15 @@ function resolvePointInfo(p) {
   }
 }
 
-// —— 设备标点渲染 ——
+// —— 设备标点渲染（Leaflet DivIcon）——
 function renderDevices() {
   if (!map) return
-  Object.values(markerMap).forEach((m) => map.remove(m))
+  Object.values(markerMap).forEach((m) => map.removeLayer(m))
   for (const k in markerMap) delete markerMap[k]
 
   dev.devices.forEach((d) => {
-    if (WALL_IDS.value.has(d.id)) return  // 城墙点位由 renderDefaultMarkers 单独渲染，避免双层标点
+    if (WALL_IDS.value.has(d.id)) return
     const pos = dev.positions[d.id] || CITY[current].center
-    // 防御：严格数值类型校验坐标（Number.isFinite 不做隐式转换，排除 null/''/字符串/布尔），
-    // 非法则跳过，避免 AMap lngLatToContainer 报 Pixel(NaN, NaN) 中断整批渲染
     if (!pos ||
       typeof pos.lng !== 'number' || typeof pos.lat !== 'number' ||
       !Number.isFinite(pos.lng) || !Number.isFinite(pos.lat)) {
@@ -313,23 +261,17 @@ function renderDevices() {
       `<div class="lbl">${d.name} <span class="dot ${statusColor(d.status)}"></span> ${cnt}</div>` +
       (cat ? `<div class="mk-cat" title="${cat}">${cat}</div>` : '') +
       `</div>`
-    const mk = new AMap.Marker({
-      position: pos, anchor: 'bottom-center', zIndex: sel ? 200 : 150,
-      cursor: 'pointer', content, draggable: true, bubble: true
+    const mk = L.marker([pos.lat, pos.lng], {
+      icon: L.divIcon({ className: 'custom-device-icon', html: content, iconSize: [0, 0], iconAnchor: [0, 0] }),
+      zIndexOffset: sel ? 200 : 150, draggable: true
     })
     mk.on('click', () => openEdit(d))
     mk.on('dragend', (e) => {
-      const ll = mk.getPosition()
+      const ll = mk.getLatLng()
       setPosition(d.id, ll.lng, ll.lat)
       push(`已更新「${d.name}」地图位置`, 'info')
     })
-    // 兜底：单个标点 add 失败不影响整批渲染（AMap 坐标/尺寸异常时可能抛 NaN 像素）
-    try {
-      map.add(mk)
-    } catch (err) {
-      console.warn('[renderDevices] 标点添加失败，已跳过：', d.id, err)
-      return
-    }
+    mk.addTo(map)
     markerMap[d.id] = mk
   })
 }
@@ -353,7 +295,7 @@ function startAdd() {
 }
 function onMapClick(e) {
   if (addMode.value) {
-    const ll = e.lnglat
+    const ll = e.latlng
     editorMode.value = 'add'
     editorDevice.value = null
     editorPos.value = { lng: ll.lng, lat: ll.lat }
@@ -362,7 +304,6 @@ function onMapClick(e) {
     document.body.classList.remove('adding')
     return
   }
-  // 非添加模式：点击地图空白 → 关闭当前 tip
   if (selectedPointId.value) selectPoint(null)
 }
 async function onEditorSave({ mode, id, payload, pos }) {
@@ -390,12 +331,10 @@ const placeholderIcon = `<svg viewBox="0 0 24 24" width="24" height="24" fill="n
 
 function clearPointMarkers() {
   if (!map) return
-  pointMarkers.forEach((it) => map.remove(it.marker))
+  pointMarkers.forEach((it) => map.removeLayer(it.marker))
   pointMarkers.length = 0
 }
 
-// —— pin 内容构建（active=点击选中态高亮；hover=悬浮临时高亮，与选中态互补）——
-// 状态标识按车流状态着色：拥堵红 / 通畅蓝（需求 #1）
 function buildPinContent(p, mode = false) {
   const typeCls = p.type === '卡口' ? 'kakou' : 'biandao'
   const info = resolvePointInfo(p)
@@ -412,7 +351,6 @@ function buildPinContent(p, mode = false) {
   )
 }
 
-// —— 重置所有 pin 为非激活态 ——
 function resetPinActive() {
   pointMarkers.forEach((it) => {
     const p = findPoint(it.id)
@@ -420,7 +358,6 @@ function resetPinActive() {
   })
 }
 
-// 仅刷新已渲染城墙点位的实时着色（WS 推送后即时反映，不重建 DOM）
 function refreshWallPointPins() {
   pointMarkers.forEach((it) => {
     const p = findPoint(it.id)
@@ -430,12 +367,11 @@ function refreshWallPointPins() {
   })
 }
 
-// —— 区域圈地可视化：主边界（描边+淡填充）+ 外发光层 + 圈外遮罩（高德原生圈地逻辑）—— //
+// —— 区域圈地可视化（Leaflet Polygon）——
 function renderRegionOverlay() {
   if (!map) return
-  // 清除旧图层
   ;[regionBorder, regionGlow, regionMask, regionLabel, regionHit].forEach((m) => {
-    if (m) try { map.remove(m) } catch (e) { }
+    if (m) try { map.removeLayer(m) } catch (e) { }
   })
   regionBorder = regionGlow = regionMask = regionLabel = regionHit = null
 
@@ -444,126 +380,93 @@ function renderRegionOverlay() {
   const c = overlayColors.value
   const center = CITY[current].center
 
-  // 1) 圈外遮罩层：外大环（城市中心 ±3°，足以覆盖视口）+ 城市多边形反向作洞
-  //    利用 AMap Polygon 多环镂空规则 → 圈外被遮罩填充（变暗），圈内镂空（清晰）
+  // 1) 圈外遮罩层：外大环 + 城市多边形做洞（Leaflet 原生支持多环镂空）
   const d = 3
   const outer = [
-    [center[0] - d, center[1] - d],
-    [center[0] + d, center[1] - d],
-    [center[0] + d, center[1] + d],
-    [center[0] - d, center[1] + d]
+    toLatLng([center[0] - d, center[1] - d]),
+    toLatLng([center[0] + d, center[1] - d]),
+    toLatLng([center[0] + d, center[1] + d]),
+    toLatLng([center[0] - d, center[1] + d])
   ]
-  regionMask = new AMap.Polygon({
-    path: [outer, poly.slice().reverse()],
-    fillColor: c.maskFill,
-    fillOpacity: c.maskOp,
-    strokeColor: 'transparent',
-    strokeWeight: 0,
-    strokeOpacity: 0,
-    bubble: true,
-    zIndex: 110
-  })
-  map.add(regionMask)
+  regionMask = L.polygon([outer, toLatLngArr(poly)], {
+    color: 'transparent', fillColor: c.maskFill, fillOpacity: c.maskOp,
+    interactive: false, pane: 'overlayPane'
+  }).addTo(map)
 
-  // 2) 边界外发光层：宽描边低透明度，模拟荧光辉光（科技感）
-  regionGlow = new AMap.Polygon({
-    path: poly,
-    strokeColor: c.regionStroke,
-    strokeWeight: 7,
-    strokeOpacity: 0.28,
-    fillColor: 'transparent',
-    fillOpacity: 0,
-    bubble: true,
-    zIndex: 118
-  })
-  map.add(regionGlow)
+  // 2) 边界外发光层
+  regionGlow = L.polygon(toLatLngArr(poly), {
+    color: c.regionStroke, weight: 7, opacity: 0.28, fill: false,
+    interactive: false, pane: 'overlayPane'
+  }).addTo(map)
 
-  // 3) 主边界：清晰描边 + 淡填充（凸显区域，不遮挡底图）
-  regionBorder = new AMap.Polygon({
-    path: poly,
-    strokeColor: c.regionStroke,
-    strokeOpacity: c.regionStrokeOp,
-    strokeWeight: 2.5,
-    fillColor: c.polyFill,
-    fillOpacity: c.polyFillOp,
-    bubble: true,
-    zIndex: 119
-  })
-  map.add(regionBorder)
+  // 3) 主边界
+  regionBorder = L.polygon(toLatLngArr(poly), {
+    color: c.regionStroke, weight: 2.5, opacity: c.regionStrokeOp,
+    fillColor: c.polyFill, fillOpacity: c.polyFillOp,
+    interactive: false, pane: 'overlayPane'
+  }).addTo(map)
 
-  // 4) 区域标签：多边形质心上方
+  // 4) 区域标签
   const cy = poly.reduce((s, p) => s + p[1], 0) / poly.length
-  regionLabel = new AMap.Marker({
-    position: [center[0], cy + 0.0009],
-    anchor: 'bottom-center', zIndex: 200, cursor: 'default',
-    content: `<div class="region-label">🏯 ${CITY_NAME[current] || current} · 监控区域</div>`
-  })
-  map.add(regionLabel)
+  regionLabel = L.marker(toLatLng([center[0], cy + 0.0009]), {
+    icon: L.divIcon({
+      className: 'region-label-icon',
+      html: `<div class="region-label">🏯 ${CITY_NAME[current] || current} · 监控区域</div>`,
+      iconSize: [0, 0], iconAnchor: [0, 0]
+    }),
+    interactive: false, zIndexOffset: 200
+  }).addTo(map)
 
-  // 5) 区域选中交互层：透明命中面（bubble:false 拦截区域内点击，不穿透到地图）
-  //    —— 这是「区域选中效果」的核心：点击区域内任意位置 → 选中该区域并高亮边界 + 触发回调
+  // 5) 区域选中交互层
   const isSel = selectedRegion.value === current
-  regionHit = new AMap.Polygon({
-    path: poly,
+  regionHit = L.polygon(toLatLngArr(poly), {
+    color: 'transparent', weight: 0,
     fillColor: isSel ? c.regionStroke : 'transparent',
     fillOpacity: isSel ? 0.06 : 0,
-    strokeColor: 'transparent', strokeWeight: 0, strokeOpacity: 0,
-    bubble: false, zIndex: 115
-  })
+    interactive: true
+  }).addTo(map)
   regionHit.on('click', () => selectRegion(current))
   regionHit.on('mouseover', () => { if (selectedRegion.value !== current) setRegionHover(true) })
   regionHit.on('mouseout', () => setRegionHover(false))
-  map.add(regionHit)
 
-  // 选中态视觉强化：主边界加粗 + 发光层提亮
   if (isSel) applyRegionSelectedStyle()
 }
 
-// —— 区域选中态视觉应用（边界加粗 + 发光增强）——
 function applyRegionSelectedStyle() {
   const c = overlayColors.value
   if (regionBorder) {
-    try {
-      regionBorder.setOptions({ strokeWeight: 4, strokeOpacity: 1, strokeColor: c.regionStroke })
-    } catch (e) { }
+    try { regionBorder.setStyle({ weight: 4, opacity: 1, color: c.regionStroke }) } catch (e) { }
   }
   if (regionGlow) {
-    try { regionGlow.setOptions({ strokeWeight: 10, strokeOpacity: 0.5 }) } catch (e) { }
+    try { regionGlow.setStyle({ weight: 10, opacity: 0.5 }) } catch (e) { }
   }
 }
 
-// —— 悬浮态（非选中时轻微提亮边界，给用户可点反馈）——
 let _hoverTimer = null
 function setRegionHover(on) {
   if (!regionBorder) return
   try {
-    regionBorder.setOptions({ strokeOpacity: on ? 0.85 : (selectedRegion.value ? 1 : overlayColors.value.regionStrokeOp) })
+    regionBorder.setStyle({ opacity: on ? 0.85 : (selectedRegion.value ? 1 : overlayColors.value.regionStrokeOp) })
   } catch (e) { }
 }
 
-// —— 区域选中 / 取消 ——
 function selectRegion(key) {
   if (selectedRegion.value === key) {
-    // 再次点击同区域 → 取消选中
     selectedRegion.value = null
     push('已取消区域选中', 'info')
   } else {
     selectedRegion.value = key
     const name = CITY_NAME[key] || key
     push('已选中区域：' + name + ' · 监控区域', 'success')
-    // 回调钩子（可扩展：上报选中区域、联动其他面板等）
     onRegionSelected && onRegionSelected(key)
   }
-  // 重绘区域层以应用选中样式（命中面填充 + 边界加粗）
   if (map) renderRegionOverlay()
 }
 
-// 外部可注入的选中回调（默认无操作）
 let onRegionSelected = null
 function setRegionSelectCallback(fn) { onRegionSelected = fn }
 
-// —— 点位提示框 HTML（tip 卡：头部标题栏 + 信息网格 + 右侧视频占位） ——
-// 优化：渐变头部带类型徽章 / 图标化字段标签 / 经纬度展示 / 数值高亮 / CSS 分隔线
+// —— 点位提示框 HTML（与 AMap 版本保持一致）——
 function buildTipHtml(p) {
   const info = resolvePointInfo(p)
   const statusText = info.status === 'online' ? '在线'
@@ -582,11 +485,9 @@ function buildTipHtml(p) {
   const coordIcon = `<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="7" r="2.5"/><path d="M8 1.5C5 1.5 3 4 3 7c0 3 5 7.5 5 7.5s5-4.5 5-7.5c0-3-2-5.5-5-5.5z"/></svg>`
   const idIcon = `<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="3" width="12" height="10" rx="2"/><circle cx="6" cy="8" r="1.5"/><path d="M9 7h3M9 10h3"/></svg>`
   const activeIcon = `<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M8 5v3l2 2"/></svg>`
-  // 视频占位：加监控扫描线动效
   const media = `<div class="cam-placeholder"><div class="cam-scan"></div><div class="ph-ic">${placeholderIcon}</div><span>暂无视频流</span></div>`
   const lng = p.coord[0].toFixed(6)
   const lat = p.coord[1].toFixed(6)
-  // 趋势指示灯：基于流量派生方向 + 百分比（监控数据可视化）
   const trend = info.current > 80 ? 'up' : (info.current > 30 ? 'flat' : 'down')
   const trendIcon = trend === 'up' ? '▲' : (trend === 'down' ? '▼' : '◆')
   const trendPct = trend === 'up'
@@ -594,7 +495,6 @@ function buildTipHtml(p) {
     : (trend === 'down' ? `-${(info.current % 15) + 3}%` : '0%')
   return (
     `<div class="cam-info cam-info-static tip-monitor">` +
-    // 头部：荧光标题 + 实时脉冲指示灯 + 类型徽章 + 状态
     `<div class="tip-head tip-head-glow">` +
     `<div class="tip-head-left">` +
     `<span class="tip-led" data-status="${info.status}"></span>` +
@@ -608,14 +508,12 @@ function buildTipHtml(p) {
     `<span class="tip-status-text">${statusText}</span>` +
     `</div>` +
     `</div>` +
-    // 路段监控行：方向 + 城门 + 实时指示灯
     `<div class="tip-row tip-row-monitor">` +
     `<span class="tip-ic">${dirIcon}</span>` +
     `<span class="tip-lbl">路段</span>` +
     `<span class="tip-val tip-val-monitor">${p.gate} · ${p.direction}</span>` +
     `<span class="tip-led tip-led-sm" data-status="${info.status}"></span>` +
     `</div>` +
-    // 流量详情区：按点位类型分流（车辆/行人），左侧字段网格 + 右侧视频占位
     `<div class="tip-body">` +
     `<div class="cam-info-left">` +
     `<div class="tip-field"><span class="tip-ic">${idIcon}</span><span class="tip-lbl">编号</span><span class="tip-val">${p.id}</span></div>` +
@@ -626,7 +524,6 @@ function buildTipHtml(p) {
       const isVeh = f.isVeh
       const colorCls = flowColorCls(f.congCls)
       const statusText = statusTextOf(f.level, isVeh)
-      // 异常/离线点位：不展示流量详情，仅提示状态
       if (f.abnormal) {
         return (
           `<div class="tip-flow tip-flow-veh">` +
@@ -636,7 +533,6 @@ function buildTipHtml(p) {
           `</div>`
         )
       }
-      // 车辆版：日过车 / 小时过车 / 实时 veh
       if (isVeh) {
         return (
           `<div class="tip-flow tip-flow-veh">` +
@@ -650,7 +546,6 @@ function buildTipHtml(p) {
           `</div>`
         )
       }
-      // 行人版：日/时/分钟/实时计数
       const perMin = Math.round((f.personFlowPerMin || 0))
       return (
         `<div class="tip-flow tip-flow-per">` +
@@ -672,11 +567,6 @@ function buildTipHtml(p) {
   )
 }
 
-// —— 点位流量提示框 HTML（默认初始化即显示）——
-// 按点位类型分流：
-//   卡口（车辆）：平均车速(km/h) / 日过车(veh/D) / 小时过车(veh/H) / 实时 veh
-//   便道（行人）：平均速度(m/min) / 日过人(per/d) / 小时过人(per/h) / 实时 per
-// 一次显示 4 个数值（需求 #2，参照图片 1+2 综合格式）
 function buildFlowTipHtml(p) {
   const info = resolvePointInfo(p)
   const isVeh = info.isVeh
@@ -688,7 +578,6 @@ function buildFlowTipHtml(p) {
   const dailyLabel = isVeh ? '日过车(veh/d)' : '日过人(per/d)'
   const hourlyLabel = isVeh ? '时过车(veh/h)' : '时过人(per/h)'
   const curUnit = isVeh ? 'veh' : 'per'
-  // 异常点位：仅标题 + 异常胶囊，不展示流量指标（无实时数据）
   if (info.abnormal) {
     return (
       `<div class="cam-flow flow-compact tip-monitor" data-flow="${colorCls}" data-kind="${info.kind}" data-id="${p.id}">` +
@@ -704,7 +593,6 @@ function buildFlowTipHtml(p) {
       `</div>`
     )
   }
-  // 紧凑两行：标题行（色点 + 名称 + 类型 + 状态胶囊）/ 指标行（日·时·实时·速率 内联分隔）
   return (
     `<div class="cam-flow flow-compact tip-monitor" data-flow="${colorCls}" data-kind="${info.kind}" data-id="${p.id}">` +
     `<div class="flow-head">` +
@@ -726,44 +614,7 @@ function buildFlowTipHtml(p) {
   )
 }
 
-// —— AMapUI 组件库加载（字体图标 Marker + 信息窗体）——
-// index.html 已引入 AMapUI（ui/1.1/main.js）；此处获取其模块并探测可用性，失败则降级。
-function ensureAMapUI() {
-  return new Promise((resolve) => {
-    if (window.AMapUI && window.AMapUI.loadUI) return resolve(window.AMapUI)
-    let n = 0
-    const t = setInterval(() => {
-      if (window.AMapUI && window.AMapUI.loadUI) { clearInterval(t); resolve(window.AMapUI) }
-      else if (++n > 60) { clearInterval(t); resolve(null) } // 6s 超时放弃
-    }, 100)
-  })
-}
-function loadAMapUIModules() {
-  if (amapUIPromise) return amapUIPromise
-  amapUIPromise = new Promise((resolve) => {
-    let settled = false
-    const done = () => { if (!settled) { settled = true; resolve() } }
-    ensureAMapUI()
-      .then((UI) => {
-        if (!UI) return done() // 无 AMapUI → 降级（自定义 Marker + 核心 InfoWindow）
-        try {
-          UI.loadUI(['overlay/SimpleMarker', 'overlay/SimpleInfoWindow'], (SimpleMarker, SimpleInfoWindow) => {
-            if (SimpleMarker) { simpleMarkerClass = SimpleMarker; HAS_SIMPLE_MARKER = true }
-            if (SimpleInfoWindow) { simpleInfoWindowClass = SimpleInfoWindow; HAS_SIMPLE_IW = true }
-            done()
-          })
-        } catch (e) { done() }
-        // 模块加载兜底：loadUI 回调迟迟未触发也继续渲染（降级）
-        setTimeout(done, 4000)
-      })
-      .catch(() => done())
-    // 全局安全兜底
-    setTimeout(done, 6000)
-  })
-  return amapUIPromise
-}
-
-// —— 点位标记：SVG 图标 Marker（SimpleMarker 方案已弃用）——
+// —— 点位标记：Leaflet DivIcon ——
 const ICON_CAR = `<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M5 11l1.5-4.6A2 2 0 0 1 8.4 5h7.2a2 2 0 0 1 1.9 1.4L19 11h1a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1h-1v1a1 1 0 0 1-2 0v-1H7v1a1 1 0 0 1-2 0v-1H4a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1h1zm2.2-.6L6 13h12l-1.2-2.6A.8.8 0 0 0 16 9.8H8a.8.8 0 0 0-.8.6zM7.5 15.2a1.2 1.2 0 1 0 0 .01zM16.5 15.2a1.2 1.2 0 1 0 0 .01z"/></svg>`
 const ICON_USER = `<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zm0 2c-4 0-7 2-7 5v1h14v-1c0-3-3-5-7-5z"/></svg>`
 
@@ -774,51 +625,49 @@ function markerTitle(p) {
       : info.status === 'offline' ? '离线' : '待验证'
   return `${p.desc}｜${p.gate}·${p.direction}｜${st}`
 }
-// 创建点位标记
-// 统一用 AMap.Marker + content（SVG 字体图标 + 圆形背景）+ anchor:'center'
-// content 为 .cam-pin（34×34 圆形），几何尺寸明确，anchor:'center' 把 div 几何中心精确对齐坐标点，零偏差。
-// SimpleMarker 内部 DOM 结构与 anchor 交互不可控，已弃用。
+
 function createPointMarker(p) {
   const info = resolvePointInfo(p)
   const baseZ = p.type === '卡口' ? 280 : 250
   const statZ = info.status === 'online' ? 20 : (info.status === 'syncing' ? 10 : 0)
-  return new AMap.Marker({
-    position: p.coord,
-    anchor: 'center',          // 图标几何中心精确对齐经纬度坐标
-    offset: new AMap.Pixel(0, 0), // 无额外偏移，保证零偏差
-    zIndex: baseZ + statZ,
-    cursor: 'pointer',
-    content: buildPinContent(p, false),
+  return L.marker(toLatLng(p.coord), {
+    icon: L.divIcon({
+      className: 'custom-pin-icon',
+      html: buildPinContent(p, false),
+      iconSize: [34, 34],
+      iconAnchor: [17, 17]
+    }),
+    zIndexOffset: baseZ + statZ,
     title: markerTitle(p)
   })
 }
-// 切换点位标记激活/悬浮态（统一用 setContent 重建图标，保留颜色态切换）
+
 function setMarkerMode(mk, p, mode) {
   if (!mk) return
-  try { mk.setContent(buildPinContent(p, mode)) } catch (e) { }
+  try {
+    mk.setIcon(L.divIcon({
+      className: 'custom-pin-icon',
+      html: buildPinContent(p, mode),
+      iconSize: [34, 34],
+      iconAnchor: [17, 17]
+    }))
+  } catch (e) { }
 }
 
-// —— 点击交互提示框（clickTipLayer 独立 TipLayer 实例）：还原之前格式 ——
-// 还原为 TipLayer DOM 层方案：buildTipHtml 原始大卡 + SVG 连接线 + 箭头，
-// zIndex 9750 高于 flowTipLayer(9600)，点击详情卡永远浮于默认车流卡之上、不被遮挡。
-// 与 flowTipLayer 完全独立：各自显示/隐藏、互不干扰。
+// —— 点击交互提示框 ——
 function updateClickTip() {
   if (!map || !clickTipLayer) return
   if (current !== 'datong' || !selectedPointId.value) { clickTipLayer.update([]); return }
   const p = findPoint(selectedPointId.value)
   if (!p) { clickTipLayer.update([]); return }
-  const pt = map.lngLatToContainer(new AMap.LngLat(p.coord[0], p.coord[1]))
+  const pt = map.latLngToContainerPoint(L.latLng(p.coord[1], p.coord[0]))
   clickTipLayer.update([{ id: p.id, x: pt.x, y: pt.y, html: buildTipHtml(p) }])
 }
 function closeClickTip() {
   if (clickTipLayer) clickTipLayer.update([])
 }
 
-// —— 默认车流提示框（TipLayer DOM 层）：初始化 / 切换区域即全量展示，每个点位一个 ——
-// TipLayer：SVG 连接线（2px 实线 + 80% 透明度 + 两端三角形箭头）+ DOM 卡片，多实例并存；
-// 内置碰撞避让（多轮两两分离 + minimumSpacing 间距约束）+ 视口裁剪 + rAF 节流；
-// 随地图 move/zoom/rotate 由 updateFlowTips() 重新投影坐标。
-// 与点击交互提示框(clickTipLayer)完全独立：各自显示/隐藏、互不干扰。
+// —— 默认车流提示框 ——
 function openFlowTips() {
   closeFlowTips()
   if (!map || current !== 'datong') return
@@ -830,7 +679,6 @@ function openFlowTips() {
 function closeFlowTips() {
   if (flowTipLayer) flowTipLayer.update([])
 }
-// 地图事件触发：重新投影所有点位坐标到容器像素，刷新 TipLayer（连接线 + 卡片位置）
 function updateFlowTips() {
   if (!map || !flowTipLayer) return
   if (current !== 'datong') { flowTipLayer.update([]); return }
@@ -840,12 +688,11 @@ function updateFlowTips() {
   const sorted = sortPointsByPriority(pts)
   for (const p of sorted) {
     if (!p.coord || !isFinite(p.coord[0]) || !isFinite(p.coord[1])) continue
-    const pt = map.lngLatToContainer(new AMap.LngLat(p.coord[0], p.coord[1]))
+    const pt = map.latLngToContainerPoint(L.latLng(p.coord[1], p.coord[0]))
     items.push({ id: p.id, x: pt.x, y: pt.y, html: buildFlowTipHtml(p) })
   }
   flowTipLayer.update(items)
 }
-// 实时刷新已渲染卡片内的车流数值文本（不重建 DOM，避免闪烁）
 function updateFlowTipContent() {
   if (!flowTipLayer) return
   flowTipLayer.updateFlowText((card, id) => {
@@ -856,7 +703,6 @@ function updateFlowTipContent() {
     const statusText = statusTextOf(info.level, info.isVeh)
     card.setAttribute('data-flow', colorCls)
     const dot = card.querySelector('.flow-dot'); if (dot) dot.className = 'flow-dot flow-dot-' + colorCls
-    // 实时刷新各数值文本（WS 推送后同步，不重建 DOM）：日/时累计、实时计数、每分钟速率
     const setFld = (k, v) => { const el = card.querySelector('[data-fld="' + k + '"]'); if (el) el.textContent = v }
     setFld('daily', info.daily.toLocaleString())
     setFld('hourly', info.hourly.toLocaleString())
@@ -867,28 +713,24 @@ function updateFlowTipContent() {
   })
 }
 
-// —— 点位标注渲染（仅标记，不渲染默认 tip；默认 tip 由 openFlowTips 独立负责）——
-// 兜底：空数据 toast；无效坐标跳过；整体 try/catch 降级
+// —— 点位标注渲染 ——
 function renderDefaultMarkers() {
   clearPointMarkers()
   if (!map) return
-  if (current !== 'datong') return // 非大同区域不显示城墙点位
+  if (current !== 'datong') return
   const pts = wallPoints.value
   if (!pts || pts.length === 0) {
     push('该区域暂无监控点位', 'warn'); return
   }
   try {
-    // 按优先级排序：城门顺序 → 类型优先级（卡口>便道）→ 方向（入口>出口>其他）
     const sorted = sortPointsByPriority(pts)
     sorted.forEach((p) => {
-      // 无效坐标兜底：跳过不渲染，避免 Marker 异常
       if (!p.coord || !isFinite(p.coord[0]) || !isFinite(p.coord[1])) {
         console.warn('[renderDefaultMarkers] 点位坐标无效，已跳过：', p.id, p.coord)
         return
       }
       const mk = createPointMarker(p)
       mk.on('click', () => selectPoint(p.id))
-      // 悬浮高亮：进入时标记提亮，离开恢复（与点击选中态互补，不冲突）
       mk.on('mouseover', () => {
         hoverPointId = p.id
         if (selectedPointId.value !== p.id) setMarkerMode(mk, p, 'hover')
@@ -897,10 +739,9 @@ function renderDefaultMarkers() {
         hoverPointId = null
         if (selectedPointId.value !== p.id) setMarkerMode(mk, p, false)
       })
-      map.add(mk)
+      mk.addTo(map)
       pointMarkers.push({ id: p.id, marker: mk })
     })
-    // 重建后若仍有选中点位（视角重置等场景），保持其 pin 激活
     if (selectedPointId.value) {
       pointMarkers.forEach((it) => {
         const p = findPoint(it.id)
@@ -913,17 +754,13 @@ function renderDefaultMarkers() {
   }
 }
 
-// —— 点击点位触发交互提示框 / 再次点击关闭 / 切换城市关闭 ——
-// 关键：点击交互只作用于「独立的 clickTipLayer」（详细卡 + 连接线），完全不触碰常驻的 flowTipLayer（初始 25 个车流提示框）；
-//       二者各自显示/隐藏、互不干扰。clickTipLayer zIndex(9750) 高于 flowTipLayer(9600)，详情卡永远浮于上层。
 function selectPoint(id) {
   if (id == null) {
     selectedPointId.value = null
     resetPinActive()
-    closeClickTip() // 仅关闭点击层，默认知名点位 tip 不受影响
+    closeClickTip()
     return
   }
-  // 再次点击同一点位 → 关闭
   if (selectedPointId.value === id) {
     selectedPointId.value = null
     resetPinActive()
@@ -931,174 +768,99 @@ function selectPoint(id) {
     return
   }
   selectedPointId.value = id
-  // 仅高亮选中 pin（地图标点，独立于提示框层）
   pointMarkers.forEach((it) => {
     const p = findPoint(it.id)
     if (p) setMarkerMode(it.marker, p, it.id === id ? 'active' : false)
   })
-  // 在独立的 clickTipLayer 中渲染该点「详细交互卡」（buildTipHtml 原始大卡样式 + 连接线），初始各点位 tip 完全不变
   updateClickTip()
 }
 
-/* ===== [临时停用] 点位到点位路径高亮功能 —— 函数定义块已整体注释 =====
- * 恢复方式：删除本行注释开标记与本块末尾的注释闭标记即可
-// —— 自动路径高亮：初始化 / 切换区域时，仅高亮"相邻点位"之间的连接 ——
-// 数据驱动：连接关系完全来自点位数据的 neighbors 字段（由 buildAdjacencyEdges 计算去重无向边），
-// 不再把全部点位串联成一条线。相邻点位物理距离近、同属一条道路进出口，连线即真实道路走向；
-// 渲染采用 AMap.Object3D.MeshLine（路面 + 箭头指引双层），路标风格、3D 立体、点击弹距离。
-function highlightPointPaths() {
-  if (!map || !roadHL) return
-  if (current !== 'datong') { roadHL.clear(); closeRoadInfoWindow(); return }
-  if (!CITY_WALL_POINTS || CITY_WALL_POINTS.length < 2) return
-  roadHL.clear()
-  closeRoadInfoWindow()
-  // 仅高亮相邻点位（由数据 neighbors 定义），每段独立绘制
-  const edges = buildAdjacencyEdges(CITY_WALL_POINTS)
-  let count = 0
-  for (const e of edges) {
-    if (roadHL.highlightEdge(e.a, e.b)) count++
-  }
-  if (count) push(`已沿真实道路高亮 ${count} 段相邻点位连接`, 'success')
-}
-
-// 关闭路径距离 InfoWindow
-function closeRoadInfoWindow() {
-  if (roadInfoWindow) {
-    try { roadInfoWindow.close() } catch (e) { }
-    roadInfoWindow = null
-  }
-}
-===== 临时停用块结束 ===== */
-
-
-// —— 信息窗体同步说明 ——
-// flowTipLayer：常驻的城墙各点位「车流提示框 + 连接线」（TipLayer DOM 层，SVG 连接线 + 卡片，带碰撞避让 + 两端箭头，默认初始化即显示）；
-// clickTipLayer：点击后单独出现的「详细交互卡 + 连接线」（独立 TipLayer 实例，buildTipHtml 大卡，zIndex 9750 高于 flowTipLayer）。
-// 二者互不干扰：均为 DOM 覆盖层，随地图平移/缩放由 updateFlowTips/updateClickTip 重新投影。
-
-// —— 地图控制（注册到总线，供 TopBar 调用） ——
+// —— 地图控制 ——
 function changeCity(key) {
   current = key
-  selectedPointId.value = null // 切换城市关闭当前 tip
-  closeClickTip()            // 仅清点击层，默认知名点位 tip 不受影响
+  selectedPointId.value = null
+  closeClickTip()
   if (!map) return
-  renderRegionOverlay() // 先重绘圈地（遮罩 / 发光 / 边界 / 标签）
-  // 自动缩放定位：框住所选区域多边形（高德原生圈地后的视角行为）
-  try {
-    map.setFitView([regionBorder, regionGlow], false, [80, 80, 80, 80])
-  } catch (e) {
-    map.setCenter(CITY[key].center, false, 300)
-    map.setZoom(CITY[key].zoom, false, 300)
+  renderRegionOverlay()
+  const b = CITY[key].bounds
+  if (b) {
+    map.fitBounds(L.latLngBounds(L.latLng(b[0][1], b[0][0]), L.latLng(b[1][1], b[1][0])), { padding: [60, 60, 60, 60] })
   }
-  resetView(true) // 重设 pitch 保持 3D 视角
   clearPointMarkers()
-  renderDefaultMarkers() // 重建点位标注（AMapUI 字体图标 Marker，失败降级）
-  openFlowTips()        // 重建默认车流提示框（TipLayer：连接线 + 卡片，每点位一个）
-  // [临时停用] 点位到点位路径高亮功能：调用已注释
-  // highlightPointPaths() // 重建点位间道路路径高亮（datong 外区域自动清空）
+  renderDefaultMarkers()
+  openFlowTips()
   push('已定位至「' + (CITY_NAME[key] || key) + '」', 'info')
 }
-function changeStyle(s) { if (map) map.setMapStyle(s) }
+function changeStyle() {
+  // 主题切换由 applyTheme 统一处理（切换瓦片层）
+  applyTheme()
+}
 
-// —— 主题切换：换底图瓦片 + 更新叠加层 JS 侧颜色 + 淡入淡出过渡 ——
+// —— 主题切换：切换瓦片层 + 更新叠加层颜色 ——
 function applyTheme() {
   if (!map) return
   const el = document.getElementById('container')
   if (el) el.style.opacity = '0.35'
-  try { map.setMapStyle(mapStyle.value) } catch (e) { }
+
+  // 切换瓦片层
+  const isDark = theme.value === 'dark'
+  if (tileLayerLight) {
+    if (isDark) { map.removeLayer(tileLayerLight) } else { tileLayerLight.addTo(map) }
+  }
+  if (tileLayerDark) {
+    if (isDark) { tileLayerDark.addTo(map) } else { map.removeLayer(tileLayerDark) }
+  }
+
   const c = overlayColors.value
-  // 圈外遮罩层
-  if (regionMask) {
-    try { regionMask.setOptions({ fillColor: c.maskFill, fillOpacity: c.maskOp }) } catch (e) { }
-  }
-  // 边界外发光层
-  if (regionGlow) {
-    try { regionGlow.setOptions({ strokeColor: c.regionStroke, strokeOpacity: 0.28 }) } catch (e) { }
-  }
-  // 主边界
+  if (regionMask) { try { regionMask.setStyle({ fillColor: c.maskFill, fillOpacity: c.maskOp }) } catch (e) { } }
+  if (regionGlow) { try { regionGlow.setStyle({ color: c.regionStroke, opacity: 0.28 }) } catch (e) { } }
   if (regionBorder) {
     try {
-      regionBorder.setOptions({
-        strokeColor: c.regionStroke, strokeOpacity: c.regionStrokeOp, strokeWeight: 2.5,
+      regionBorder.setStyle({
+        color: c.regionStroke, opacity: c.regionStrokeOp, weight: 2.5,
         fillColor: c.polyFill, fillOpacity: c.polyFillOp
       })
     } catch (e) { }
   }
-  // 信息窗体背景由 [data-theme] CSS 变量驱动（.amap-info-content / .smp-ifwn），主题切换时自动重着色，无需 JS 同步
-  // 默认车流提示框连接线颜色跟随主题（TipLayer setLineColor 同步线条 + 两端箭头）
   if (flowTipLayer) flowTipLayer.setLineColor(c.regionStroke)
   if (clickTipLayer) clickTipLayer.setLineColor(c.regionStroke)
   if (el) requestAnimationFrame(() => { el.style.opacity = '1' })
 }
-/** 地图视角/容器变化后重投影 TipLayer（连接线 + 卡片），保持提示框与箭头始终指向点位。
- *  3D 视图下俯仰角(pitch)改变会使 AMap 标点按 3D 投影移动，若不重投影，提示框 DOM 层
- *  会停留在旧屏幕坐标 → 状态窗口/箭头偏离点位（仅平移/缩放不受影响）。 */
+
 function reprojectTips() {
   if (!map) return
   updateFlowTips(); updateClickTip()
 }
-function resetView(silent) {
-  if (!map) return
-  map.setPitch(free3D ? 72 : CITY[current].pitch); map.setRotation(0)
-  reprojectTips()
-}
-function setTopView() { if (!map) return; free3D = false; map.setPitch(0); reprojectTips() }
-function setOblique() { if (!map) return; free3D = false; map.setPitch(CITY[current].pitch); reprojectTips() }
-function toggleFree3D() { if (!map) return; free3D = !free3D; map.setPitch(free3D ? 72 : CITY[current].pitch); reprojectTips() }
+
+// Leaflet 无 3D/俯仰角，以下方法保留为无操作（可被 TopBar 调用，不报错）
+function resetView() { reprojectTips() }
+function setTopView() { reprojectTips() }
+function setOblique() { reprojectTips() }
+function toggleFree3D() { /* Leaflet 不支持 3D */ }
 function fitRange() {
   const b = CITY[current] && CITY[current].bounds
   if (!map || !b) return
-  map.setBounds(new AMap.Bounds(b[0], b[1]), false, [60, 60, 60, 60])
+  map.fitBounds(L.latLngBounds(L.latLng(b[0][1], b[0][0]), L.latLng(b[1][1], b[1][0])), { padding: [60, 60, 60, 60] })
   reprojectTips()
 }
 
-// —— 初始化辅助：等待高德 SDK 就绪（避免 onMounted 早于 SDK 加载完成导致地图不显示）——
-function whenAMapReady(timeout = 10000) {
-  return new Promise((resolve) => {
-    if (typeof window.AMap !== 'undefined' && window.AMap.Map) return resolve(true)
-    const t0 = Date.now()
-    const timer = setInterval(() => {
-      if (typeof window.AMap !== 'undefined' && window.AMap.Map) {
-        clearInterval(timer); resolve(true)
-      } else if (Date.now() - t0 > timeout) {
-        clearInterval(timer); resolve(false)
-      }
-    }, 120)
-  })
-}
-
-// 渲染静态叠加层（区域圈地 + 点位标记 + 点位间道路路径高亮），不依赖设备加载，保证首屏即可见
-// 每步独立容错：单步失败仅提示，不阻断其余图层
+// —— 渲染静态叠加层 ——
 function renderStaticLayers() {
   try { renderRegionOverlay() }
   catch (e) { console.error('[renderRegionOverlay] 失败：', e); push('区域边界渲染失败', 'error') }
-  // [临时停用] 点位到点位路径高亮功能：调用已注释
-  // try { highlightPointPaths() }
-  // catch (e) { console.error('[highlightPointPaths] 失败：', e) }
-  // 点位标注 + 默认车流提示框均依赖 AMapUI（字体图标 Marker / 信息窗体）；
-  // 加载完成后渲染，失败则降级自定义 Marker + 核心 InfoWindow
-  loadAMapUIModules()
-    .then(() => {
-      try { renderDefaultMarkers() } catch (e) { console.error('[renderDefaultMarkers] 失败：', e) }
-      try { openFlowTips() } catch (e) { console.error('[openFlowTips] 失败：', e) }
-    })
-    .catch(() => {
-      try { renderDefaultMarkers() } catch (e) { console.error('[renderDefaultMarkers] 失败：', e) }
-      try { openFlowTips() } catch (e) { console.error('[openFlowTips] 失败：', e) }
-    })
+  try { renderDefaultMarkers() } catch (e) { console.error('[renderDefaultMarkers] 失败：', e) }
+  try { openFlowTips() } catch (e) { console.error('[openFlowTips] 失败：', e) }
 }
 
-// —— 定时刷新：WS 每 2s 推送驱动为主，此处兜底重绘点位灰/彩状态与 tip 数值 ——
+// —— 定时刷新 ——
 let flowTimer = null
 function tickFlow() {
-  // 1) 刷新所有点位标记颜色（保留 hover / active 态）
   pointMarkers.forEach((it) => {
     const p = findPoint(it.id)
     if (!p) return
     const mode = selectedPointId.value === p.id ? 'active' : (hoverPointId === p.id ? 'hover' : false)
     setMarkerMode(it.marker, p, mode)
   })
-  // 2) 直接更新已渲染默认信息窗体内的车流数值
   updateFlowTipContent()
 }
 function startFlowTicker() {
@@ -1108,39 +870,31 @@ function startFlowTicker() {
 
 // —— 生命周期 ——
 onMounted(async () => {
-  // 1) 等待 SDK 就绪（网络慢/缓存未命中时不早退，最多等 10s）
-  const ready = await whenAMapReady()
-  if (!ready) {
-    push('⚠ 高德地图 SDK 未加载（请检查网络 / Key 配置）', 'error')
-    return
-  }
   try {
-    // 2) 显式应用默认区域配置，确保初始化参数完整
     current = DEFAULT_CITY
 
-    map = new AMap.Map('container', {
-      viewMode: '3D', pitch: CITY[current].pitch, rotation: 0,
-      zoom: CITY[current].zoom, center: CITY[current].center,
-      mapStyle: mapStyle.value,
-      features: ['bg', 'road', 'building', 'point'], buildingAnimation: true,
-      rotateEnable: true, pitchEnable: true, zoomEnable: true, dragEnable: true
+    // 初始化地图（Leaflet 2D 视图）
+    map = L.map('container', {
+      zoom: CITY[current].zoom,
+      center: toLatLng(CITY[current].center),
+      zoomControl: true,
+      attributionControl: false,
+      zoomEnable: true, dragEnable: true
     })
 
-    // AMapUI（SimpleMarker / SimpleInfoWindow）可用性在 loadAMapUIModules() 内探测，失败自动降级
+    // 创建瓦片层（浅色/深色各一，按主题切换可见性）
+    tileLayerLight = L.tileLayer(TILE_URL_LIGHT, { attribution: TILE_ATTR, maxZoom: 18 })
+    tileLayerDark = L.tileLayer(TILE_URL_DARK, { attribution: TILE_ATTR, maxZoom: 18 })
+    if (theme.value === 'dark') {
+      tileLayerDark.addTo(map)
+    } else {
+      tileLayerLight.addTo(map)
+    }
+
+    // 比例尺控件
+    L.control.scale({ position: 'bottomleft', imperial: false }).addTo(map)
 
     map.on('click', onMapClick)
-
-    // 主题化地图控件：缩放、比例尺、指南针
-    try {
-      if (window.AMap && AMap.plugin) {
-        AMap.plugin(['AMap.Scale', 'AMap.ControlBar'], () => {
-          try { map.addControl(new AMap.Scale()) } catch (e) { }
-          try {
-            map.addControl(new AMap.ControlBar({ position: { top: '110px', right: '18px' } }))
-          } catch (e) { }
-        })
-      }
-    } catch (e) { }
 
     // 注册到控制总线
     mapCtl.ready = true
@@ -1153,113 +907,50 @@ onMounted(async () => {
     mapCtl.toggleFree3D = toggleFree3D
     mapCtl.startAdd = startAdd
     mapCtl.setRegionSelectCallback = setRegionSelectCallback
-    // 路径高亮：初始化 / 切换区域时自动沿真实道路绘制（无需点击模式切换）
-    // [临时停用] 点位到点位路径高亮功能：控制总线注册已注释
-    // mapCtl.refreshRoadPaths = () => highlightPointPaths()
 
-    // 3) 挂载默认车流提示框层（TipLayer DOM 层：SVG 连接线 + 卡片，带碰撞避让 + 两端箭头）
-    //    在 renderStaticLayers 内 openFlowTips() 统一填充内容
+    // 挂载 TipLayer
     flowTipLayer = new TipLayer({
       lineColor: overlayColors.value.regionStroke,
-      strokeWidth: 2,        // 2px 实线
-      lineOpacity: 0.8,      // 80% 透明度
-      gap: 56,               // 卡与点位间距
-      maxLine: 420,          // 连接线最大长度（Phase A 常规避让的软约束；Phase B 兜底不重叠优先）
-      minimumSpacing: 16     // 卡片间最小间距 16px（避让保证）
+      strokeWidth: 2, lineOpacity: 0.8, gap: 56,
+      maxLine: 420, minimumSpacing: 16
     })
     const containerEl = document.getElementById('container')
     if (containerEl) {
       flowTipLayer.mount(containerEl)
-      // 点击交互提示框层（独立 TipLayer 实例，zIndex 9750 高于 flowTipLayer，详情卡永远浮于上层）
       clickTipLayer = new TipLayer({
         lineColor: overlayColors.value.regionStroke,
-        strokeWidth: 2, lineOpacity: 0.8,
-        gap: 56, maxLine: 200, minimumSpacing: 12,
-        zIndex: 9750
+        strokeWidth: 2, lineOpacity: 0.8, gap: 56,
+        maxLine: 200, minimumSpacing: 12, zIndex: 9750
       })
       clickTipLayer.mount(containerEl)
     }
 
-    /* ===== [临时停用] 点位到点位路径高亮功能 —— 挂载渲染器 + 点击 InfoWindow 块已整体注释 =====
-     * 恢复方式：删除本行注释开标记与本块末尾的注释闭标记即可
-    // 3.5) 挂载路径高亮渲染器（沿真实道路的 3D 立体路径，需求 #1~#3）
-    // 容错：即便 3D/Object3D 不可用或挂载异常，也不应阻断下方静态图层（区域+点位+提示框）的渲染
-    try {
-      roadHL = getRoadHighlight()
-      roadHL.mount(map)
-    } catch (e) {
-      console.error('[roadHighlight] 挂载失败，已跳过路径高亮：', e)
-      roadHL = null
-    }
-    if (roadHL) roadHL._onSelect = (info) => {
-      // 点击相邻连接段 → 弹距离 InfoWindow（不阻塞地图操作）
-      if (!map || !info) return
-      closeRoadInfoWindow()
-      const distKm = (info.distanceMeters / 1000).toFixed(2)
-      const mid = [
-        (info.coordA[0] + info.coordB[0]) / 2,
-        (info.coordA[1] + info.coordB[1]) / 2
-      ]
-      roadInfoWindow = new AMap.InfoWindow({
-        content: `
-          <div class="road-info">
-            <div class="road-info-title">🛣 相邻点位道路连接</div>
-            <div class="road-info-row"><span>起</span><b>${info.descA}</b></div>
-            <div class="road-info-row"><span>终</span><b>${info.descB}</b></div>
-            <div class="road-info-distance">${distKm} <i>km</i></div>
-            <div class="road-info-meta">同组相邻点位 · ${info.isMain ? '主路（卡口）' : '辅路（便道）'}</div>
-            <button class="road-info-close" id="roadInfoClose2">关闭</button>
-          </div>`,
-        offset: new AMap.Pixel(0, -8),
-        closeWhenClickMap: true,
-        autoMove: true
-      })
-      roadInfoWindow.open(map, mid)
-      setTimeout(() => {
-        const btn = document.getElementById('roadInfoClose2')
-        if (btn) btn.addEventListener('click', () => closeRoadInfoWindow(), { once: true })
-      }, 0)
-    }
-    ===== 临时停用块结束 ===== */
-
-
-    // 4) 关键：静态叠加层（区域 + 点位）独立渲染，不等待设备加载，
-    //    确保初始化即显示区域边界与点位标记（与切换区域行为一致）。
-    //    注意：AMap 3D 视图首帧未就绪时投影会返回 NaN（报 Pixel(NaN, 0)），
-    //    初始同步渲染与设备到达时的 watcher 都可能早于地图就绪 → 丢失圈地/点位。
-    //    故统一改为等 map 'complete' 后再渲染；兜底定时器保证个别环境 complete
-    //    不触发时也尽量渲染一次（不重复执行）。
+    // 渲染静态叠加层
     let staticDone = false
     const renderStaticOnce = () => {
       if (staticDone) return
       staticDone = true
       try { renderStaticLayers() } catch (e) { console.error('[renderStaticLayers] 失败：', e) }
     }
-    setTimeout(renderStaticOnce, 4000)
+    setTimeout(renderStaticOnce, 500)
 
-    // 5) 容器尺寸兜底：下一帧若布局已完成，触发一次 resize 修正
-    //    （避免初始化时容器尚未就绪导致地图空白，切换时容器已就绪故正常）
+    // 容器尺寸修正
     requestAnimationFrame(() => {
-      try { if (map && typeof map.resize === 'function') map.resize() } catch (e) { }
+      try { if (map) map.invalidateSize() } catch (e) { }
     })
 
-    // 6) 设备加载（仅影响设备标点；失败仅提示，不阻断区域/点位显示）
-    //    devices 变化由 watch 触发 renderDevices，这里额外确保一次即时渲染
+    // 加载设备
     load()
       .then(() => { try { renderDevices() } catch (e) { console.error('[renderDevices]', e) } })
-      .catch(() => { /* 错误提示已在 useDevices.load 内部处理 */ })
+      .catch(() => { })
 
-    // 地图事件：move/zoom/rotate 后重新投影 TipLayer（连接线 + 卡片位置随地图变化重绘）
-    // flowTipLayer 与 clickTipLayer 均为 DOM 覆盖层，不随地图自动重投影，需手动触发
-    map.on('complete', () => { renderStaticOnce(); updateFlowTips(); updateClickTip() })
+    // 地图事件：重投影 TipLayer
+    map.whenReady(() => { renderStaticOnce(); updateFlowTips(); updateClickTip() })
     map.on('moveend', () => { updateFlowTips(); updateClickTip() })
     map.on('zoomend', () => { updateFlowTips(); updateClickTip() })
-    map.on('rotatechange', () => { updateFlowTips(); updateClickTip() })
-    // 3D 俯仰角 / 容器尺寸变化同样会改变点位投影，缺省会导致提示框与箭头偏离点位
-    map.on('pitchchange', () => { updateFlowTips(); updateClickTip() })
     map.on('resize', () => { updateFlowTips(); updateClickTip() })
 
-    // 7) 启动模拟实时车流：定时刷新点位红/蓝标识与 tip 数值（需求 #1）
+    // 启动定时刷新
     startFlowTicker()
   } catch (e) {
     console.error(e)
@@ -1272,32 +963,31 @@ onBeforeUnmount(() => {
   clearPointMarkers()
   if (clickTipLayer) { clickTipLayer.destroy(); clickTipLayer = null }
   if (flowTipLayer) { flowTipLayer.destroy(); flowTipLayer = null }
-  // [临时停用] 点位到点位路径高亮功能：卸载清理已注释
-  // if (roadHL) { roadHL.destroy(); roadHL = null }
-  // closeRoadInfoWindow()
   if (map) {
-    if (regionBorder) try { map.remove(regionBorder) } catch { }
-    if (regionGlow) try { map.remove(regionGlow) } catch { }
-    if (regionMask) try { map.remove(regionMask) } catch { }
-    if (regionLabel) try { map.remove(regionLabel) } catch { }
-    if (regionHit) try { map.remove(regionHit) } catch { }
-    try { map.destroy() } catch { }
+    if (regionBorder) try { map.removeLayer(regionBorder) } catch { }
+    if (regionGlow) try { map.removeLayer(regionGlow) } catch { }
+    if (regionMask) try { map.removeLayer(regionMask) } catch { }
+    if (regionLabel) try { map.removeLayer(regionLabel) } catch { }
+    if (regionHit) try { map.removeLayer(regionHit) } catch { }
+    if (tileLayerLight) try { map.removeLayer(tileLayerLight) } catch { }
+    if (tileLayerDark) try { map.removeLayer(tileLayerDark) } catch { }
+    try { map.remove() } catch { }
   }
 })
 
-// 设备列表 / 选中变化 → 重绘标点（双向同步）
+// 设备列表 / 选中变化 → 重绘标点
 watch(
   () => dev.devices.map((d) => d.id + ':' + d.status).join('|') + '#' + dev.selectedId,
   () => renderDevices()
 )
 watch(() => dev.statsById, () => { renderDevices(); updateFlowTipContent(); refreshWallPointPins(); if (selectedPointId.value) updateClickTip() }, { deep: true })
 
-// 点位源变化（后端设备加载/经纬度更新）→ 重建城墙点位标点与流量卡片（数据源由离线兜底切换为后端设备时）
+// 点位源变化
 watch(
   () => wallPoints.value.map((p) => p.id + ':' + p.status + ':' + (p.coord ? p.coord.join(',') : '')).join('|'),
   () => { renderDefaultMarkers(); openFlowTips() }
 )
 
-// 主题变化 → 同步底图瓦片 / 区域叠加 / 控件配色
+// 主题变化
 watch(theme, () => applyTheme())
 </script>

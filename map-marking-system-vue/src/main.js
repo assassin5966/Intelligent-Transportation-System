@@ -1,6 +1,8 @@
 import { createApp } from 'vue'
 import App from './App.vue'
 import './styles/main.css'
+// Leaflet 地图 CSS（内网离线依赖，通过 npm 包引入）
+import 'leaflet/dist/leaflet.css'
 
 // 应用入口：挂载根组件 App。
 // 全局样式(视觉/布局)全部在 styles/main.css 中，严格沿用原 map-marking-system.html 的设计，

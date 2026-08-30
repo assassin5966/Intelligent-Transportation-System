@@ -61,3 +61,10 @@ CLAUDE.md
 *.tar.gz
 # ---- 部署产物 (镜像包/挂载文件, 拷贝到内网用, 不入库) ----
 deploy/
+
+# ---- 地图瓦片 (可重新下载, 不入库) ----
+tile-server/tiles/
+
+# ---- WVP/ZLM 部署配置 (含明文密码与内网 IP, 不入库) ----
+peizhi/
+wvp_zlm.yml

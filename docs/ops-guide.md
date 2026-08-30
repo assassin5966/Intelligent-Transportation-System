@@ -332,6 +332,177 @@ http://<backend-host>:8000/static/business-rules.html
 
 ---
 
+### 1.5 内网地图瓦片服务器
+
+前端地图已从高德 API 替换为 Leaflet + 离线瓦片，完全内网可部署，无需公网。
+
+#### 架构说明
+
+```
+公网下载机（有公网环境）                   内网服务器
+┌─────────────────────┐               ┌──────────────────────┐
+│ download_tiles.py   │   scp/移动介质  │  Nginx / Docker      │
+│ 从 OSM 下载瓦片      │ ────────────→  │  → 静态托管瓦片       │
+│ 输出 {z}/{x}/{y}.png │               │  → 前端通过 HTTP 加载  │
+└─────────────────────┘               └──────────────────────┘
+```
+
+- 瓦片使用 **WGS-84 坐标系**（OSM 标准），与项目设备经纬度数据一致，无需坐标纠偏
+- 支持深色/浅色两套瓦片主题，通过环境变量分别配置
+
+#### 端口规划
+
+| 端口 | 协议 | 服务 | 用途 |
+|------|------|------|------|
+| 8080 | TCP | Nginx（瓦片托管） | 静态瓦片 HTTP 服务，供前端地图加载 |
+
+#### 第一步：下载瓦片
+
+在 **有公网环境的机器** 上执行：
+
+```bash
+# 进入项目 tile-server 目录
+cd tile-server
+
+# 安装依赖（仅需 Python 3 标准库，无需额外 pip 包）
+# 下载大同/云冈/西安三区域，zoom 10~18，12 并发线程
+python3 download_tiles.py --output ./tiles --min-zoom 10 --max-zoom 18 --workers 12
+```
+
+下载完成后 `./tiles` 目录结构：
+
+```
+tiles/
+├── 10/
+│   ├── 13589/
+│   │   ├── 23456.png
+│   │   └── ...
+│   └── ...
+├── 11/
+├── ...
+└── 18/
+```
+
+**参数说明**：
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--output` | `./tiles` | 瓦片输出目录 |
+| `--min-zoom` | `10` | 最小 zoom 级别（覆盖缩略图） |
+| `--max-zoom` | `18` | 最大 zoom 级别（覆盖最细节） |
+| `--workers` | `8` | 并发下载线程数，建议 8~16 |
+| `--area` | `all` | 可选：`datong` / `yungang` / `xian` / `all` |
+| `--url` | OSM 官方 | 瓦片源 URL，支持 `{z}/{x}/{y}` 占位符 |
+
+**下载量参考**（大同古城 + 云冈 + 西安，zoom 10~18）：
+
+| 区域 | 预估瓦片数 | 磁盘占用 |
+|------|-----------|---------|
+| 大同古城 | ~534 | ~8 MB |
+| 云冈石窟 | ~534 | ~8 MB |
+| 西安雁塔 | ~534 | ~8 MB |
+| 合计 | ~1600 | ~25 MB |
+
+> 实际数量取决于区域经纬度范围，三个区域均为小范围矩形，瓦片总量很小。
+> 如需覆盖更大范围，可调整 `--min-zoom` 到 8，但瓦片量会指数级增长。
+
+#### 第二步：部署瓦片到内网服务器
+
+将 `./tiles` 目录拷贝到内网服务器（scp / U盘 / 内网共享）：
+
+```bash
+# 方式一：scp（需内网服务器有公网可达的 IP）
+scp -r tiles/ user@内网服务器IP:/var/www/
+
+# 方式二：打包传输
+tar czf tiles.tar.gz tiles/
+# 传输到内网服务器后解压
+tar xzf tiles.tar.gz -C /var/www/
+```
+
+#### 第三步：启动瓦片服务器
+
+**方案 A：Docker Compose（推荐）**
+
+```bash
+# 确保 tiles 目录在 tile-server/tiles/ 下
+cd tile-server
+
+# 一键启动 Nginx 瓦片服务
+docker compose up -d nginx-tiles
+
+# 验证：访问 http://<内网IP>:8080/health 返回 OK
+# 瓦片地址：http://<内网IP>:8080/tiles/{z}/{x}/{y}.png
+```
+
+**方案 B：直接 Nginx**
+
+```bash
+# 安装 Nginx
+sudo apt install nginx   # Debian/Ubuntu
+sudo yum install nginx   # CentOS/RHEL
+
+# 复制瓦片配置
+sudo cp tile-server/nginx-tile.conf /etc/nginx/conf.d/tile.conf
+
+# 修改 nginx-tile.conf 中的 alias 路径，指向实际瓦片目录
+# 默认: alias /var/www/tiles/;
+
+# 重启 Nginx
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+#### 第四步：配置前端
+
+编辑 [map-marking-system-vue/.env](file:///Users/bianwei/Desktop/codes/DT/map-marking-system-vue/.env)：
+
+```bash
+# 瓦片服务器地址（改为内网实际 IP）
+VITE_TILE_URL=http://<内网服务器IP>:8080/tiles/{z}/{x}/{y}.png
+
+# 如有深色/浅色两套瓦片，可分别配置：
+# VITE_TILE_URL_LIGHT=http://<内网服务器IP>:8080/tiles/light/{z}/{x}/{y}.png
+# VITE_TILE_URL_DARK=http://<内网服务器IP>:8080/tiles/dark/{z}/{x}/{y}.png
+```
+
+配置后重新构建前端：
+
+```bash
+cd map-marking-system-vue
+npm run build
+```
+
+#### 深色主题瓦片
+
+如需深色/浅色主题切换，需下载两套瓦片分别存放：
+
+```bash
+# 下载浅色（默认 OSM 样式）
+python3 download_tiles.py --output ./tiles/light
+
+# 下载深色（CartoDB dark 样式）
+python3 download_tiles.py --output ./tiles/dark \
+  --url "https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png"
+```
+
+**注意**：CartoDB dark 瓦片与 OSM 使用相同坐标系，瓦片坐标完全对齐，下载后直接放入不同子目录即可。
+
+#### 常见问题
+
+**Q: 瓦片加载失败，地图显示空白？**
+A: 检查 Nginx 是否正常启动，`curl http://<内网IP>:8080/health` 应返回 OK。确认 `.env` 中 `VITE_TILE_URL` 的 `{z}/{x}/{y}` 占位符未被实际值替换。
+
+**Q: 下载瓦片时部分瓦片 404？**
+A: OSM 在高 zoom 级别（16+）可能不存在某些区域的瓦片（海洋/无数据区域），脚本会自动跳过，不影响地图显示。
+
+**Q: 需要覆盖更大范围怎么办？**
+A: 修改 `download_tiles.py` 中 `AREAS` 的 `bounds` 值，或直接通过命令行参数传入自定义区域（需自行修改脚本）。
+
+**Q: 内网服务器没有 Docker 怎么办？**
+A: 使用方案 B（直接 Nginx），仅需安装 Nginx 即可，无需 Docker。
+
+---
+
 ## 二、环境配置指南
 
 ### 2.1 .env 配置项详解
