@@ -2,7 +2,8 @@
 # ============================================================
 # Mock 模式启动脚本
 # 支持两种模式:
-#   1. RTSP mock (默认): data/ 下测试视频经 RTSP 模拟视频流 (docker-compose.mock.yml)
+#   1. RTSP mock (默认): data/ 下测试视频经 RTSP 模拟视频流
+#      测试服务(MediaMTX/推流/video_processor)定义在 docker-compose.mock.yml
 #   2. WVP  mock (--wvp): 本机 mock_wvp.py 模拟 WVP-GB28181 (端口 18080), 后端走 WVP 同步
 # 用法:
 #   bash scripts/mock_start.sh [--wvp] [--build] [--test] [--down]
