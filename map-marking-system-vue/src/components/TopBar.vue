@@ -8,26 +8,27 @@
     </div>
 
     <div class="top-center">
-      <select id="citySelect" :value="city" @change="onCity" title="监控区域">
+      <!-- <select id="citySelect" :value="city" @change="onCity" title="监控区域">
         <option value="datong">大同 · 古城</option>
-      </select>
-      <select id="styleSelect" :value="style" @change="onStyle" title="底图配色">
+      </select> -->
+      <!-- <select id="styleSelect" :value="style" @change="onStyle" title="底图配色">
         <option v-for="o in styleOptions" :key="o.value" :value="o.value">{{ o.label }}</option>
-      </select>
-      <span class="spacer"></span>
-      <button class="tool-btn" @click="mapCtl.resetView()">⟲ 重置视角</button>
+      </select> -->
+      <!-- <span class="spacer"></span> -->
+      <!-- <button class="tool-btn" @click="mapCtl.resetView()">⟲ 重置视角</button>
       <button class="tool-btn" @click="mapCtl.setTopView()">🔝 俯视</button>
-      <button class="tool-btn" @click="mapCtl.setOblique()">🔜 斜视</button>
-      <button class="tool-btn" @click="mapCtl.fitRange()">📐 适配范围</button>
-      <button class="tool-btn" id="freeBtn" @click="mapCtl.toggleFree3D()">🧊 自由3D</button>
+      <button class="tool-btn" @click="mapCtl.setOblique()">🔜 斜视</button> -->
+      <!-- <button class="tool-btn" @click="mapCtl.fitRange()">📐 适配范围</button> -->
+      <!-- <button class="tool-btn" id="freeBtn" @click="mapCtl.toggleFree3D()">🧊 自由3D</button> -->
     </div>
 
     <div class="top-right">
       <div class="top-actions">
-        <button class="tool-btn" :class="{ active: dev.state.showOffline }"
+        <button class="tool-btn" @click="mapCtl.fitRange()">📐 适配范围</button>
+        <!-- <button class="tool-btn" :class="{ active: dev.state.showOffline }"
           @click="dev.toggleShowOffline()" title="一键切换：地图是否显示离线/异常设备">
           {{ dev.state.showOffline ? '🗺 显示离线' : '🗺 隐藏离线' }}
-        </button>
+        </button> -->
         <button class="tool-btn primary" @click="goOps('device-info.html')">🛠 设备管理</button>
         <button class="tool-btn" @click="goOps('device-config.html')">📡 计数启流</button>
         <button class="tool-btn" @click="goOps('business-rules.html')">⚙ 业务规则</button>

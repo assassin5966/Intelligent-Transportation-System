@@ -1,16 +1,18 @@
 #!/bin/bash
 # ============================================================
-# Mock 模式启动脚本
+# Mock 模式启动脚本 (前后端一起)
 # 支持两种模式:
 #   1. RTSP mock (默认): data/ 下测试视频经 RTSP 模拟视频流
 #      测试服务(MediaMTX/推流/video_processor)定义在 docker-compose.mock.yml
 #   2. WVP  mock (--wvp): 本机 mock_wvp.py 模拟 WVP-GB28181 (端口 18080), 后端走 WVP 同步
+# 前端: 后端就绪后自动以宿主机 npm run dev 启动 (http://localhost:5173),
+#       同源 + vite proxy -> localhost:8000 (与开发模式一致, 无需 VITE_API_BASE)。
 # 用法:
 #   bash scripts/mock_start.sh [--wvp] [--build] [--test] [--down]
 #     --wvp    使用 WVP mock 模式 (mock_wvp.py 模拟 WVP 设备/通道/点播)
 #     --build  强制重新构建镜像
 #     --test   启动完成后执行接口冒烟测试 (curl + WebSocket)
-#     --down   停止所有服务 (含 mock_wvp.py)
+#     --down   停止所有服务 (含前端 npm run dev / mock_wvp.py)
 # 停止: bash scripts/mock_start.sh --down
 # ============================================================
 set -e
@@ -42,6 +44,12 @@ NC='\033[0m'
 log_info()  { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+
+# ---- 前端 (宿主机 npm run dev) ----
+FRONTEND_DIR="$PROJECT_DIR/map-marking-system-vue"
+FRONTEND_PORT=5173
+FRONTEND_LOG=/tmp/mock_frontend.log
+FRONTEND_PIDFILE=/tmp/mock_frontend.pid
 
 # ---- Mock WVP 管理 (端口 18080) ----
 MOCK_WVP_PORT=18080
@@ -77,6 +85,49 @@ stop_mock_wvp() {
     rm -f "$MOCK_WVP_PIDFILE"
   fi
   pkill -f "mock_wvp.py" 2>/dev/null && log_info "已清理 mock_wvp 进程" || true
+}
+
+# ---- 前端 (宿主机 npm run dev, 同源 + vite proxy -> localhost:8000) ----
+frontend_alive() { curl -s "http://localhost:${FRONTEND_PORT}" >/dev/null 2>&1; }
+
+start_frontend() {
+  if frontend_alive; then
+    log_info "前端已在运行 (http://localhost:${FRONTEND_PORT})"
+    return
+  fi
+  if ! command -v node >/dev/null 2>&1; then
+    log_error "未找到 node, 无法启动前端 (npm run dev)"
+    log_error "请安装 Node.js, 或改用 docker 方式启动前端"
+    return
+  fi
+  if [ ! -d "$FRONTEND_DIR/node_modules" ]; then
+    log_info "安装前端依赖 (首次, npm install)..."
+    (cd "$FRONTEND_DIR" && npm install --no-audit --no-fund)
+  fi
+  log_info "启动前端 (npm run dev, http://localhost:${FRONTEND_PORT})..."
+  (cd "$FRONTEND_DIR" && nohup npm run dev > "$FRONTEND_LOG" 2>&1 & echo $! > "$FRONTEND_PIDFILE")
+  local ready=false
+  for i in $(seq 1 30); do
+    if frontend_alive; then
+      ready=true
+      log_info "前端就绪 (http://localhost:${FRONTEND_PORT})"
+      break
+    fi
+    sleep 1
+  done
+  if [ "$ready" = false ]; then
+    log_warn "前端启动超时, 日志: $FRONTEND_LOG"
+  fi
+}
+
+stop_frontend() {
+  if [ -f "$FRONTEND_PIDFILE" ]; then
+    kill "$(cat "$FRONTEND_PIDFILE")" 2>/dev/null || true
+    rm -f "$FRONTEND_PIDFILE"
+  fi
+  pkill -f "npm run dev" 2>/dev/null || true
+  pkill -f "map-marking-system-vue" 2>/dev/null || true
+  log_info "已停止前端 (npm run dev / vite)"
 }
 
 # 宿主机在容器网络视角的网关地址 (后端容器经此访问本机 mock_wvp)
@@ -188,6 +239,7 @@ PYEOF
 # ============================================================
 if [ "$DOWN" = true ]; then
     log_info "正在停止所有服务..."
+    stop_frontend
     docker compose $COMPOSE_FILES down
     stop_mock_wvp
     log_info "所有服务已停止"
@@ -270,11 +322,15 @@ if [ "$MODE" = "wvp" ]; then
         log_warn "60s 内未发现同步设备, 请检查: docker compose -f docker-compose.yml logs backend | grep WVP"
     fi
 
+    # 启动前端 (宿主机 npm run dev, 同源 + vite proxy -> localhost:8000)
+    start_frontend
+
     echo ""
     log_info "========================================"
     log_info " WVP mock 环境启动完成!"
     log_info "========================================"
     echo ""
+    echo "  前端页面:           http://localhost:${FRONTEND_PORT}"
     echo "  后端 API:          http://localhost:8000"
     echo "  Mock WVP:          http://localhost:${MOCK_WVP_PORT}"
     echo "  健康检查:           http://localhost:8000/health"
@@ -418,11 +474,15 @@ echo -e "\nAI 服务管道状态 (应显示 running):"
 curl -s http://localhost:8001/devices | python3 -m json.tool 2>/dev/null || curl -s http://localhost:8001/devices
 
 # ---- 4. 输出访问信息 ----
+# 启动前端 (宿主机 npm run dev, 同源 + vite proxy -> localhost:8000)
+start_frontend
+
 echo ""
 log_info "========================================"
 log_info " Mock 环境启动完成!"
 log_info "========================================"
 echo ""
+echo "  前端页面:           http://localhost:${FRONTEND_PORT}"
 echo "  后端 API:          http://localhost:8000"
 echo "  健康检查:           http://localhost:8000/health"
 echo "  设备列表:           http://localhost:8000/api/devices"

@@ -37,6 +37,10 @@ const TILE_URL_LIGHT = import.meta.env.VITE_TILE_URL_LIGHT || import.meta.env.VI
 const TILE_URL_DARK  = import.meta.env.VITE_TILE_URL_DARK  || import.meta.env.VITE_TILE_URL || 'http://localhost:8080/tiles/{z}/{x}/{y}.png'
 const TILE_ATTR = import.meta.env.VITE_TILE_ATTR || ''
 
+// 1×1 透明兜底瓦片：未下载到的格子显示容器底色，而非破图白块（主题匹配关键）
+const ERROR_TILE =
+  'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC'
+
 let tileLayerLight = null  // 浅色瓦片层
 let tileLayerDark = null   // 深色瓦片层
 
@@ -877,19 +881,28 @@ onMounted(async () => {
     map = L.map('container', {
       zoom: CITY[current].zoom,
       center: toLatLng(CITY[current].center),
+      minZoom: 9,        // 与已下载瓦片下限一致，避免缩太小无瓦片露白
+      maxZoom: 17,       // 古城 z18 仅下载约 80%，封顶到覆盖完整的层级
       zoomControl: true,
       attributionControl: false,
-      zoomEnable: true, dragEnable: true
+      zoomEnable: true, dragEnable: true,
+      zoomSnap: 0.25
     })
 
     // 创建瓦片层（浅色/深色各一，按主题切换可见性）
-    tileLayerLight = L.tileLayer(TILE_URL_LIGHT, { attribution: TILE_ATTR, maxZoom: 18 })
-    tileLayerDark = L.tileLayer(TILE_URL_DARK, { attribution: TILE_ATTR, maxZoom: 18 })
+    tileLayerLight = L.tileLayer(TILE_URL_LIGHT, { attribution: TILE_ATTR, minZoom: 9, maxZoom: 18, errorTileUrl: ERROR_TILE, noWrap: true })
+    tileLayerDark = L.tileLayer(TILE_URL_DARK, { attribution: TILE_ATTR, minZoom: 9, maxZoom: 18, errorTileUrl: ERROR_TILE, noWrap: true })
     if (theme.value === 'dark') {
       tileLayerDark.addTo(map)
     } else {
       tileLayerLight.addTo(map)
     }
+
+    // 容器在挂载时可能尚未完成布局，强制重算尺寸，
+    // 否则 Leaflet 会按初始 0 尺寸渲染，地图只显示一半 / 四周露白（"没铺满"主因）
+    map.invalidateSize()
+    setTimeout(() => { if (map) map.invalidateSize() }, 250)
+    window.addEventListener('resize', () => { if (map) map.invalidateSize() })
 
     // 比例尺控件
     L.control.scale({ position: 'bottomleft', imperial: false }).addTo(map)

@@ -68,3 +68,9 @@ tile-server/tiles/
 # ---- WVP/ZLM 部署配置 (含明文密码与内网 IP, 不入库) ----
 peizhi/
 wvp_zlm.yml
+# 部署配置/教程 (含明文密码与内网 IP, 不入库)
+setting/
+setting-server/
+
+# ---- 打包产物 (zip 等, 不入库) ----
+*.zip

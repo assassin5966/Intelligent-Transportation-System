@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <title>离线瓦片预览 · 大同古城（浅色 / 深色主题对比）</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+    <style>
+        html,
+        body {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            background: #04070e;
+            color: #cfe0ff;
+            font-family: -apple-system, BlinkMacSystemFont, "Microsoft YaHei", sans-serif;
+        }
+
+        .header {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 52px;
+            background: linear-gradient(180deg, rgba(6, 16, 32, .97), rgba(6, 18, 32, .74));
+            display: flex;
+            align-items: center;
+            padding: 0 20px;
+            border-bottom: 1px solid rgba(0, 225, 255, .45);
+            z-index: 1000;
+        }
+
+        .header h1 {
+            margin: 0;
+            font-size: 16px;
+            font-weight: 500;
+            color: #eaffff;
+        }
+
+        .header .meta {
+            margin-left: 20px;
+            color: #9fb8e0;
+            font-size: 12px;
+        }
+
+        .header .ctl {
+            margin-left: auto;
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            font-size: 12px;
+        }
+
+        .header .ctl label {
+            color: #9fb8e0;
+        }
+
+        .header .ctl input[type=range] {
+            width: 160px;
+            accent-color: #00e1ff;
+        }
+
+        .header .ctl .zv {
+            color: #00e1ff;
+            font-variant-numeric: tabular-nums;
+            min-width: 42px;
+        }
+
+        .wrap {
+            position: absolute;
+            top: 52px;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            display: flex;
+        }
+
+        .pane {
+            flex: 1;
+            position: relative;
+            border-right: 1px solid rgba(110, 170, 255, .28);
+        }
+
+        .pane:last-child {
+            border-right: none;
+        }
+
+        .pane .cap {
+            position: absolute;
+            top: 10px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 900;
+            background: rgba(10, 18, 32, .9);
+            border: 1px solid rgba(0, 225, 255, .35);
+            color: #7df9ff;
+            padding: 5px 14px;
+            border-radius: 4px;
+            font-size: 12px;
+            letter-spacing: .5px;
+        }
+
+        .pane .map {
+            position: absolute;
+            inset: 0;
+            background: #04070e;
+        }
+
+        /* —— 深色主题：科技蓝（与 src/styles/main.css 中规则一致）—— */
+        .dark .leaflet-tile-pane {
+            filter: invert(1) hue-rotate(180deg) brightness(.92) contrast(1.08) saturate(.35);
+        }
+
+        .dark .map::after {
+            content: '';
+            position: absolute;
+            inset: 0;
+            pointer-events: none;
+            z-index: 250;
+            background: #1f74e6;
+            mix-blend-mode: color;
+            opacity: .55;
+        }
+
+        .dark .map::before {
+            content: '';
+            position: absolute;
+            inset: 0;
+            pointer-events: none;
+            z-index: 260;
+            background:
+                radial-gradient(circle at 50% 42%, rgba(40, 130, 230, .12), transparent 58%),
+                radial-gradient(circle at 50% 50%, transparent 52%, rgba(3, 9, 20, .58) 100%);
+        }
+
+        .leaflet-control-attribution {
+            background: rgba(10, 18, 32, .82) !important;
+            color: #9fb8e0 !important;
+        }
+
+        .leaflet-control-attribution a {
+            color: #00e1ff !important;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="header">
+        <h1>离线瓦片预览 · 大同古城</h1>
+        <span class="meta">Leaflet 1.9 + 高德离线瓦片 · z9–z18 三级金字塔</span>
+        <div class="ctl">
+            <label>缩放</label>
+            <input type="range" id="zrange" min="9" max="18" step="1" value="14">
+            <span class="zv" id="zv">z14</span>
+        </div>
+    </div>
+
+    <div class="wrap">
+        <div class="pane">
+            <div class="cap">浅色主题（style=8 原色）</div>
+            <div class="map" id="mapLight"></div>
+        </div>
+        <div class="pane dark">
+            <div class="cap">深色主题（科技蓝 · CSS 反相+染蓝）</div>
+            <div class="map" id="mapDark"></div>
+        </div>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        const CENTER = [40.09325, 113.3025];   // 大同古城中心
+        const WALL = [                          // 古城墙四角（来自「古城范围.xlsx」）
+            [40.083292, 113.2899], [40.103218, 113.289814],
+            [40.103089, 113.315048], [40.083293, 113.315134]
+        ];
+
+        function build(id, tileUrl, attribution) {
+            const m = L.map(id, {
+                center: CENTER,
+                zoom: 14,
+                zoomControl: true,
+                attributionControl: true
+            });
+            L.tileLayer(tileUrl, {
+                attribution,
+                minZoom: 9,
+                maxZoom: 18,
+                minNativeZoom: 9,   // 低于 9 时复用 z9 瓦片放大，避免空白
+                maxNativeZoom: 18
+            }).addTo(m);
+            L.polygon(WALL, {
+                color: '#00e1ff', weight: 2, fillColor: '#00e1ff', fillOpacity: .08,
+                dashArray: '6, 6'
+            }).addTo(m).bindPopup('大同古城墙范围');
+            return m;
+        }
+
+        const mLight = build('mapLight', './tiles/{z}/{x}/{y}.png', '高德 · 本地离线（style=8）');
+        const mDark = build('mapDark', './tiles/{z}/{x}/{y}.png', '高德 · 本地离线（科技蓝）');
+
+        // 双图联动
+        let syncing = false;
+        function link(a, b) {
+            a.on('moveend', () => {
+                if (syncing) return;
+                syncing = true;
+                b.setView(a.getCenter(), a.getZoom(), { animate: false });
+                syncing = false;
+            });
+        }
+        link(mLight, mDark);
+        link(mDark, mLight);
+
+        // 缩放滑块
+        const zr = document.getElementById('zrange');
+        const zv = document.getElementById('zv');
+        zr.addEventListener('input', () => {
+            const z = Number(zr.value);
+            zv.textContent = 'z' + z;
+            mLight.setZoom(z);
+        });
+        mLight.on('zoomend', () => {
+            const z = mLight.getZoom();
+            zr.value = Math.min(18, Math.max(9, Math.round(z)));
+            zv.textContent = 'z' + zr.value;
+        });
+    </script>
+</body>
+
+</html>
