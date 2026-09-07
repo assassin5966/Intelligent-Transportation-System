@@ -13,15 +13,9 @@
 #
 # 前置: 1) 已按 setting-server/WVP-ZLM-傻瓜式启动教程.md 配置三个文件一致
 #       2) 根目录 .env 已写好 WVP_ENABLED 等业务开关
-#       3) 根目录 .env 已配置本脚本所需凭据(见 .env.example):
-#          WVP_DB_PASSWORD / ZLM_API_SECRET / SERVER_IP
-# 服务器信息: 内网 IP / 镜像源 docker.xuanyuan.run (镜像已拉取)
+# 服务器信息: 内网 IP 23.45.1.112 / 镜像源 docker.xuanyuan.run (镜像已拉取)
 # ============================================================
 set -euo pipefail
-
-log()  { printf '\n\033[1;36m[%s]\033[0m %s\n' "$(date '+%H:%M:%S')" "$*"; }
-ok()   { printf '\033[1;32m  ✔\033[0m %s\n' "$*"; }
-warn() { printf '\033[1;33m  !\033[0m %s\n' "$*"; }
 
 START_BACKEND=1
 [ "${1:-}" = "--no-backend" ] && START_BACKEND=0
@@ -33,33 +27,19 @@ SETTING_DIR="$ROOT_DIR/setting-server"
 COMPOSE_SETTING="$SETTING_DIR/docker-compose.yml"
 COMPOSE_ROOT="$ROOT_DIR/docker-compose.yml"
 
-# ---------- 关键参数（从根目录 .env 读取, 不硬编码明文凭据） ----------
-ENV_FILE="$ROOT_DIR/.env"
-if [ -f "$ENV_FILE" ]; then
-    set -a; # shellcheck disable=SC1090
-    source "$ENV_FILE"; set +a
-else
-    warn "未找到 .env, 将从环境变量读取 (需已 export WVP_DB_PASSWORD/ZLM_API_SECRET/SERVER_IP)"
-fi
-
+# ---------- 关键参数（与配置文件保持一致） ----------
 MYSQL_CONTAINER="wvp-upper-mysql"
 WVP_CONTAINER="wvp-upper-wvp"
-DB_NAME="${WVP_DB_NAME:-wvp}"
-DB_USER="${WVP_DB_USER:-wvp}"
-DB_PASS="${WVP_DB_PASSWORD:-}"          # 必填: .env 的 WVP_DB_PASSWORD (需与 setting-server compose 的 MYSQL_PASSWORD 一致)
+DB_NAME="wvp"
+DB_USER="wvp"
+DB_PASS="Wvp@123456"          # = docker-compose.yml 的 MYSQL_PASSWORD
 WVP_WEB="http://127.0.0.1:18080/"
-ZLM_SECRET="${ZLM_API_SECRET:-}"        # 必填: .env 的 ZLM_API_SECRET (三处一致的密钥 #1)
-SERVER_IP="${SERVER_IP:-}"              # 服务器内网 IP (打印访问地址用; 留空则自动探测)
+ZLM_SECRET="zlm_secret_7890"  # = 三处一致的密钥 #1
+SERVER_IP="23.45.1.112"       # 服务器内网 IP (用于打印访问地址; 自动探测优先, 取不到时用它)
 
-# 校验必填凭据, 缺失即退出并提示
-if [ -z "$DB_PASS" ] || [ -z "$ZLM_SECRET" ]; then
-    echo "错误: 缺少凭据配置。请在根目录 .env 中填写:"
-    echo "  WVP_DB_PASSWORD=你的WVP数据库密码"
-    echo "  ZLM_API_SECRET=你的ZLM密钥"
-    echo "  SERVER_IP=服务器内网IP (可选, 留空自动探测)"
-    echo "参考 .env.example 的说明。"
-    exit 1
-fi
+log()  { printf '\n\033[1;36m[%s]\033[0m %s\n' "$(date '+%H:%M:%S')" "$*"; }
+ok()   { printf '\033[1;32m  ✔\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33m  !\033[0m %s\n' "$*"; }
 
 # 等一个容器内的 mysql 可执行查询
 wait_mysql() {
