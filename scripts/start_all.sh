@@ -55,11 +55,15 @@ wait_mysql() {
     warn "MySQL 未在预期时间内就绪，继续尝试（可稍后手动建表）"
 }
 
-# 检查是否需要导建表脚本
+# 检查是否需要导建表脚本 (全新库时库可能已自动创建但空表, 故按"表是否存在"判断, 而非 SHOW TABLES 退出码)
 need_schema() {
-    docker exec "$MYSQL_CONTAINER" mysql -u"$DB_USER" -p"$DB_PASS" "$DB_NAME" \
-        -e "SHOW TABLES LIKE 'wvp_media_server';" >/dev/null 2>&1 \
-      && return 1 || return 0
+    local n
+    n="$(docker exec "$MYSQL_CONTAINER" mysql -N -u"$DB_USER" -p"$DB_PASS" "$DB_NAME" \
+        -e "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='$DB_NAME' AND TABLE_NAME='wvp_media_server';" 2>/dev/null)"
+    if [ "$n" = "1" ]; then
+        return 1   # 已存在 wvp_media_server -> 不需要导入
+    fi
+    return 0        # 表不存在 -> 需要导入建表脚本
 }
 
 import_schema() {
