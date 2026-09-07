@@ -38,14 +38,68 @@ body {
     bottom: 0;
 }
 
-/* 夜景氛围叠加（仅装饰，不挡交互） */
+/* 离线底图容器底色：未铺满处显示深色，避免露出刺眼白块（主题匹配关键） */
+.leaflet-container {
+    background: #07111f;   /* 科技蓝深夜底 */
+    outline: none;
+}
+
+/* ==========================================================================
+ * 离线底图 · 深色主题 = 科技蓝（仅视觉层，不影响交互 / 数据 / 功能逻辑）
+ * --------------------------------------------------------------------------
+ * 实现分三层叠加：
+ *   1) .leaflet-tile-pane  → 反相成暗底 + 降饱和，统一为灰度明暗层次
+ *   2) #container::after   → mix-blend-mode:color 将整图重染为科技蓝
+ *   3) #container::before  → 边缘暗角 + 中心微光，强化大屏科技氛围
+ * 三处均为装饰层（pointer-events:none），z-index 高于瓦片(200)、低于
+ * 标注层(600)，因此标点 / tip / 视频等交互元素完全不受影响。
+ * ========================================================================== */
+
+/* 1) 瓦片反相成暗底，降低饱和，便于统一蓝色调 */
+.leaflet-tile-pane {
+    filter: invert(1) hue-rotate(180deg) brightness(.92) contrast(1.08) saturate(.35);
+    transition: filter .45s ease;
+}
+
+/* 2) 科技蓝染色层：mix-blend-mode:color 保留明暗、重染色相为蓝 */
 #container::after {
     content: '';
     position: absolute;
     inset: 0;
     pointer-events: none;
-    background: radial-gradient(circle at 50% 22%, rgba(40, 90, 160, .10), transparent 55%);
-    z-index: 5;
+    z-index: 250;            /* 高于瓦片(200)，低于标注层(600) */
+    background: #1f74e6;     /* 科技蓝主色 */
+    mix-blend-mode: color;
+    opacity: .55;
+    transition: opacity .45s ease;
+}
+
+/* 3) 边缘暗角 + 中心微光（不挡交互） */
+#container::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    z-index: 260;
+    background:
+        radial-gradient(circle at 50% 42%, rgba(40, 130, 230, .12), transparent 58%),
+        radial-gradient(circle at 50% 50%, transparent 52%, rgba(3, 9, 20, .58) 100%);
+}
+
+/* ==========================================================================
+ * 浅色主题：还原瓦片原色 + 浅色底色，并关闭蓝色调染色
+ * ========================================================================== */
+[data-theme="light"] .leaflet-tile-pane {
+    filter: none;
+}
+
+[data-theme="light"] .leaflet-container {
+    background: #dfe7f0;
+}
+
+[data-theme="light"] #container::after,
+[data-theme="light"] #container::before {
+    display: none;
 }
 
 .toolbar {

@@ -5,6 +5,7 @@
 # 用途: 在服务器上一键拉起
 #   - setting-server/ 的 WVP 套 (mysql/redis/zlm/wvp)
 #   - 主项目的业务套 (backend/ai)
+#   - 大屏前端 (frontend, 预构建镜像 dt-frontend:latest)
 # 幂等: 可重复执行; 已建表则跳过导入, 已启动则保持运行
 #
 # 用法:
@@ -122,10 +123,10 @@ zlm_code="$(curl -s -m 5 "http://127.0.0.1:12081/index/api/getServerConfig?secre
 echo "  $zlm_code" | sed 's/^/  /'
 
 if [ "$START_BACKEND" = "1" ]; then
-    log "======== 6/6 启动业务套 (backend/ai, 走共享网 wvp-shared) ========"
-    docker compose -f "$COMPOSE_ROOT" up -d --force-recreate backend ai
+    log "======== 6/6 启动业务套与大屏前端 (backend/ai/frontend, 走共享网 wvp-shared) ========"
+    docker compose -f "$COMPOSE_ROOT" up -d --force-recreate backend ai frontend
 else
-    log "======== 6/6 已跳过业务套 (--no-backend) ========"
+    log "======== 6/6 已跳过业务套与大屏前端 (--no-backend) ========"
 fi
 
 # ---------- 输出访问地址 ----------
@@ -138,6 +139,7 @@ echo "  WVP 平台         http://$LAN_IP:18080/          (admin / admin)"
 echo "  ZLM webassist    http://$LAN_IP:12081/webassist/index.html"
 echo "  ZLM API          http://$LAN_IP:12081/index/api/getMediaList?secret=$ZLM_SECRET"
 if [ "$START_BACKEND" = "1" ]; then
+    echo "  大屏前端        http://$LAN_IP:5173"
     echo "  后端 API         http://$LAN_IP:8000/api/health"
     echo "  后端设备列表     http://$LAN_IP:8000/api/devices"
 fi

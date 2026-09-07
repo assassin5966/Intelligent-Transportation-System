@@ -3,3 +3,5 @@ dist
 .git
 .gitignore
 *.md
+# 瓦片不走镜像(由宿主机 ./public/tiles 挂载进容器), 排除以免构建时打进镜像
+public/tiles

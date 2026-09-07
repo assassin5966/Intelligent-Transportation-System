@@ -4,3 +4,6 @@ dist/
 .env.local
 .DS_Store
 .workbuddy/
+# 离线瓦片目录（运行时下载，体积大，不入仓）
+public/tiles/
+public/tiles-*/
