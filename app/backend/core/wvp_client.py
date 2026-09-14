@@ -96,6 +96,10 @@ class WVPClient:
             )
             data = body.get("data", {})
             batch = data.get("list") or data.get("deviceList") or []
+            # 2.7.2 在线字段为 onLine(大写L), 归一化为 online 供 wvp_sync 判断
+            for d in batch:
+                if isinstance(d, dict) and "online" not in d and "onLine" in d:
+                    d["online"] = d["onLine"]
             devices.extend(batch)
             total = data.get("total", 0)
             if len(devices) >= total or not batch:

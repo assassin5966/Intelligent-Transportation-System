@@ -81,6 +81,19 @@ def test_list_devices_pagination():
     assert devices[-1]["deviceId"] == "d149"
 
 
+def test_list_devices_online_normalized():
+    """2.7.2 在线字段为 onLine(大写L), 应归一化为 online 供 wvp_sync 使用."""
+    c = _make_client()
+    body = {
+        "code": 0,
+        "data": {"total": 2, "list": [{"deviceId": "a", "onLine": True}, {"deviceId": "b", "onLine": False}]},
+    }
+    c._client.request.return_value = _resp(200, body)
+    devices = asyncio.run(c.list_devices())
+    assert devices[0]["online"] is True
+    assert devices[1]["online"] is False
+
+
 def test_start_play_new_format():
     """新版 wvp-pro: data.flv 直接含地址."""
     c = _make_client()
