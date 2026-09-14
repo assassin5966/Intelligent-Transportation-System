@@ -3,10 +3,12 @@
 封装 WVP-Pro 的设备查询与点播接口, 供后端设备同步 (wvp_sync) 与流地址刷新使用.
 WVP 无标准对外 HTTP webhook, 本客户端配合 wvp_sync 定时轮询使用.
 
-认证: POST /api/login 取 access-token, 缓存在内存, 遇 401 自动重登.
+认证: GET /api/user/login (密码 md5 摘要) 取 access-token, 缓存在内存, 遇 401 自动重登.
 点播: GET /api/play/start/{deviceId}/{channelId} 返回 flv/rtsp 地址 (跨版本结构兼容).
 """
 from typing import Optional
+
+import hashlib
 
 import httpx
 
@@ -41,11 +43,14 @@ class WVPClient:
             self._client = None
 
     async def _login(self) -> None:
-        """POST /api/login 获取 access-token."""
+        """GET /api/user/login 获取 access-token (WVP 标准接口, 密码须 md5 摘要)."""
         client = self._get_client()
-        resp = await client.post(
-            f"{self._base}/api/login",
-            json={"username": settings.wvp_username, "password": settings.wvp_password},
+        resp = await client.get(
+            f"{self._base}/api/user/login",
+            params={
+                "username": settings.wvp_username,
+                "password": hashlib.md5(settings.wvp_password.encode()).hexdigest(),
+            },
         )
         resp.raise_for_status()
         body = resp.json()
@@ -139,15 +144,15 @@ class WVPClient:
             return None
         data = body.get("data", {}) if isinstance(body, dict) else {}
         stream = data.get("stream") if isinstance(data, dict) else None
-        flv = (data.get("flv") if isinstance(data, dict) else None) or (
-            stream.get("flv") if stream else None
-        )
-        rtsp = (data.get("rtsp") if isinstance(data, dict) else None) or (
-            stream.get("rtsp") if stream else None
-        )
+        # 兼容三种结构: data.stream 为流名字符串(新版) / 嵌套对象(旧版) / 缺省
+        stream_obj = stream if isinstance(stream, dict) else None
+        stream_name = stream if isinstance(stream, str) else None
+        flv = data.get("flv") or (stream_obj.get("flv") if stream_obj else None)
+        rtsp = data.get("rtsp") or (stream_obj.get("rtsp") if stream_obj else None)
         stream_id = (
-            (data.get("streamId") if isinstance(data, dict) else None)
-            or (stream.get("id") if stream else None)
+            data.get("streamId")
+            or stream_name
+            or (stream_obj.get("id") if stream_obj else None)
             or f"{device_id}_{channel_id}"
         )
         return {"flv": flv, "rtsp": rtsp, "stream_id": stream_id}

@@ -34,6 +34,7 @@ def _make_client(enabled=True):
     c.enabled = enabled
     c._client = Mock()
     c._client.request = AsyncMock()
+    c._client.get = AsyncMock()
     c._client.post = AsyncMock()
     c._client.aclose = AsyncMock()
     c._token = "tok" if enabled else None  # enabled 时跳过登录
@@ -52,12 +53,12 @@ def test_disabled_returns_empty():
 def test_login_caches_token():
     c = _make_client()
     c._token = None
-    c._client.post.return_value = _resp(200, {"data": {"accessToken": "tok-abc"}})
+    c._client.get.return_value = _resp(200, {"data": {"accessToken": "tok-abc"}})
     asyncio.run(c._login())
     assert c._token == "tok-abc"
     # 兼容 access-token 字段名
     c._token = None
-    c._client.post.return_value = _resp(200, {"data": {"access-token": "tok-xyz"}})
+    c._client.get.return_value = _resp(200, {"data": {"access-token": "tok-xyz"}})
     asyncio.run(c._login())
     assert c._token == "tok-xyz"
 
@@ -126,7 +127,7 @@ def test_401_triggers_relogin():
     c._token = "stale"
     ok_body = {"code": 0, "data": {"flv": "http://zlm/live/z.flv"}}
     c._client.request.side_effect = [_resp(401), _resp(200, ok_body)]
-    c._client.post.return_value = _resp(200, {"data": {"accessToken": "fresh"}})
+    c._client.get.return_value = _resp(200, {"data": {"accessToken": "fresh"}})
     res = asyncio.run(c.start_play("d", "ch"))
     assert res["flv"] == "http://zlm/live/z.flv"
     assert c._token == "fresh"  # token 已更新
