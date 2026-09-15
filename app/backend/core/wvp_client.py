@@ -181,26 +181,6 @@ class WVPClient:
         return play_result.get("flv") or play_result.get("rtsp")
 
 
-def rewrite_url_base(url: str, base: str) -> str:
-    """把 url 的 scheme://host:port 替换为 base, 保留 path/query (path 含 stream_id 是关键)."""
-    from urllib.parse import urlsplit, urlunsplit
-
-    parts = urlsplit(url)
-    b = urlsplit(base)
-    return urlunsplit((b.scheme, b.netloc, parts.path, parts.query, parts.fragment))
-
-
-def internal_stream_url(url: Optional[str]) -> Optional[str]:
-    """容器内取流地址 (backend 截帧 / AI 拉流): 配置 zlm_internal_base 时重写为容器网内 ZLM 直连.
-
-    WVP 返回地址 host = sdp-ip, 云服务器公网 IP 不在网卡上, 容器内访问不通
-    (浏览器不受影响, 走 /play 的 zlm_public_base 对外重写).
-    """
-    if url and settings.zlm_internal_base:
-        return rewrite_url_base(url, settings.zlm_internal_base)
-    return url
-
-
 _wvp_client: Optional[WVPClient] = None
 
 
