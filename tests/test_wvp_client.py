@@ -181,6 +181,49 @@ def test_infer_camera_type():
     assert wvp_sync._infer_camera_type("") is None
 
 
+def test_login_uses_get_user_login_with_md5():
+    """登录: GET /api/user/login, 密码为 md5 摘要 (与远程 20b7ad2 对齐)."""
+    from app.common.config import settings
+
+    c = _make_client()
+    c._token = None
+    raw = settings.wvp_password
+    try:
+        settings.wvp_password = "admin"
+        c._client.get = AsyncMock()
+        c._client.get.return_value = _resp(
+            200, {"code": 0, "data": {"accessToken": "tok"}}
+        )
+        asyncio.run(c._login())
+        assert c._token == "tok"
+        call = c._client.get.call_args_list[0]
+        assert call.args[0] == f"{c._base}/api/user/login"
+        assert call.kwargs["params"]["password"] == "21232f297a57a5a743894a0e4a801fc3"
+        assert call.kwargs["params"]["username"] == "admin"
+    finally:
+        settings.wvp_password = raw
+
+
+def test_login_plain_ok():
+    """登录: token 字段名兼容 access-token (连字符) 形态."""
+    from app.common.config import settings
+
+    c = _make_client()
+    c._token = None
+    raw = settings.wvp_password
+    try:
+        settings.wvp_password = "admin"
+        c._client.get = AsyncMock()
+        c._client.get.return_value = _resp(
+            200, {"code": 0, "data": {"access-token": "tok-dash"}}
+        )
+        asyncio.run(c._login())
+        assert c._token == "tok-dash"
+        assert c._client.get.call_count == 1
+    finally:
+        settings.wvp_password = raw
+
+
 if __name__ == "__main__":
     # 直接运行: 逐个执行测试函数
     import inspect
