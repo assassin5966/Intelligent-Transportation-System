@@ -18,7 +18,7 @@ from ...common import device_info
 from ...common.config import settings
 from ...common.logger import logger
 from ...common.redis_client import get_redis
-from .wvp_client import get_wvp_client
+from .wvp_client import get_wvp_client, internal_stream_url
 
 _task: Optional[asyncio.Task] = None
 
@@ -217,7 +217,7 @@ async def sync_once() -> dict:
         if status == "offline":
             # 恢复
             play = await wvp.start_play(gb_dev, gb_ch)
-            stream_url = wvp.select_stream_url(play)
+            stream_url = internal_stream_url(wvp.select_stream_url(play))
             if stream_url:
                 await _start_ai_pipeline(data, stream_url)
                 await redis.hset(_DEVICE_KEY_PREFIX + device_id, "status", "online")
@@ -226,7 +226,7 @@ async def sync_once() -> dict:
         elif status == "online" and not is_running:
             # 在线但 AI 侧没跑 (WVP/ZLM 重启后)
             play = await wvp.start_play(gb_dev, gb_ch)
-            stream_url = wvp.select_stream_url(play)
+            stream_url = internal_stream_url(wvp.select_stream_url(play))
             if stream_url:
                 await _start_ai_pipeline(data, stream_url)
                 started += 1

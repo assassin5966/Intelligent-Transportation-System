@@ -62,6 +62,8 @@ services:
       - WVP_STREAM_SUB=${WVP_STREAM_SUB:-true}
       # 前端播放地址翻译 (/api/devices/glm-5.3_common/play); 空值走自动推导/原样返回
       - ZLM_PUBLIC_BASE=${ZLM_PUBLIC_BASE:-}
+      # 内部取流(截帧/AI)走容器网内 ZLM 服务名: 服务器公网IP不在网卡上, 容器内访问 sdp-ip 不通
+      - ZLM_INTERNAL_BASE=${ZLM_INTERNAL_BASE:-http://zlmediakit}
       - MEDIAMTX_PUBLIC_BASE=${MEDIAMTX_PUBLIC_BASE:-}
       # MySQL 长期归档 (小时级车流/人流量落库, 长期报表); MYSQL_ENABLED=false 则跳过
       - MYSQL_ENABLED=${MYSQL_ENABLED:-true}

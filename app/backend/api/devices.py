@@ -386,7 +386,7 @@ async def snapshot(device_id: str):
         wvp = get_wvp_client()
         play = await wvp.start_play(gb_dev, gb_ch)
         try:
-            stream_url = wvp.select_stream_url(play)
+            stream_url = _internal_url(wvp.select_stream_url(play))
             if not stream_url:
                 raise HTTPException(502, "WVP 点播失败, 无法获取流地址")
             jpeg = await asyncio.wait_for(
@@ -430,7 +430,7 @@ async def refresh_stream(device_id: str):
 
     wvp = get_wvp_client()
     play = await wvp.start_play(gb_dev, gb_ch)
-    stream_url = wvp.select_stream_url(play)
+    stream_url = _internal_url(wvp.select_stream_url(play))
     if not stream_url:
         raise HTTPException(502, f"WVP 点播失败, 无法获取流地址 (gb_dev={gb_dev}, gb_ch={gb_ch})")
     lng, lat = geo_by_name(data.get("name", ""))
@@ -450,6 +450,13 @@ def _rewrite_url_base(url: str, base: str) -> str:
     parts = urlsplit(url)
     b = urlsplit(base)
     return urlunsplit((b.scheme, b.netloc, parts.path, parts.query, parts.fragment))
+
+
+def _internal_url(url: str) -> str:
+    """backend/AI 容器内拉流地址: 配置 zlm_internal_base 时重写为容器网内 ZLM 直连."""
+    from ..core.wvp_client import internal_stream_url
+
+    return internal_stream_url(url) or url
 
 
 @router.get("/{device_id}/play")

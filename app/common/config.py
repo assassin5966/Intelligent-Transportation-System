@@ -100,6 +100,11 @@ class Settings(BaseSettings):
     # ZLM 对外地址前缀 (如 http://172.16.168.9:80); 空则 WVP 返回的 flv 地址原样返回
     # (WVP 返回地址的 host 取决于 ZLM stream-ip 配置, 配了容器名时浏览器不可达, 需此处重写)
     zlm_public_base: str = ""
+    # ZLM 内部地址前缀 (如 http://zlmediakit): backend/AI 在容器网内拉流用.
+    # WVP 返回地址的 host 是 sdp-ip(公网/局域网 IP), 云服务器公网 IP 不在网卡上,
+    # 容器内访问不通 -> 截帧/AI拉流失败; 配置后内部取流统一重写为 docker 服务名直连.
+    # 空则内部取流也用 WVP 原始地址 (本机局域网部署可用)
+    zlm_internal_base: str = ""
     # MediaMTX 对外地址 (如 http://172.16.168.9:8888); 空则按前端请求的 Host 自动推导 (:8888)
     # 用于把 RTSP 测试流 (rtsp://...:8554/{path}) 翻译成浏览器可播的 HLS 地址
     mediamtx_public_base: str = ""
