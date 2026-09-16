@@ -89,7 +89,7 @@ async def _build_device_row(
     异常状态规则 (ws 无数据/未注册 → abnormal, 推送在 stats.devices 内):
       - 无对应 Redis 设备 (未注册, 无流)           → abnormal
       - 已注册但状态非 online/running (synced/registered/offline) → abnormal
-      - 已在线但未产生统计数据 (无信息)            → abnormal
+      - 已在线但暂无检测事件 (空场景)              → 正常空闲, 计数 0 (不判异常)
     """
     if rdev:
         did = rdev.get("id", "")
@@ -133,8 +133,10 @@ async def _build_device_row(
             row["status"] = "online"  # 未注册但已有统计 (历史残留) -> 视为在线
     else:
         row.update(_zero_stats_row(now))
-    # 异常状态: 无注册设备 / 未在线 / 无统计数据 -> abnormal (前端标黄展示)
-    if not rdev or raw_status not in ("online", "running") or s is None:
+    # 异常状态: 无注册设备 / 未在线 -> abnormal (前端标黄展示).
+    # 在线但暂无检测事件 (空场景) 是正常空闲, 计数以 0 展示, 不判异常;
+    # AI 断流/僵死由心跳看门狗把 status 翻为 offline 后自然落入此分支.
+    if not rdev or raw_status not in ("online", "running"):
         row["status"] = "abnormal"
     c = congestion_map.get(did)
     if c:
