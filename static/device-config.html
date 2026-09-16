@@ -163,11 +163,9 @@ async function loadDevices(silent = false) {
       const btn = document.createElement('button');
       btn.className = 'dev-btn ' + (d.status || '');
       btn.textContent = `${d.id} [${d.status || '?'}]`;
-      if (d.status === 'synced' || d.status === 'online' || d.status === 'running' || d.status === 'registered') {
-        btn.onclick = () => selectDevice(d);
-      } else {
-        btn.disabled = true;
-      }
+      // 任何状态均可选中: 画线/ROI 配置正是未启流(offline/synced)设备要做的事,
+      // 预览/启流失败时状态栏会给出具体原因, 不在此处拦截
+      btn.onclick = () => selectDevice(d);
       list.appendChild(btn);
     });
     if (!silent) setStatus(`共 ${devices.length} 台设备，点击设备进行配置`);
