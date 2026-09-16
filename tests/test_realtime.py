@@ -107,6 +107,13 @@ class FakeRedis:
     def pipeline(self):
         return FakePipeline(self)
 
+    async def scan_iter(self, pattern):
+        """按前缀模拟异步 scan_iter (仅支持 'prefix*' 形式, 供 get_stats 统计在线设备)."""
+        prefix = pattern[:-1] if pattern.endswith("*") else pattern
+        for k in list(self.data):
+            if k.startswith(prefix):
+                yield k
+
     async def hget(self, key, field):
         v = self.data.get(key, {})
         if isinstance(v, dict):
