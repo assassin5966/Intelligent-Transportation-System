@@ -259,7 +259,7 @@ canvas.addEventListener('click', (e) => {
     const line = `${(clicks[0].x/canvas.width).toFixed(4)},${(clicks[0].y/canvas.height).toFixed(4)},${(clicks[1].x/canvas.width).toFixed(4)},${(clicks[1].y/canvas.height).toFixed(4)}`;
     const anchor = `${(clicks[2].x/canvas.width).toFixed(4)},${(clicks[2].y/canvas.height).toFixed(4)}`;
     coordsEl.textContent = `计数线: ${line}  锚点: ${anchor}`;
-    document.getElementById('enableBtn').disabled = roiClicks.length >= 3 ? false : false;
+    document.getElementById('enableBtn').disabled = false;
     setStatus('配置就绪，点「启流计数」提交', 'success');
   } else {
     coordsEl.textContent = `点 ${clicks.length}/3: (${(x/canvas.width).toFixed(3)}, ${(y/canvas.height).toFixed(3)})`;

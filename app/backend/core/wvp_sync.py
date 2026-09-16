@@ -220,7 +220,8 @@ async def sync_once() -> dict:
 
         is_running = device_id in running
         if status == "offline":
-            # 恢复
+            # 恢复: 先清 AI 侧残留注册 (流断后 pipeline 对象仍留在 _pipelines, 直接 POST 会 409)
+            await _stop_ai_pipeline(device_id)
             play = await wvp.start_play(gb_dev, gb_ch)
             stream_url = to_internal(wvp.select_stream_url(play))
             if stream_url:
@@ -229,7 +230,8 @@ async def sync_once() -> dict:
                 recovered += 1
                 logger.info(f"[WVP同步] 设备 {device_id} 恢复在线, 已启流")
         elif status == "online" and not is_running:
-            # 在线但 AI 侧没跑 (WVP/ZLM 重启后)
+            # 在线但 AI 侧没跑 (WVP/ZLM 重启后); 同样先清残留, 避免 409
+            await _stop_ai_pipeline(device_id)
             play = await wvp.start_play(gb_dev, gb_ch)
             stream_url = to_internal(wvp.select_stream_url(play))
             if stream_url:

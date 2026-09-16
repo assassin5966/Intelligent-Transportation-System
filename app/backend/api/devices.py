@@ -397,7 +397,10 @@ async def snapshot(device_id: str):
         except asyncio.TimeoutError:
             raise HTTPException(504, "截帧超时 (流可能未就绪, 请重试)")
         finally:
-            await wvp.stop_play(gb_dev, gb_ch)
+            # 设备已启流 (online/running) 时 AI 正在消费同一路 WVP 点播会话,
+            # 此处停播会连带打断 AI 拉流; 仅在该流无其他消费者时清理点播会话.
+            if data.get("status") not in ("online", "running"):
+                await wvp.stop_play(gb_dev, gb_ch)
     else:
         # 模式 2: 手动注册设备, 直接拉流截帧
         stream_url = data.get("stream_url", "")
@@ -563,7 +566,7 @@ async def enable_device(device_id: str, body: DeviceEnableIn):
 
         wvp = get_wvp_client()
         play = await wvp.start_play(gb_dev, gb_ch)
-        stream_url = wvp.select_stream_url(play)
+        stream_url = to_internal(wvp.select_stream_url(play))
         if not stream_url:
             raise HTTPException(502, f"WVP 点播失败, 无法获取流地址 (gb_dev={gb_dev}, gb_ch={gb_ch})")
 
