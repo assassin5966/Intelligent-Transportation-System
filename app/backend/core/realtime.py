@@ -14,6 +14,7 @@ from ...schemas.events import EVENT_DELTA
 
 _CUR_KEY = f"{settings.redis_prefix}:realtime:current"
 _DEVICES_KEY = f"{settings.redis_prefix}:devices:active"
+_DEVICE_HASH_PREFIX = f"{settings.redis_prefix}:device:"
 # 越线事件历史 (Redis List, lpush 头插, 保留最近 _EVENT_MAX 条)
 _EVENTS_KEY = f"{settings.redis_prefix}:events"
 _EVENT_MAX = 2000
@@ -175,8 +176,15 @@ async def get_stats() -> dict:
     pipe = redis.pipeline()
     pipe.hgetall(_CUR_KEY)
     pipe.hgetall(daily_key)
-    pipe.scard(_DEVICES_KEY)
-    cur, daily, active = await pipe.execute()
+    cur, daily = await pipe.execute()
+
+    # 活跃设备数 = 设备表中 status 为 online/running 的当前在线设备
+    # (旧口径统计的是"产生过检测事件的设备"集合, 空场景在线设备不入集且含历史残留, 语义失真)
+    active = 0
+    async for key in redis.scan_iter(f"{_DEVICE_HASH_PREFIX}*"):
+        st = await redis.hget(key, "status")
+        if st in ("online", "running"):
+            active += 1
 
     def _i(v) -> int:
         return int(v) if v else 0
