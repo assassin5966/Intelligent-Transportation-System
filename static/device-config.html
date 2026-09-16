@@ -436,12 +436,12 @@ async function togglePreview() {
     setStatus(`正在启动播放 (${protocol.toUpperCase()})...`, 'pending');
     if (previewPlayer) { try { previewPlayer.destroy(); } catch (e) {} previewPlayer = null; }
     if (protocol === 'flv') {
-      await loadScript('https://cdn.jsdelivr.net/npm/flv.js@1.6.2/dist/flv.min.js');
+      await loadScript('/static/vendor/flv.min.js');
       previewPlayer = flvjs.createPlayer({ type: 'flv', url: play_url, isLive: true });
       previewPlayer.attachMediaElement(videoEl);
       previewPlayer.load();
     } else {
-      await loadScript('https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js');
+      await loadScript('/static/vendor/hls.min.js');
       if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
         videoEl.src = play_url; // Safari 原生 HLS
       } else if (Hls.isSupported()) {
