@@ -212,6 +212,10 @@ async def sync_once() -> dict:
 
         # WVP 在线
         if not has_line:
+            # WVP 侧可点播但未配置/未启流: 状态应为 synced, 不应停留在 offline
+            # (能截帧/预览的设备显示"离线"具有误导性); 有计数线的恢复流程不受影响
+            if status == "offline" and device_id not in running:
+                await redis.hset(_DEVICE_KEY_PREFIX + device_id, "status", "synced")
             continue  # 未配置计数线, 不启流
 
         is_running = device_id in running
