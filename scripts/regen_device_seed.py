@@ -2,8 +2,9 @@
 """用 data/设备信息汇总表.xlsx (最新更新) 重建设备白名单种子数据.
 
 生成:
-  data/device_geo.json       设备名(设备名称-新) -> {point_id, category, longitude, latitude, status}
-  data/device_category.json  设备名 -> {category, point_id}
+  data/device_geo.json       设备名(设备名称-新) -> {point_id, category, longitude, latitude, status,
+                              entrance_type, point_type}
+  data/device_category.json  设备名 -> {category, point_id, entrance_type, point_type}
 
 表结构 (Sheet1):
   E列 点位编号 (GAJK-xxxx / GAKK-xxxx / JTKK-xxxx)
@@ -12,6 +13,7 @@
   J列 经度  K列 纬度  L列 状态 (已验证/待验证)
   卡口每点位多通道: 序号仅在首通道行, 状态为空的行沿用同点位首行状态.
 
+出入口类型/点位类型由 F列点位分类派生 (规则与 app/common/device_info.py 的 derive_* 一致).
 云冈类 (JTKK, 无经纬度/无新名) 不入库, 与 app/common/device_info.py 的 is_yungang 规则一致.
 MySQL 表替换脚本见同目录 replace_device_info.py.
 """
@@ -31,6 +33,28 @@ def is_yungang(point_id, name) -> bool:
     if point_id and str(point_id).upper().startswith("JTKK"):
         return True
     return (name or "").upper().startswith("JTKK") or "云冈" in (name or "")
+
+
+def derive_entrance_type(category) -> str | None:
+    """出入口类型: 含"出入口"→出入口, 含"入口"→入口, 含"出口"→出口."""
+    cat = category or ""
+    if "出入口" in cat:
+        return "出入口"
+    if "入口" in cat:
+        return "入口"
+    if "出口" in cat:
+        return "出口"
+    return None
+
+
+def derive_point_type(category) -> str | None:
+    """点位类型: 含"便道"→便道, 含"卡口"→车辆卡口."""
+    cat = category or ""
+    if "便道" in cat:
+        return "便道"
+    if "卡口" in cat:
+        return "车辆卡口"
+    return None
 
 
 def main() -> None:
@@ -61,6 +85,8 @@ def main() -> None:
             "longitude": float(row[9]) if row[9] is not None else None,
             "latitude": float(row[10]) if row[10] is not None else None,
             "status": last_status,
+            "entrance_type": derive_entrance_type(category),
+            "point_type": derive_point_type(category),
         }
 
     # --- device_geo.json ---
@@ -80,12 +106,22 @@ def main() -> None:
 
     # --- device_category.json (新版对象值, 兼容旧版字符串读取) ---
     cat_doc = {
-        name: {"category": d["category"], "point_id": d["point_id"]}
+        name: {
+            "category": d["category"],
+            "point_id": d["point_id"],
+            "entrance_type": d["entrance_type"],
+            "point_type": d["point_type"],
+        }
         for name, d in devices.items()
     }
     CAT_OUT.write_text(json.dumps(cat_doc, ensure_ascii=False, indent=2), encoding="utf-8")
 
     print(f"汇总表设备总数: {len(devices)} (便道 {sum(1 for d in devices.values() if '便道' in d['category'])}, 卡口 {sum(1 for d in devices.values() if '卡口' in d['category'])})")
+    print(f"出入口类型分布: 入口 {sum(1 for d in devices.values() if d['entrance_type'] == '入口')}, "
+          f"出口 {sum(1 for d in devices.values() if d['entrance_type'] == '出口')}, "
+          f"出入口 {sum(1 for d in devices.values() if d['entrance_type'] == '出入口')}")
+    print(f"点位类型分布: 便道 {sum(1 for d in devices.values() if d['point_type'] == '便道')}, "
+          f"车辆卡口 {sum(1 for d in devices.values() if d['point_type'] == '车辆卡口')}")
     print(f"有经纬度: {with_geo}, 无经纬度: {len(devices) - with_geo} (云冈类已排除)")
     print("written:", GEO_OUT)
     print("written:", CAT_OUT)

@@ -67,6 +67,8 @@
         <th>设备名称</th>
         <th>点位编号</th>
         <th>点位分类</th>
+        <th>出入口类型</th>
+        <th>点位类型</th>
         <th>经度</th>
         <th>纬度</th>
         <th>状态</th>
@@ -96,6 +98,21 @@
     </datalist>
   </div>
   <div class="row">
+    <label>出入口类型</label>
+    <select id="fEntranceType" style="width:150px">
+      <option value="">自动（按点位分类派生）</option>
+      <option value="入口">入口</option>
+      <option value="出口">出口</option>
+      <option value="出入口">出入口</option>
+    </select>
+    <label>点位类型</label>
+    <select id="fPointType" style="width:150px">
+      <option value="">自动（按点位分类派生）</option>
+      <option value="便道">便道</option>
+      <option value="车辆卡口">车辆卡口</option>
+    </select>
+  </div>
+  <div class="row">
     <label>经度</label>
     <input id="fLng" type="number" step="0.000001" placeholder="如 113.312302" style="width:140px">
     <label>纬度</label>
@@ -114,7 +131,7 @@
     <button id="saveBtn" onclick="save()">保存</button>
     <button id="cancelBtn" onclick="resetForm()" style="display:none" class="danger">取消编辑</button>
   </div>
-  <div class="hint">设备名称唯一，匹配时忽略空格。云冈类设备（JTKK 卡口）暂不支持入库。</div>
+  <div class="hint">设备名称唯一，匹配时忽略空格。云冈类设备（JTKK 卡口）暂不支持入库。出入口类型/点位类型留空时按点位分类自动派生，手工选择的值不会被覆盖。</div>
 </div>
 
 <div id="status"></div>
@@ -163,7 +180,7 @@ async function loadList() {
     tableBody.innerHTML = '';
     document.getElementById('count').textContent = list.length;
     if (!list.length) {
-      tableBody.innerHTML = '<tr><td colspan="10" class="empty">暂无设备信息 (MySQL 未启用时显示为空，请启用 MYSQL_ENABLED)</td></tr>';
+      tableBody.innerHTML = '<tr><td colspan="12" class="empty">暂无设备信息 (MySQL 未启用时显示为空，请启用 MYSQL_ENABLED)</td></tr>';
       setStatus('加载完成：0 条', 'success');
       return;
     }
@@ -174,6 +191,8 @@ async function loadList() {
         <td class="mono">${esc(d.name)}</td>
         <td>${fmt(esc(d.point_id))}</td>
         <td>${d.category ? '<span class="cat-tag">' + esc(d.category) + '</span>' : '-'}</td>
+        <td>${fmt(esc(d.entrance_type))}</td>
+        <td>${fmt(esc(d.point_type))}</td>
         <td class="mono">${fmt(d.longitude)}</td>
         <td class="mono">${fmt(d.latitude)}</td>
         <td>${fmt(esc(d.status))}</td>
@@ -187,7 +206,7 @@ async function loadList() {
     });
     setStatus(`加载完成：共 ${list.length} 条设备信息`, 'success');
   } catch (e) {
-    tableBody.innerHTML = '<tr><td colspan="9" class="empty">加载失败</td></tr>';
+    tableBody.innerHTML = '<tr><td colspan="12" class="empty">加载失败</td></tr>';
     setStatus('加载失败: ' + e.message, 'error');
   }
 }
@@ -201,6 +220,8 @@ function edit(d) {
   document.getElementById('fLat').value = d.latitude;
   document.getElementById('fStatus').value = d.status || '';
   document.getElementById('fRegion').value = d.region || '大同古城';
+  document.getElementById('fEntranceType').value = d.entrance_type || '';
+  document.getElementById('fPointType').value = d.point_type || '';
   document.getElementById('formTitle').textContent = `编辑设备信息: ${d.name}`;
   document.getElementById('cancelBtn').style.display = '';
   document.getElementById('fName').focus();
@@ -212,6 +233,8 @@ function resetForm() {
   ['fName', 'fPointId', 'fCategory', 'fLng', 'fLat'].forEach(id => document.getElementById(id).value = '');
   document.getElementById('fStatus').value = '';
   document.getElementById('fRegion').value = '大同古城';
+  document.getElementById('fEntranceType').value = '';
+  document.getElementById('fPointType').value = '';
   document.getElementById('formTitle').textContent = '新增设备信息';
   document.getElementById('cancelBtn').style.display = 'none';
 }
@@ -225,18 +248,20 @@ async function save() {
     longitude: document.getElementById('fLng').value === '' ? null : Number(document.getElementById('fLng').value),
     latitude: document.getElementById('fLat').value === '' ? null : Number(document.getElementById('fLat').value),
     status: document.getElementById('fStatus').value || null,
-    region: document.getElementById('fRegion').value.trim() || null
+    region: document.getElementById('fRegion').value.trim() || null,
+    entrance_type: document.getElementById('fEntranceType').value || null,
+    point_type: document.getElementById('fPointType').value || null
   };
   if (!payload.name) { setStatus('设备名称不能为空', 'error'); return; }
 
   setStatus(editingName ? '正在更新...' : '正在新增...', 'pending');
   try {
     if (editingName) {
-      const { name, point_id, category, longitude, latitude, status, region } = payload;
+      const { name, point_id, category, longitude, latitude, status, region, entrance_type, point_type } = payload;
       await api('/api/device-info/' + encodeURIComponent(editingName), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ point_id, category, longitude, latitude, status, region })
+        body: JSON.stringify({ point_id, category, longitude, latitude, status, region, entrance_type, point_type })
       });
     } else {
       await api('/api/device-info', {
