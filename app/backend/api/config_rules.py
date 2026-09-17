@@ -25,8 +25,8 @@ _RULE_META: dict[str, dict[str, Any]] = {
         "params": {
             "min_distance_ratio": {"label": "最小距离比例", "desc": "距线最小距离占帧短边比例, 防抖", "type": "float", "default": 0.02, "step": 0.001, "min": 0, "max": 1},
             "endpoint_sensitivity": {"label": "端点敏感度", "desc": "端点误判过滤敏感度", "type": "float", "default": 0.05, "step": 0.001, "min": 0, "max": 1},
-            "hold_frames": {"label": "滞留确认帧数", "desc": "跨线后需在新侧连续保持的帧数 (方向确认)", "type": "int", "default": 3, "min": 1, "max": 10},
-            "min_motion": {"label": "最小位移", "desc": "最小位移(像素), 小于此值视为抖动", "type": "int", "default": 2, "min": 0, "max": 50},
+            "hold_frames": {"label": "滞留确认时长", "desc": "跨线后需在新侧保持的时长, 按25fps基准换算帧数 (3帧≈0.12秒), 与流帧率解耦", "type": "int", "default": 3, "min": 1, "max": 10},
+            "min_motion": {"label": "最小位移", "desc": "最小位移(像素), 小于此值视为抖动 (2会漏计慢速拥堵车流跨线)", "type": "int", "default": 1, "min": 0, "max": 50},
             "hysteresis_ratio": {"label": "滞回防抖比例", "desc": "侧别反转需超过此距离(占帧短边比例), 忽略带内抖动", "type": "float", "default": 0.04, "step": 0.001, "min": 0, "max": 1},
             "reverse_crossing_cooldown": {"label": "反向跨线冷却(秒)", "desc": "同一轨迹反向事件的最小间隔(视频时间)", "type": "float", "default": 3.0, "step": 0.5, "min": 0},
             "id_switch_speed_ratio": {"label": "ID切换速度倍数", "desc": "速度超过历史平均 N 倍视为 ID 切换", "type": "float", "default": 3.0, "step": 0.1, "min": 1},
