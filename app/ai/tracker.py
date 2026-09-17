@@ -43,7 +43,12 @@ class ByteTracker:
         self._model = None
         self.track_history = OrderedDict()
         self.max_history_length = settings.track_buffer
-        self._miss_grace = 5
+        # 短暂遮挡 (货车间歇遮挡/黄昏漏检) 后同一 track_id 重现时保留轨迹历史,
+        # 使跨线计数能感知遮挡期间完成的跨越. 取 40 处理帧, 需 >= bytetrack.yaml
+        # track_buffer(30): BoT-SORT 对丢失轨迹的保留上限, 同 ID 重现必为同一目标
+        # (ultralytics 会话内 ID 单调递增不复用); 超过 buffer 后 ID 已更换, 旧历史
+        # 由本表清空, 不会把新目标误接到旧轨迹上.
+        self._miss_grace = 40
         self._miss_count: dict = {}
         self.frame_id = 0
         self._camera_type = camera_type
@@ -65,8 +70,13 @@ class ByteTracker:
         track_buffer = int(get_rule("tracking", "track_buffer", default=settings.track_buffer))
         self.max_history_length = track_buffer
 
+        # persist=True 必须保留: ultralytics 在 persist=False 时每次 predict 都会
+        # 重建 tracker (并重置全局 ID 计数器), 逐帧调用 model.track() 会让 ID
+        # 每帧从 1 重新分配 -> 同一 track_id 混入不同目标, 轨迹历史错乱,
+        # 跨线状态反复被 ID 切换逻辑重置, 表现为跨线计数统计不上/恒为 0.
         results = self._model.track(
             frame,
+            persist=True,
             conf=conf,
             iou=iou,
             verbose=False,

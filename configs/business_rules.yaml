@@ -10,7 +10,7 @@ counting:                  # 越线计数参数 (counter.py)
   min_distance_ratio: 0.02       # 距线最小距离占帧短边比例 (防抖)
   endpoint_sensitivity: 0.05     # 端点误判过滤敏感度
   hold_frames: 3                 # 滞留确认帧数 (跨线后需在新侧连续保持)
-  min_motion: 2                  # 最小位移(像素), 小于此值视为抖动
+  min_motion: 1                  # 最小位移(像素), 小于此值视为抖动 (2会漏计慢速拥堵车流跨线, 如1.7px/帧的缓行车)
   hysteresis_ratio: 0.04         # 滞回防抖: 侧别反转需超过此距离(占帧短边比例)
   reverse_crossing_cooldown: 3.0 # 反向跨线冷却(秒), 同一轨迹反向事件间隔
   id_switch_speed_ratio: 3.0     # ID切换: 速度超过历史平均 N 倍视为切换
@@ -56,6 +56,6 @@ anomaly:                   # 视频异常检测参数 (黑屏/花屏)
   confirm_frames: 2              # 连续确认帧数(去抖)
 
 tracking:                  # 目标跟踪参数
-  yolo_conf: 0.4                 # YOLO 置信度阈值
+  yolo_conf: 0.3                 # YOLO 置信度阈值 (0.4 在黄昏场景漏检远处车辆, 导致轨迹出生即在计数线下方而漏计)
   yolo_iou: 0.5                  # NMS IoU 阈值
   track_buffer: 30               # 跟踪历史最大长度 (由 bytetrack.yaml 决定算法)

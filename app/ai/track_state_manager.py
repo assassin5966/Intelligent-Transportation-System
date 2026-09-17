@@ -1,4 +1,5 @@
 """轨迹状态管理器：管理轨迹跨线状态、已计数去重、TTL清理等."""
+import math
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
@@ -21,8 +22,13 @@ class TrackStateManager:
         self.track_states: Dict[str, str] = {}
         # 跨线前位置: track_id -> [x, y]
         self.track_crossing_start_pos: Dict[str, List[float]] = {}
-        # 双向计数去重: "track_id|direction" -> 计数时间戳
-        self.counted_tracks: Dict[str, float] = {}
+        # 跨线交点: track_id -> [x, y] (运动线段与计数线的真实交点, 供事件坐标)
+        self.track_cross_points: Dict[str, List[float]] = {}
+        # 双向计数去重: "track_id|direction" -> (计数时间戳, 跨线交点)
+        self.counted_tracks: Dict[str, Tuple[float, Optional[List[float]]]] = {}
+        # 真重复判定窗口: 同方向同点短时间内再次跨线视为同一物理事件的重复确认
+        self.dedup_window: float = 10.0  # 秒
+        self.dedup_distance: float = 60.0  # 像素 (跨线点聚类半径)
 
     def get_state(self, track_id: str) -> str:
         """获取轨迹状态, 默认 TRACKING."""
@@ -60,6 +66,14 @@ class TrackStateManager:
     def get_crossing_start(self, track_id: str) -> Optional[List[float]]:
         """获取跨线起始位置."""
         return self.track_crossing_start_pos.get(track_id)
+
+    def set_cross_point(self, track_id: str, point: List[float]):
+        """记录最近一次跨线的真实交点 (像素坐标)."""
+        self.track_cross_points[track_id] = list(point)
+
+    def get_cross_point(self, track_id: str) -> Optional[List[float]]:
+        """获取最近一次跨线的真实交点."""
+        return self.track_cross_points.get(track_id)
 
     def determine_direction(
         self,
@@ -101,23 +115,34 @@ class TrackStateManager:
         current_time: float,
         reverse_crossing_cooldown: float,
         count_only: Optional[str] = None,
+        cross_point: Optional[List[float]] = None,
     ) -> bool:
-        """检查是否可以计数 (双向去重 + 反向冷却 + count_only).
+        """检查是否可以计数 (去重 + 反向冷却 + count_only).
+
+        去重策略 (防抖确认后仍可能因检测抖动重复确认同一物理跨线):
+          - 同方向 + 短时间窗 (dedup_window) 内 + 跨线点几何邻近 (dedup_distance)
+            -> 判定为同一事件, 去重跳过;
+          - 时间窗之外或跨线点远离 -> 真实重过 (掉头/绕行), 允许再次计数.
+            (旧实现按 track_id|direction 永久去重 TTL 300s, 会吞掉真实重过)
 
         Returns:
             True 表示可以计数, False 表示应跳过
         """
         dedup_key = f"{track_id}|{entry_exit}"
 
-        # 双向去重: track_id+direction 维度, 允许同一轨迹来回各计一次
-        if dedup_key in self.counted_tracks:
-            return False
+        # 同事件去重: 时间窗 + 跨线点聚类
+        prev = self.counted_tracks.get(dedup_key)
+        if prev is not None:
+            prev_time, prev_point = prev
+            if (current_time - prev_time <= self.dedup_window
+                    and self._same_spot(cross_point, prev_point)):
+                return False
 
         # 反向跨线冷却: 同一轨迹反向事件需间隔冷却时间
         opposite_dir = "exit" if entry_exit == "enter" else "enter"
         opposite_key = f"{track_id}|{opposite_dir}"
         if opposite_key in self.counted_tracks:
-            time_since_opposite = current_time - self.counted_tracks[opposite_key]
+            time_since_opposite = current_time - self.counted_tracks[opposite_key][0]
             if time_since_opposite < reverse_crossing_cooldown:
                 return False
 
@@ -127,14 +152,44 @@ class TrackStateManager:
 
         return True
 
-    def mark_counted(self, track_id: str, entry_exit: str, current_time: float):
-        """标记轨迹已计数."""
+    def _same_spot(
+        self,
+        point: Optional[List[float]],
+        prev_point: Optional[List[float]],
+    ) -> bool:
+        """两次跨线点是否落在同一几何聚类内.
+
+        任一交点缺失时保守视为同点 (维持旧行为, 避免漏去重).
+        """
+        if point is None or prev_point is None:
+            return True
+        return math.hypot(
+            point[0] - prev_point[0], point[1] - prev_point[1]
+        ) <= self.dedup_distance
+
+    def mark_counted(
+        self,
+        track_id: str,
+        entry_exit: str,
+        current_time: float,
+        cross_point: Optional[List[float]] = None,
+    ):
+        """标记轨迹已计数 (记录时间与跨线交点, 供同事件去重)."""
         dedup_key = f"{track_id}|{entry_exit}"
-        self.counted_tracks[dedup_key] = current_time
+        self.counted_tracks[dedup_key] = (
+            current_time,
+            list(cross_point) if cross_point is not None else None,
+        )
 
     def reset_track(self, track_id: str):
-        """清除轨迹的跨线状态 (ID 切换检测触发)."""
+        """清除轨迹的跨线状态 (ID 切换检测触发).
+
+        必须同时复位状态机 (CROSSING -> TRACKING): 只清起始位置会残留
+        CROSSING, 后续帧会基于新目标的运动误走确认流程.
+        """
+        self.track_states[track_id] = "TRACKING"
         self.track_crossing_start_pos.pop(track_id, None)
+        self.track_cross_points.pop(track_id, None)
 
     def cleanup(self, current_time: Optional[float] = None, ttl: float = 300):
         """清理长时间无跨线的轨迹状态; 按 TTL 淘汰已计数轨迹.
@@ -160,11 +215,12 @@ class TrackStateManager:
             self.track_crossing_history.pop(track_id, None)
             self.track_states.pop(track_id, None)
             self.track_crossing_start_pos.pop(track_id, None)
+            self.track_cross_points.pop(track_id, None)
 
         # 已计数轨迹按 TTL 淘汰: 7x24 流长期运行防止内存无限增长;
         # 流重连后跟踪器 ID 从头分配, 淘汰旧 ID 避免新轨迹被误判为已计数而漏计.
         expired = [
-            tid for tid, ts in self.counted_tracks.items()
+            tid for tid, (ts, _pt) in self.counted_tracks.items()
             if current_time - ts > ttl
         ]
         for tid in expired:
@@ -177,4 +233,5 @@ class TrackStateManager:
         self.track_crossing_history.clear()
         self.track_states.clear()
         self.track_crossing_start_pos.clear()
+        self.track_cross_points.clear()
         self.counted_tracks.clear()

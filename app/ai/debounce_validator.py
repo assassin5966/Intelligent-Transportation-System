@@ -36,8 +36,8 @@ class DebounceValidator:
 
         # 滞留状态: track_id -> 确认侧 (+1/-1)
         self.track_confirm_side: Dict[str, int] = {}
-        # 滞留已确认帧数: track_id -> int
-        self.track_hold_count: Dict[str, int] = {}
+        # 滞留已确认时长 (秒): track_id -> float (时间量纲, 与流帧率解耦)
+        self.track_hold_time: Dict[str, float] = {}
 
     def set_line_params(
         self,
@@ -102,9 +102,10 @@ class DebounceValidator:
         track_id: str,
         curr_off: float,
         hysteresis_offset: float,
-        hold_frames: int,
+        hold_seconds: float,
+        dt: float,
     ) -> str:
-        """滞留确认: 连续 hold_frames 帧保持在跨线后侧.
+        """滞留确认: 跨线后在新侧持续保持 hold_seconds 秒 (时间量纲, 与帧率解耦).
 
         滞回防抖: 侧别反转需超过 hysteresis_offset, 带内抖动不触发反转.
 
@@ -112,7 +113,8 @@ class DebounceValidator:
             track_id: 轨迹 ID
             curr_off: 当前帧 offset 值
             hysteresis_offset: 滞回阈值 (像素阈值 * 线长)
-            hold_frames: 滞留确认帧数
+            hold_seconds: 滞留确认时长 (秒); 由 hold_frames / 基准帧率换算
+            dt: 本帧距上一帧的时间间隔 (秒), 用于滞留时长累计
 
         Returns:
             "pending": 未确认, 需继续等待
@@ -128,13 +130,13 @@ class DebounceValidator:
                 return "pending"
 
             # 超过滞回阈值: 真实侧别反转, 更新确认侧
-            self.track_hold_count[track_id] = 0
+            self.track_hold_time[track_id] = 0.0
             self.track_confirm_side[track_id] = 1 if curr_off > 0 else -1
             return "side_changed"
 
-        # 递增滞留计数
-        self.track_hold_count[track_id] = self.track_hold_count.get(track_id, 0) + 1
-        if self.track_hold_count[track_id] < hold_frames:
+        # 累计滞留时长 (秒): 低帧率流单帧 dt 大, 不再因帧数不足而确认过慢
+        self.track_hold_time[track_id] = self.track_hold_time.get(track_id, 0.0) + dt
+        if self.track_hold_time[track_id] < hold_seconds:
             return "pending"
 
         return "confirmed"
@@ -142,9 +144,9 @@ class DebounceValidator:
     def reset_track(self, track_id: str):
         """清除指定轨迹的滞留状态."""
         self.track_confirm_side.pop(track_id, None)
-        self.track_hold_count[track_id] = 0
+        self.track_hold_time[track_id] = 0.0
 
     def reset(self):
         """重置所有滞留状态."""
         self.track_confirm_side.clear()
-        self.track_hold_count.clear()
+        self.track_hold_time.clear()

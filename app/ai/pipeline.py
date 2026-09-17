@@ -95,7 +95,11 @@ class DevicePipeline:
                         await self._handle_anomaly(anomaly_ev)
                 track_result = await asyncio.to_thread(self.tracker.track, frame)
 
-                events = self.counter.process_tracks(track_result, self.device_id)
+                # 单调时钟统一: 计数器内部冷却/去重/TTL 与本管道的车流统计
+                # (_vehicle_cross_times) 均基于 monotonic, 不受系统对时跳变影响
+                events = self.counter.process_tracks(
+                    track_result, self.device_id, current_time=time.monotonic(),
+                )
 
                 for event in events:
                     await self._push(event)

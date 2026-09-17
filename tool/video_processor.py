@@ -233,8 +233,9 @@ def draw_annotations(frame, track_result, events, statistics, counter, anomaly_s
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
 
     # ROI 多边形 (半透明绿色填充 + 边界, 标识计数有效区域)
-    if counter._roi_px is not None and len(counter._roi_px) >= 3:
-        roi_int = [[int(p[0]), int(p[1])] for p in counter._roi_px]
+    roi_px = counter.roi_detector._roi_px
+    if roi_px is not None and len(roi_px) >= 3:
+        roi_int = [[int(p[0]), int(p[1])] for p in roi_px]
         overlay = annotated.copy()
         cv2.fillPoly(overlay, [np.array(roi_int, dtype=np.int32)], (0, 255, 0))
         cv2.addWeighted(overlay, 0.15, annotated, 0.85, 0, annotated)
