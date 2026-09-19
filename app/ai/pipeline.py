@@ -18,6 +18,11 @@ from .tracker import ByteTracker
 
 _ws_clients: set = set()
 
+# 运行时统计输出周期 (秒): 有效处理帧率/推理耗时/丢帧率/事件数/各环节拒绝次数.
+# 在线管道此前无任何性能与环节指标, CPU 无 GPU 场景下漏计无法定位是"处理慢丢帧"
+# 还是"计数逻辑拒绝", 故周期汇总一行 INFO 日志. 周期由 COUNT_STATS_INTERVAL 配置.
+_STATS_INTERVAL = settings.count_stats_interval
+
 
 def register_ws_client(queue: asyncio.Queue):
     _ws_clients.add(queue)
@@ -71,6 +76,12 @@ class DevicePipeline:
         # 人流速度统计: 最近 60 秒人员跨线事件时间戳 (用于计算每分钟人流量, 单调时钟秒)
         self._person_cross_times: deque = deque(maxlen=4096)
         self._last_roi_report = 0.0  # 上次 ROI 车辆数上报时刻 (monotonic 秒)
+        # 运行时统计窗口 (每 _STATS_INTERVAL 秒汇总一行日志后清零)
+        self._stats_window_start: Optional[float] = None
+        self._stats_frames = 0  # 窗口内已处理帧数
+        self._stats_infer_seconds = 0.0  # 窗口内推理累计耗时 (含线程池排队)
+        self._stats_events = 0  # 窗口内产出事件数
+        self._stats_decoded_last = 0  # 上次汇总时的连接内累计解码帧数 (算窗口增量)
 
     async def _run(self) -> None:
         logger.info(f"[{self.device_id}] 管道启动: {self.stream_url}")
@@ -78,7 +89,7 @@ class DevicePipeline:
         heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         try:
             url_provider = self._refresh_stream_url if self.enable_url_refresh else None
-            async for frame, _idx in stream_frames(
+            async for frame, _idx, decoded in stream_frames(
                 self.stream_url, self._stop, url_provider=url_provider
             ):
                 if frame is not None:
@@ -93,15 +104,29 @@ class DevicePipeline:
                     if anomaly_ev is not None:
                         anomaly_ev.timestamp = datetime.now().isoformat()
                         await self._handle_anomaly(anomaly_ev)
+                infer_start = time.monotonic()
                 track_result = await asyncio.to_thread(self.tracker.track, frame)
+                # 含线程池排队耗时: 多路并发时该值明显高于纯推理耗时, 即"排队"证据
+                self._stats_infer_seconds += time.monotonic() - infer_start
+                self._stats_frames += 1
 
                 # 单调时钟统一: 计数器内部冷却/去重/TTL 与本管道的车流统计
                 # (_vehicle_cross_times) 均基于 monotonic, 不受系统对时跳变影响
                 events = self.counter.process_tracks(
                     track_result, self.device_id, current_time=time.monotonic(),
                 )
+                self._stats_events += len(events)
 
                 for event in events:
+                    if settings.count_event_log:
+                        # 逐事件明细 (COUNT_EVENT_LOG=true 时): 便于核对漏计/误计的时刻与交点
+                        logger.info(
+                            f"[{self.device_id}] 越线事件 {event.event_type} "
+                            f"track={event.track_id} class={event.class_name} "
+                            f"dir={event.direction} "
+                            f"交点=({event.cross_point[0]:.0f},{event.cross_point[1]:.0f}) "
+                            f"conf={event.confidence:.2f}"
+                        )
                     await self._push(event)
                     await self._broadcast_ws(event)
 
@@ -122,6 +147,8 @@ class DevicePipeline:
                     await self._report_congestion(roi_vehicles, roi_persons)
 
                 await self._broadcast_tracks_ws(track_result)
+
+                self._report_stats(decoded)
         except asyncio.CancelledError:
             pass
         except Exception as e:  # noqa: BLE001
@@ -180,6 +207,48 @@ class DevicePipeline:
             )
         except Exception as e:  # noqa: BLE001
             logger.error(f"[{self.device_id}] 推送失败: {e}")
+
+    def _report_stats(self, decoded: int) -> None:
+        """周期汇总运行统计 (每 _STATS_INTERVAL 秒一行 INFO).
+
+        丢帧率 = 1 - 处理帧数/解码帧数: 处理慢于上游帧率时读帧线程不断用新帧覆盖
+        旧帧, 未处理帧被丢弃, 目标跨线动作可能整段丢失 -> 漏计.
+        推理耗时含 asyncio.to_thread 线程池排队时间, 多路并发时是"排队"的直接证据.
+        拒绝次数给出事件被哪一环节拦下 (ROI/夹角过滤/ID切换/防抖/滞留/去重/单向模式).
+        """
+        now = time.monotonic()
+        if self._stats_window_start is None:
+            self._stats_window_start = now
+            return
+        elapsed = now - self._stats_window_start
+        if elapsed < _STATS_INTERVAL:
+            return
+
+        processed = self._stats_frames
+        # decoded 是"当前连接内累计解码帧数", 需减去上次汇总时的基线得到窗口增量;
+        # 断流重连后 decoded 归零 (小于基线) 时退化为按已处理帧数计, 避免丢帧数为负
+        window_decoded = decoded - self._stats_decoded_last
+        if window_decoded < 0:
+            window_decoded = processed
+        dropped = max(window_decoded - processed, 0)
+        dropped_pct = dropped / window_decoded * 100.0 if window_decoded else 0.0
+        infer_ms = self._stats_infer_seconds / processed * 1000.0 if processed else 0.0
+        reject = self.counter.pop_reject_stats()
+        reject_str = " ".join(f"{k}={v}" for k, v in sorted(reject.items())) or "无"
+
+        logger.info(
+            f"[{self.device_id}] 运行统计({elapsed:.0f}s): "
+            f"处理fps={processed / elapsed:.2f} "
+            f"解码={window_decoded} 丢帧={dropped}({dropped_pct:.0f}%) "
+            f"推理={infer_ms:.0f}ms/帧 "
+            f"事件={self._stats_events} | 拒绝: {reject_str}"
+        )
+
+        self._stats_window_start = now
+        self._stats_decoded_last = decoded
+        self._stats_frames = 0
+        self._stats_infer_seconds = 0.0
+        self._stats_events = 0
 
     def _vehicle_flow_per_minute(self, now_mono: float) -> float:
         """最近 60 秒内车辆跨线次数折算为每分钟车流量 (辆/分钟).

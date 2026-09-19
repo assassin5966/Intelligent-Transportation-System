@@ -85,6 +85,12 @@ async def stream_frames(
 ):
     """异步帧生成器. 拉流在线程中持续进行, 处理侧只取最新帧 (允许丢帧).
 
+    产出 (frame, idx, decoded):
+      - idx: 已产出(被处理)帧序号, 从 1 递增;
+      - decoded: 当前连接内已解码帧数 (读帧线程解出的总帧数). 与 idx 之差即
+        "处理慢被覆盖丢弃"的帧数, 供处理侧统计丢帧率定位漏计. 断流重连后
+        重新从 0 累计 (新连接).
+
     断流重连: 先重开同一 url (_open 内含 tenacity 5 次退避重试); 仍失败且提供了
     url_provider (WVP 流地址刷新回调) 时, 调用其获取新地址再重连. url_provider=None
     时行为与离线处理一致 (重连 5 次失败即放弃).
@@ -144,7 +150,7 @@ async def stream_frames(
                 continue
             last_seq = seq
             idx += 1
-            yield frame, idx
+            yield frame, idx, seq
     finally:
         await asyncio.to_thread(reader.close)
         logger.info(f"视频流已释放: {current_url} (共 {idx} 帧)")

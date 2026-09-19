@@ -84,6 +84,11 @@ class Settings(BaseSettings):
     flower_channel_corr: float = 0.5  # 通道相关性 < 此值 (花屏: 去相关)
     flower_temporal_diff: float = 25.0  # 时域差分 > 此值 (花屏: 时域高噪, 有前帧时)
 
+    # ---- 运行诊断 (计数可观测性, 定位事件丢失/漏计) ----
+    log_level: str = "INFO"  # 控制台(stderr)日志级别; 文件日志固定 DEBUG, 排查时设 DEBUG
+    count_stats_interval: float = 30.0  # 计数运行统计输出周期 (秒): 有效帧率/丢帧/推理耗时/各环节拒绝
+    count_event_log: bool = False  # 每次越线事件输出一条明细日志 (排查漏计/误计时开启)
+
     # ---- 安全 ----
     cors_origins: str = "*"  # 允许的跨域来源, 逗号分隔; 生产环境应配置具体前端域名
 

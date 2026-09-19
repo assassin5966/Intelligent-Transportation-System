@@ -104,6 +104,17 @@ class LineCrossingCounter:
         # 已计数去重保留时长 (秒); 超时后淘汰, 避免内存泄漏与流重连 ID 重用漏计
         self.counted_tracks_ttl = 300
 
+        # 可观测性: 各环节拒绝次数累计 (每帧累加, pop_reject_stats 取出后清零).
+        # 用于在 CPU 无 GPU / 低有效帧率环境下定位事件丢失发生在哪一环
+        self._reject_stats: Dict[str, int] = {}
+
+        # 逐目标诊断轨迹 (默认关闭): trace_enabled=True 时按帧记录每个目标的跨线
+        # 生命周期 (跨线检出 / 各环节拒绝 / 事件产出), 含帧号与 offset.
+        # 用于离线排查"某个目标为什么没被计数"; 长期开启会累积内存, 仅排查时打开.
+        self.trace_enabled = False
+        self.trace_records: List[Dict] = []
+        self._trace_ctx: Dict = {"frame": None, "track_id": None}
+
         # ROI 感兴趣区域多边形 (归一化坐标 [x1,y1,x2,y2,...], >=6 个值即 >=3 个顶点).
         # 仅 ROI 内 (中心点在多边形内) 的轨迹参与越线计数;
         # None 表示不启用 ROI, 全画面计数 (向后兼容).
@@ -400,10 +411,17 @@ class LineCrossingCounter:
 
         for track in track_result.tracks:
             track_id = track.track_id
+            # 诊断上下文: 供 _reject/_trace 记录当前帧号与目标 (trace_enabled 时才落盘)
+            self._trace_ctx = {
+                "frame": getattr(track_result, "frame_id", None),
+                "track_id": track_id,
+                "class": getattr(track, "class_name", None),
+            }
 
             self.state_manager.ensure_track_initialized(track_id)
 
             if len(track.history) < 2:
+                self._reject("历史不足")
                 continue
 
             prev_point = track.history[-2]
@@ -416,21 +434,38 @@ class LineCrossingCounter:
             if not self.roi_detector.point_in_roi(curr_point) and (
                 self.state_manager.get_state(track_id) != "CROSSING"
             ):
+                self._reject("ROI外")
                 continue
 
             # 2. ID 切换检测: 速度突变过滤
             if self.id_switch_detector.detect_speed_anomaly(track):
                 self.state_manager.reset_track(track_id)
                 self.debounce_validator.reset_track(track_id)
+                self._reject("ID切换")
                 continue
 
             # 3. 跨线检测
             prev_off = self._offset(prev_point)
             curr_off = self._offset(curr_point)
             detected = self.crossing_detector.detect_crossing(prev_point, curr_point)
+            if detected is None and prev_off * curr_off < 0:
+                # offset 已异号 (几何上跨了线) 却未检出: 被夹角过滤 (min_motion) 拒绝.
+                # 慢速车流/低有效帧率下易发生, 属静默漏计
+                self._reject(
+                    "夹角过滤",
+                    prev_off=round(prev_off, 1), curr_off=round(curr_off, 1),
+                    min_motion=self.min_motion,
+                    step=round(math.hypot(curr_point[0] - prev_point[0],
+                                          curr_point[1] - prev_point[1]), 1),
+                )
 
             if detected is not None:
                 direction, cross_point = detected
+                self._trace(
+                    "crossing", direction=direction,
+                    prev_off=round(prev_off, 1), curr_off=round(curr_off, 1),
+                    cross_point=[round(cross_point[0], 1), round(cross_point[1], 1)],
+                )
                 self.state_manager.add_crossing_history(
                     track_id, current_time, self.line_name, direction
                 )
@@ -453,8 +488,10 @@ class LineCrossingCounter:
             # 5. 防抖: 远离计数线 + 端点过滤
             if self.anti_jitter:
                 if not self.debounce_validator.is_clear_of_line(curr_point):
+                    self._reject("未远离线")
                     continue
                 if not self._filter_endpoint_false_positive(track):
+                    self._reject("端点过滤")
                     continue
 
             # 6. 滞留确认 (含滞回防抖; 时间量纲, hold_frames 按 25fps 基准换算)
@@ -463,12 +500,14 @@ class LineCrossingCounter:
                 self.hold_frames / self.base_fps, raw_dt,
             )
             if hold_result == "pending":
+                self._reject("滞留未满", curr_off=round(curr_off, 1))
                 continue
             if hold_result == "side_changed":
                 # 侧别反转: 重置跨线起点 (同样需为侧别明确的点)
                 self.state_manager.update_crossing_start(
                     track_id, self._side_definite_point(track, prev_point, prev_off)
                 )
+                self._reject("侧别反转")
                 continue
             # hold_result == "confirmed": 继续
 
@@ -484,6 +523,7 @@ class LineCrossingCounter:
                 direction_str = "inner_to_outer"
             else:
                 # 起止同侧 (抖动跨回), 不产出事件
+                self._reject("起止同侧", start_off=round(start_off, 1), end_off=round(end_off, 1))
                 self.state_manager.set_state(track_id, "TRACKING")
                 continue
 
@@ -493,6 +533,7 @@ class LineCrossingCounter:
             ):
                 self.state_manager.reset_track(track_id)
                 self.debounce_validator.reset_track(track_id)
+                self._reject("方向不一致")
                 continue
 
             # 9. 去重 (同事件: 时间窗+跨线点聚类) + 反向冷却 + count_only
@@ -502,6 +543,10 @@ class LineCrossingCounter:
                 self.reverse_crossing_cooldown, self.count_only,
                 cross_point=cross_point,
             ):
+                if self.count_only is not None and entry_exit != self.count_only:
+                    self._reject("单向模式", entry_exit=entry_exit)  # 设备 count_only 配置按设计吞掉反向事件
+                else:
+                    self._reject("去重/冷却", entry_exit=entry_exit)
                 self.state_manager.set_state(track_id, "TRACKING")
                 continue
 
@@ -511,6 +556,11 @@ class LineCrossingCounter:
                 direction_str, entry_exit, self.line_name,
             )
             events.append(event)
+            self._trace(
+                "event", event_type=event.event_type, direction=direction_str,
+                entry_exit=entry_exit,
+                cross_point=[round(event.cross_point[0], 1), round(event.cross_point[1], 1)],
+            )
 
             # 双向计数: 记录 track_id+direction+交点, 允许反方向再计一次
             self.state_manager.mark_counted(
@@ -530,6 +580,36 @@ class LineCrossingCounter:
         for track_id in removed:
             self.debounce_validator.reset_track(track_id)
 
+    def _reject(self, reason: str, **detail) -> None:
+        """累加一次环节拒绝计数 (供运行统计定位事件丢失发生在哪一环).
+
+        trace_enabled=True 时额外记录一条诊断轨迹 (含帧号/目标/关键 offset),
+        用于回答"这个目标卡在哪一环".
+        """
+        self._reject_stats[reason] = self._reject_stats.get(reason, 0) + 1
+        if self.trace_enabled:
+            self.trace_records.append({"stage": "reject", "reason": reason, **self._trace_ctx, **detail})
+
+    def _trace(self, stage: str, **detail) -> None:
+        """记录一条跨线生命周期诊断轨迹 (仅 trace_enabled 时; 如 crossing/event)."""
+        if self.trace_enabled:
+            self.trace_records.append({"stage": stage, **self._trace_ctx, **detail})
+
+    def pop_reject_stats(self) -> Dict[str, int]:
+        """取出并清零各环节拒绝计数 (由运行统计周期汇总后调用)."""
+        stats = self._reject_stats
+        self._reject_stats = {}
+        return stats
+
+    def pop_trace(self) -> List[Dict]:
+        """取出并清空逐目标诊断轨迹 (由诊断输出方周期调用, 避免内存累积)."""
+        records = self.trace_records
+        self.trace_records = []
+        return records
+
     def reset(self):
         self.state_manager.reset()
         self.debounce_validator.reset()
+        self._reject_stats.clear()
+        self.trace_records.clear()
+        self._trace_ctx = {"frame": None, "track_id": None}

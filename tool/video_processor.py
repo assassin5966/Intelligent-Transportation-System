@@ -15,6 +15,7 @@
     --frame_skip  跳帧间隔，1=每帧都处理，5=每5帧处理1帧（默认: 5）
     --no-annotated 不生成标注视频（加速处理）
     --line        计数线坐标，格式: x1,y1,x2,y2（归一化0-1，默认: 0.1,0.4,0.9,0.4）
+    --verbose     详细计数诊断: 逐事件打印, 输出 <视频>_trace.json (逐目标跨线生命周期)
 """
 
 import argparse
@@ -171,6 +172,9 @@ def parse_args():
     parser.add_argument("--count-only", default=None, choices=["enter", "exit"], help="单向计数模式: enter=只计进入, exit=只计离开")
     parser.add_argument("--camera-type", default=None, choices=["vehicle", "person"], help="摄像头类型: vehicle=只检测机动车, person=只检测人流(含非机动车)")
     parser.add_argument("--no-anomaly", action="store_true", help="禁用视频异常检测 (黑屏/花屏)")
+    parser.add_argument("--verbose", action="store_true",
+                        help="详细计数诊断: 记录每个目标的跨线生命周期轨迹 (跨线检出/各环节拒绝/事件产出), "
+                             "输出 <视频>_trace.json 并逐事件打印")
     return parser.parse_args()
 
 
@@ -336,6 +340,9 @@ def process_video(args):
         anchor_parts = [float(x) for x in args.anchor.split(",")]
         counter = LineCrossingCounter()
         counter.set_frame_size(frame_width, frame_height)
+        # --verbose: 开启逐目标跨线生命周期诊断轨迹 (跨线检出/各环节拒绝/事件产出)
+        if args.verbose:
+            counter.trace_enabled = True
         counter.set_line([[line_parts[0], line_parts[1]], [line_parts[2], line_parts[3]]],
                          anchor=(anchor_parts[0], anchor_parts[1]))
         if args.count_only:
@@ -393,6 +400,7 @@ def process_video(args):
     all_alarms = []
     all_anomalies = []
     stats_timeline = []
+    trace_records: list = []  # 逐目标诊断轨迹 (--verbose 时才有内容)
 
     frame_idx = 0
     processed_idx = 0
@@ -476,6 +484,12 @@ def process_video(args):
                 "confidence": event.confidence,
             }
             all_events.append(event_dict)
+            # --verbose: 逐事件打印 (含时刻/交点/方向), 便于人工核对漏计/误计
+            if args.verbose:
+                print(f"  [事件] {event.event_type} track={event.track_id} "
+                      f"class={event.class_name} dir={event.direction} "
+                      f"交点=({event.cross_point[0]:.0f},{event.cross_point[1]:.0f}) "
+                      f"@ {current_video_time.strftime('%H:%M:%S')} ({video_time_sec:.1f}s)")
 
         if out_writer is not None:
             annotated = draw_annotations(
@@ -504,10 +518,18 @@ def process_video(args):
                   f"车辆: {current_stats.current_vehicles} | "
                   f"人员: {current_stats.current_persons}")
             last_progress_time = current_time
+            # --verbose: 周期性取走诊断轨迹, 避免长视频下内存累积
+            if args.verbose:
+                trace_records.extend(counter.pop_trace())
 
     cap.release()
     if out_writer is not None:
         out_writer.release()
+
+    # 取出各环节拒绝计数 (全片累计) 与剩余诊断轨迹
+    reject_stats = counter.pop_reject_stats() if counter is not None else {}
+    if counter is not None and args.verbose:
+        trace_records.extend(counter.pop_trace())
 
     final_stats = statistics
 
@@ -539,7 +561,12 @@ def process_video(args):
             "anomaly_recovery": sum(1 for a in all_anomalies if a["phase"] == "recovery"),
             "black_screen_events": sum(1 for a in all_anomalies if a["anomaly_type"] == "black_screen"),
             "flower_screen_events": sum(1 for a in all_anomalies if a["anomaly_type"] == "flower_screen"),
-        }
+        },
+        # 计数诊断: 各环节拒绝次数 (定位事件丢失发生在哪一环), 关键指标无需 --verbose
+        "counting_diagnostics": {
+            "reject_stats": reject_stats,
+            "trace_records": len(trace_records),
+        },
     }
 
     with open(events_json_path, "w", encoding="utf-8") as f:
@@ -557,6 +584,12 @@ def process_video(args):
     with open(summary_json_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
     print(f"汇总报告已保存: {summary_json_path}")
+
+    if args.verbose:
+        trace_json_path = output_dir / f"{video_name}_trace.json"
+        with open(trace_json_path, "w", encoding="utf-8") as f:
+            json.dump(trace_records, f, ensure_ascii=False, indent=2)
+        print(f"计数诊断轨迹已保存: {trace_json_path} ({len(trace_records)}条)")
 
     if stats_timeline:
         with open(stats_csv_path, "w", newline="", encoding="utf-8") as f:
@@ -583,6 +616,12 @@ def process_video(args):
     if final_stats:
         print(f"  最终在场车辆: {final_stats.current_vehicles}")
         print(f"  最终在场人员: {final_stats.current_persons}")
+    if reject_stats:
+        # 计数各环节拒绝分布 (降序): 哪个环节吞掉的跨线最多, 就是漏计根因所在
+        detail = ", ".join(
+            f"{k}={v}" for k, v in sorted(reject_stats.items(), key=lambda kv: -kv[1])
+        )
+        print(f"  计数各环节拒绝: {detail}")
     print(f"{'='*60}")
 
 
