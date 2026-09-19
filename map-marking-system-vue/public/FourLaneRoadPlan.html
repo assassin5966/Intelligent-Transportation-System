@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>永泰门出口 · 四车道交通监测</title>
+<style>
+  :root {
+    /* ===== 黑色主题 ===== */
+    --bg: #07090c;              /* 页面背景（更深的黑） */
+    --panel-bg: #10131a;        /* 大数据卡卡底 */
+    --panel-border: #2a313d;
+    --panel-headline: #242b36;  /* 分隔线 */
+    --road-bg: #14171c;         /* 路面深灰 */
+    --road-bg-hover: #1c2027;
+    --line-color: #f2f4f8;      /* 标线亮白 */
+    --card-bg: rgba(22, 26, 32, .88);  /* 小数据卡半透明深底 */
+    --card-border: #39414d;
+    --ink: #e6eaf2;             /* 主文字 */
+    --muted: #8a93a3;           /* 次文字 */
+    --accent: #ff5a52;          /* 摄像头红 */
+    --blue: #4ea1ff;            /* 人流量蓝 */
+    --green: #3ddc84;           /* 运行状态绿 */
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif;
+    background: var(--bg);
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    color: var(--ink);
+  }
+
+  /* ===== 大数据卡：永泰门出口 ===== */
+  .big-card {
+    width: min(96vw, 1100px);
+    background: var(--panel-bg);
+    border: 1px solid var(--panel-border);
+    border-radius: 18px;
+    box-shadow: 0 24px 70px rgba(0, 0, 0, .6);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* --- 卡片头部：名称 + 状态 --- */
+  .panel-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 22px 28px 16px;
+    border-bottom: 1px solid var(--panel-headline);
+  }
+  .panel-head h1 {
+    font-size: 24px;
+    font-weight: 800;
+    letter-spacing: 4px;
+    color: #f2f5fa;
+  }
+  .panel-head .sub {
+    margin-top: 6px;
+    font-size: 12px;
+    color: var(--muted);
+    letter-spacing: 1px;
+  }
+  .status {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: var(--green);
+    border: 1px solid rgba(61, 220, 132, .35);
+    background: rgba(61, 220, 132, .08);
+    padding: 6px 14px;
+    border-radius: 999px;
+    white-space: nowrap;
+  }
+  .status i {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--green);
+    box-shadow: 0 0 10px var(--green);
+  }
+
+  /* --- 卡片主体：道路断面 --- */
+  .panel-body {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 18px 24px;
+  }
+
+  .dir-label {
+    font-size: 14px;
+    font-weight: 600;
+    color: #aab4c4;
+    letter-spacing: 3px;
+    padding: 3px 0;
+  }
+  .dir-label b { color: var(--accent); }
+  .dir-n { margin-bottom: 8px; transform: translateX(24vw); }
+  .dir-s { margin-top: 8px; transform: translateX(24vw); }
+  .dir-s .flow-hint { color: var(--muted); font-size: 12px; font-weight: 400; letter-spacing: 1px; }
+
+  /* ===== 断面组合：便道 + 道路 + 便道 ===== */
+  .cross-section {
+    display: flex;
+    align-items: stretch;
+  }
+
+  /* ----- 便道（人行道） ----- */
+  .sidewalk {
+    position: relative;
+    width: 40px;
+    background:
+      repeating-linear-gradient(45deg, transparent 0 5px, rgba(242, 244, 248, .07) 5px 6px),
+      #0d1016;
+  }
+  .sw-left {
+    border: 1px solid #333a45;
+    border-right: none;
+    border-radius: 4px 0 0 4px;
+  }
+  .sw-right {
+    border: 1px solid #333a45;
+    border-left: none;
+    border-radius: 0 4px 4px 0;
+  }
+  .sw-label {
+    position: absolute;
+    top: 10px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 11px;
+    color: #aab4c4;
+    letter-spacing: 2px;
+    white-space: nowrap;
+    z-index: 9;
+  }
+
+  /* ----- 道路（变短 + 纤细线条）：2 实线 + 4 车道 + 3 虚线 ----- */
+  .road {
+    position: relative;
+    display: flex;
+    width: min(40vw, 880px);
+    height: 50vh;
+    box-shadow: 0 0 0 1px #232830, 0 18px 50px rgba(0, 0, 0, .5);
+  }
+
+  .line { flex: none; }
+
+  /* 两条实线：车行道两侧边缘线（细） */
+  .line-solid {
+    width: 4px;
+    background: var(--line-color);
+  }
+
+  /* 三条虚线：车道分隔线（细，段长同步缩小） */
+  .line-dashed {
+    width: 2px;
+    background-image: repeating-linear-gradient(
+      180deg,
+      var(--line-color) 0 30px,
+      transparent 30px 60px
+    );
+  }
+
+  /* 四条车道（均由北向南行驶） */
+  .lane {
+    flex: 1;
+    position: relative;
+    background: var(--road-bg);
+    transition: background .25s;
+    cursor: default;
+  }
+  .lane:hover { background: var(--road-bg-hover); }
+
+  .lane .num {
+    position: absolute;
+    top: 46%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    font-size: clamp(26px, 5vh, 48px);
+    font-weight: 800;
+    color: rgba(242, 244, 248, .10);
+    user-select: none;
+  }
+  .lane .flow {
+    position: absolute;
+    top: 68%;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 18px;
+    line-height: 1;
+    color: rgba(242, 244, 248, .22);
+    user-select: none;
+  }
+  .lane .tag {
+    position: absolute;
+    top: 15%;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 13px;
+    color: rgba(242, 244, 248, .48);
+    letter-spacing: 4px;
+    white-space: nowrap;
+  }
+
+  /* ===== 摄像头覆盖范围（红色细虚线，各横跨 2 条车道） ===== */
+  .coverage {
+    position: absolute;
+    height: 0;
+    border-top: 1.5px dashed rgba(255, 90, 82, .6);
+    z-index: 4;
+  }
+  .coverage.c1 { left: 10px; right: 50%; top: calc(25% + 34px); }  /* 摄像头A：车道 1-2 */
+  .coverage.c2 { left: 50%; right: 10px; top: calc(25% + 34px); } /* 摄像头B：车道 3-4 */
+
+  /* ===== 锚点（摄像头图标），浮于卡片之上 ===== */
+  .anchor {
+    position: absolute;
+    left: var(--x, 50%);
+    top: var(--y, 50%);
+    transform: translate(-50%, -50%);
+    z-index: 9;
+  }
+
+  /* 摄像头图标（每 2 条车道一个，架在虚线上） */
+  .camera-mark {
+    position: relative;
+    width: 32px; height: 24px;
+  }
+  .cam-body {
+    position: absolute;
+    top: 0; left: 0;
+    width: 28px; height: 16px;
+    border: 2px solid var(--accent);
+    border-radius: 4px 9px 9px 4px;
+    background: #14171c;
+    box-shadow: 0 0 10px rgba(255, 90, 82, .35);
+  }
+  .cam-body::after {
+    content: "";
+    position: absolute;
+    right: 3px; top: 50%;
+    transform: translateY(-50%);
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+  }
+  .cam-pole {
+    position: absolute;
+    left: 50%; bottom: 0;
+    width: 2px; height: 10px;
+    background: var(--accent);
+    transform: translateX(-50%);
+  }
+
+  /* ===== 小数据卡：直接骑在道路示意图上 ===== */
+  .card {
+    position: absolute;
+    left: var(--x, 50%);
+    top: var(--y, 50%);
+    transform: translate(-50%, -50%);
+    z-index: 7;
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 8px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, .5);
+    padding: 8px 12px;
+    font-size: 12px;
+    color: var(--ink);
+    white-space: nowrap;
+  }
+
+  .card .card-title {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-weight: 700;
+    font-size: 13px;
+    margin-bottom: 5px;
+    color: #f0f3f8;
+  }
+  .card .dot {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: #e8ecf4;            /* 车流量：亮白点 */
+    flex: none;
+  }
+  .card .dot.person { background: var(--blue); }  /* 人流量：蓝点 */
+
+  .card .row {
+    display: flex;
+    gap: 14px;
+    color: var(--muted);
+  }
+  .card .row b {
+    color: #fff;
+    font-size: 13px;
+    font-weight: 700;
+    margin-left: 3px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ===== 车流量 / 人流量卡片区分：外框高亮 + 字体颜色 ===== */
+  /* 车流量卡：深绿色高亮外框 + 绿色标题/数据 + 泛绿卡底 */
+  .card.flow-vehicle {
+    border-color: rgba(52, 209, 123, .65);
+    background: rgba(14, 36, 26, .92);
+    box-shadow: 0 6px 20px rgba(0, 0, 0, .5), 0 0 14px rgba(52, 209, 123, .22);
+  }
+  .card.flow-vehicle .card-title { color: #55d6a2; }
+  .card.flow-vehicle .row b { color: #3ddc84; }
+  .card.flow-vehicle .dot { background: #3ddc84; }
+
+  /* 人流量卡：蓝色高亮外框 + 蓝色标题/数据 + 泛蓝卡底 */
+  .card.flow-person {
+    border-color: rgba(78, 161, 255, .78);
+    background: rgba(19, 31, 51, .92);
+    box-shadow: 0 6px 20px rgba(0, 0, 0, .5), 0 0 16px rgba(78, 161, 255, .30);
+  }
+  .card.flow-person .card-title { color: #7fc0ff; }
+  .card.flow-person .row b { color: #5aa9ff; }
+
+  /* 人流量卡：完全置于车道区域外侧（悬挂在便道外侧），不跨越 4 条车道 */
+  .card.side-l { left: -8px; transform: translate(-100%, -50%); }
+  .card.side-r { left: calc(100% + 8px); transform: translate(0, -50%); }
+  /* 窄卡形态：数据行竖排，压缩卡片宽度以适配侧挂空间 */
+  .card.flow-person .row {
+    flex-direction: column;
+    gap: 3px;
+    align-items: flex-start;
+  }
+
+  /* --- 卡片脚注：图例 --- */
+  .panel-foot {
+    padding: 13px 28px 18px;
+    border-top: 1px solid var(--panel-headline);
+    text-align: center;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .panel-foot .item { display: inline-flex; align-items: center; gap: 6px; margin: 0 10px; }
+  .mini-solid {
+    display: inline-block;
+    width: 30px; height: 3px;
+    background: var(--line-color);
+    border-radius: 2px;
+  }
+  .mini-dashed {
+    display: inline-block;
+    width: 30px; height: 0;
+    border-top: 3px dashed var(--line-color);
+  }
+  .mini-sw {
+    display: inline-block;
+    width: 22px; height: 14px;
+    border: 1px solid #333a45;
+    background: repeating-linear-gradient(45deg, transparent 0 4px, rgba(242, 244, 248, .15) 4px 5px), #0d1016;
+  }
+  .mini-cam {
+    display: inline-block;
+    width: 20px; height: 11px;
+    border: 2px solid var(--accent);
+    border-radius: 3px 6px 6px 3px;
+    position: relative;
+    background: #14171c;
+  }
+  .mini-cam::after {
+    content: "";
+    position: absolute;
+    right: 2px; top: 50%;
+    transform: translateY(-50%);
+    width: 4px; height: 4px;
+    border-radius: 50%;
+    background: var(--accent);
+  }
+  .mini-box {
+    display: inline-block;
+    width: 16px; height: 11px;
+    border-radius: 3px;
+    border: 1.5px solid rgba(52, 209, 123, .8);
+    background: rgba(52, 209, 123, .12);
+  }
+  .mini-box.p {
+    border-color: rgba(78, 161, 255, .85);
+    background: rgba(78, 161, 255, .18);
+  }
+</style>
+</head>
+<body>
+
+  <!-- 大数据卡：永泰门出口 -->
+  <div class="big-card">
+
+    <!-- 卡片头部 -->
+    <div class="panel-head">
+      <div class="head-left">
+        <h1>永泰门出口</h1>
+        <div class="sub">YONGTAIMEN EXIT · 单向四车道（由北向南）· 每 2 条车道 1 组摄像头 · 双侧便道</div>
+      </div>
+      <span class="status"><i></i>运行中</span>
+    </div>
+
+    <!-- 卡片主体：道路断面 -->
+    <div class="panel-body">
+      <!-- 北 -->
+      <div class="dir-label dir-n">▲ <b>N</b> · 北</div>
+
+      <!-- 断面组合：西侧便道 + 道路 + 东侧便道 -->
+      <div class="cross-section">
+
+        <!-- 西侧便道 -->
+        <div class="sidewalk sw-left">
+          <span class="sw-label">便道</span>
+        </div>
+
+        <!-- 道路：2 实线 + 4 车道（南向） + 3 虚线 -->
+        <div class="road">
+          <div class="line line-solid"></div><!-- 实线 1：西侧边缘线 -->
+          <div class="lane" title="第 1 车道（内侧）"><span class="tag">车道一</span><span class="num">1</span><span class="flow">▼</span></div>
+          <div class="line line-dashed"></div><!-- 虚线 1 -->
+          <div class="lane" title="第 2 车道"><span class="tag">车道二</span><span class="num">2</span><span class="flow">▼</span></div>
+          <div class="line line-dashed"></div><!-- 虚线 2 -->
+          <div class="lane" title="第 3 车道"><span class="tag">车道三</span><span class="num">3</span><span class="flow">▼</span></div>
+          <div class="line line-dashed"></div><!-- 虚线 3 -->
+          <div class="lane" title="第 4 车道（外侧）"><span class="tag">车道四</span><span class="num">4</span><span class="flow">▼</span></div>
+          <div class="line line-solid"></div><!-- 实线 2：东侧边缘线 -->
+
+          <!-- 摄像头 A：覆盖车道 1-2，架在虚线 1 上（与 B 同一水平线） -->
+          <div class="anchor" style="--x: 26%; --y: 25%;">
+            <div class="camera-mark"><span class="cam-body"></span><span class="cam-pole"></span></div>
+          </div>
+
+          <!-- 摄像头 B：覆盖车道 3-4，架在虚线 3 上（与 A 同一水平线） -->
+          <div class="anchor" style="--x: 74%; --y: 25%;">
+            <div class="camera-mark"><span class="cam-body"></span><span class="cam-pole"></span></div>
+          </div>
+
+          <!-- 摄像头覆盖范围指示线 -->
+          <div class="coverage c1"></div>
+          <div class="coverage c2"></div>
+
+          <!-- ===== 小数据卡 ×4：全部骑在道路示意图上 ===== -->
+
+          <!-- 摄像头 A 卡 · 骑在车道 1-2 上（探头正下方）· 车流量 -->
+          <div class="card flow-vehicle" style="--x: 26%; --y: 41%;">
+            <div class="card-title"><span class="dot"></span>摄像头 A · 车道 1-2</div>
+            <div class="row"><span><b>121,860</b>辆/日</span><span><b>5,120</b>辆/h</span></div>
+          </div>
+
+          <!-- 摄像头 B 卡 · 骑在车道 3-4 上（探头正下方）· 车流量 -->
+          <div class="card flow-vehicle" style="--x: 74%; --y: 41%;">
+            <div class="card-title"><span class="dot"></span>摄像头 B · 车道 3-4</div>
+            <div class="row"><span><b>98,210</b>辆/日</span><span><b>4,086</b>辆/h</span></div>
+          </div>
+
+          <!-- 西便道卡 · 悬挂于车道区域外侧（西侧）· 人流量 -->
+          <div class="card flow-person side-l" style="--y: 73%;">
+            <div class="card-title"><span class="dot person"></span>西侧便道 · 人流量</div>
+            <div class="row"><span><b>9,842</b>人次/日</span><span><b>1,152</b>人次/h</span></div>
+          </div>
+
+          <!-- 东便道卡 · 悬挂于车道区域外侧（东侧）· 人流量 -->
+          <div class="card flow-person side-r" style="--y: 73%;">
+            <div class="card-title"><span class="dot person"></span>东侧便道 · 人流量</div>
+            <div class="row"><span><b>11,208</b>人次/日</span><span><b>1,305</b>人次/h</span></div>
+          </div>
+        </div>
+
+        <!-- 东侧便道 -->
+        <div class="sidewalk sw-right">
+          <span class="sw-label">便道</span>
+        </div>
+      </div>
+
+      <!-- 南 -->
+      <div class="dir-label dir-s">▼ <b>S</b> · 南</div>
+    </div>
+
+    <!-- 卡片脚注：图例 -->
+    <div class="panel-foot">
+      <span class="item"><i class="mini-box"></i>绿框 ：车流量卡</span>
+      <span class="item"><i class="mini-box p"></i>蓝框 ：人流量卡</span>
+      <span class="item"><i class="mini-solid"></i>实线 ×2 ：车行道边缘线</span>
+      <span class="item"><i class="mini-dashed"></i>虚线 ×3 ：车道分隔线</span>
+      <span class="item"><i class="mini-cam"></i>摄像头 ×2 ：各覆盖 2 条车道</span>
+      <span class="item"><i class="mini-sw"></i>斜纹条 ×2 ：双侧便道</span>
+    </div>
+  </div>
+
+</body>
+</html>

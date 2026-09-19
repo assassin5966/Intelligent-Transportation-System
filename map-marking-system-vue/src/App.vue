@@ -15,6 +15,9 @@
     <!-- 全局 Toast 与加载遮罩 -->
     <ToastHost />
     <LoadingOverlay :show="loading" text="智慧交管平台初始化中…" />
+
+    <!-- 卡片双击放大遮罩（全局单例） -->
+    <CardZoomModal />
   </div>
 </template>
 
@@ -25,6 +28,7 @@ import MapPanel from './components/MapPanel.vue'
 import StatBoard from './components/StatBoard.vue'
 import ToastHost from './components/ToastHost.vue'
 import LoadingOverlay from './components/LoadingOverlay.vue'
+import CardZoomModal from './components/CardZoomModal.vue'
 import { useRealtime } from './composables/useRealtime.js'
 import { useTheme } from './composables/useTheme.js'
 
