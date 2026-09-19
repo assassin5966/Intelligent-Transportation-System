@@ -46,6 +46,9 @@ _REGION_DEFAULT = "大同古城"
 #                         entrance_type, point_type}}
 _cache: dict[str, dict] = {}
 
+# 短名 -> 白名单全名 的解析缓存 (见 _resolve_key); 缓存增删改时清空
+_alias: dict[str, str] = {}
+
 # 云冈类设备 (设备信息汇总表.xlsx 中"类=云冈类", 现为 JTKK 卡口, 无经纬度) —
 # 暂不迁入 MySQL: 点位编号以 JTKK 开头 或 名称含"云冈"者一律排除.
 _YUN_GANG_POINT_PREFIX = "JTKK"
@@ -157,9 +160,36 @@ async def count() -> int:
     return int(row[0]) if row else 0
 
 
+def _resolve_key(norm: str) -> Optional[str]:
+    """精确未命中时, 用"短名是白名单全名前缀"再匹配一次.
+
+    device_info 的 name 取自白名单 (含通道后缀, 如 '...以东90米(球)041216'),
+    而人工注册/运维页录入的设备名常不带后缀, 归一化后无法精确命中.
+    仅当候选唯一时命中: 同一前缀对应多个通道 (如卡口的 A/B 车道) 时返回 None,
+    避免落到错误的点位分类/经纬度.
+    """
+    if not norm:
+        return None
+    if norm in _alias:
+        return _alias[norm]
+    matches = [k for k in _cache if k.startswith(norm)]
+    if len(matches) != 1:
+        return None
+    _alias[norm] = matches[0]
+    return matches[0]
+
+
 def get(name: str) -> Optional[dict]:
-    """按名称查设备信息 (去空格匹配), 未匹配返回 None. 同步读内存缓存 (热路径)."""
-    return _cache.get(normalize(name))
+    """按名称查设备信息 (去空格匹配), 未匹配返回 None. 同步读内存缓存 (热路径).
+
+    精确未命中时按前缀兼容短名 (见 _resolve_key).
+    """
+    norm = normalize(name)
+    row = _cache.get(norm)
+    if row is not None:
+        return row
+    key = _resolve_key(norm)
+    return _cache.get(key) if key else None
 
 
 def geo_map() -> dict[str, tuple[float, float]]:
@@ -187,6 +217,7 @@ async def reload_cache() -> None:
             )
             rows = await cur.fetchall()
     _cache = {}
+    _alias.clear()
     for r in rows:
         try:
             longitude = float(r["longitude"]) if r["longitude"] is not None else None
@@ -276,6 +307,7 @@ async def upsert(
         "entrance_type": entrance_type,
         "point_type": point_type,
     }
+    _alias.clear()  # 新增/改名后短名解析失效, 下次查询重建
     return norm
 
 
@@ -289,6 +321,7 @@ async def delete(name: str) -> bool:
             affected = cur.rowcount
     if affected:
         _cache.pop(norm, None)
+        _alias.clear()
     return bool(affected)
 
 
@@ -334,8 +367,8 @@ def list_cached() -> list[dict]:
 
 
 def is_registered(name: str) -> bool:
-    """是否已在 device_info 表注册 (去空格匹配, WVP 启流选取用)."""
-    return normalize(name) in _cache
+    """是否已在 device_info 表注册 (去空格匹配, WVP 启流选取用; 兼容不带通道后缀的短名)."""
+    return get(name) is not None
 
 
 async def seed_from_json_if_empty() -> int:
