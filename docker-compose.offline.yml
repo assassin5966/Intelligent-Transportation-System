@@ -12,13 +12,18 @@
 #   3) 日志:     docker compose -f docker-compose.offline.yml -p smartcity logs -f backend
 #   4) 停止:     docker compose -f docker-compose.offline.yml -p smartcity down
 #
-# 说明: 环境变量从同目录 .env 读取 (没有则用默认值, 默认已指向上级 WVP 23.45.1.112)
+# 说明: 环境变量从同目录 .env 读取 (没有则用默认值, 默认已指向生产机 23.45.1.115 的 WVP/ZLM)
+#
+# GPU 生产部署 (8x4090, CUDA 12.2):
+#   1) docker load -i smart-city-platform_gpu.tar   (镜像 tag: smart-city-platform:gpu)
+#   2) .env 写 PLATFORM_IMAGE=smart-city-platform:gpu
+#   3) 取消下方 ai 服务 deploy 段注释 (8 卡预留), 再 compose up
 # ============================================================
 
 services:
   # ---------- AI 分析服务 (YOLO11/ByteTrack/越线计数, 端口 8001) ----------
   ai:
-    image: smart-city-platform:latest
+    image: ${PLATFORM_IMAGE:-smart-city-platform:latest}
     restart: unless-stopped
     command: ["python", "-m", "app.ai.service"]
     ports:
@@ -27,14 +32,25 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - BACKEND_URL=http://backend:8000
       - PYTHONUNBUFFERED=1
+      # 计数可观测性 (排查漏计/误计): 控制台日志级别 / 运行统计周期 / 逐事件明细
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - COUNT_STATS_INTERVAL=${COUNT_STATS_INTERVAL:-30}
+      - COUNT_EVENT_LOG=${COUNT_EVENT_LOG:-false}
     volumes:
       - model-cache:/root/.cache
     depends_on:
       - redis
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 8          # 8x RTX 4090; 弹性场景可改 all
+    #           capabilities: [gpu]
 
   # ---------- 业务后端 (FastAPI, 端口 8000, WVP 唯一对接点) ----------
   backend:
-    image: smart-city-platform:latest
+    image: ${PLATFORM_IMAGE:-smart-city-platform:latest}
     restart: unless-stopped
     command: ["uvicorn", "app.backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
     ports:
@@ -44,12 +60,16 @@ services:
       - AI_SERVICE_URL=http://ai:8001
       - PYTHONUNBUFFERED=1
       - WVP_ENABLED=${WVP_ENABLED:-true}
-      - WVP_API_URL=${WVP_API_URL:-http://23.45.1.112:18080}
+      - WVP_API_URL=${WVP_API_URL:-http://23.45.1.115:18080}
       - WVP_USERNAME=${WVP_USERNAME:-admin}
       - WVP_PASSWORD=${WVP_PASSWORD:-admin}
       - WVP_SYNC_INTERVAL=${WVP_SYNC_INTERVAL:-30}
       - WVP_PLAY_PROTOCOL=${WVP_PLAY_PROTOCOL:-flv}
       - WVP_STREAM_SUB=${WVP_STREAM_SUB:-true}
+      # 播放地址翻译: WVP 返回地址的 host 可能是 sdp-ip/容器名, 浏览器与内部取流统一重写
+      # ZLM 部署在生产机 23.45.1.115 (80=HTTP-FLV 对外, 8001 区分按现场实际端口调整)
+      - ZLM_PUBLIC_BASE=${ZLM_PUBLIC_BASE:-http://23.45.1.115:80}
+      - ZLM_INTERNAL_BASE=${ZLM_INTERNAL_BASE:-http://23.45.1.115:80}
     depends_on:
       - redis
 

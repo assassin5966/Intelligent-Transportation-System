@@ -39,7 +39,7 @@ tar -czf counter-fix-20260918.tar.gz `
   app/backend/core/wvp_client.py `
   configs/business_rules.yaml
 # 传到现场 (scp / U盘均可), 例如:
-# scp counter-fix-20260918.tar.gz user@23.45.1.112:/tmp/
+# scp counter-fix-20260918.tar.gz user@23.45.1.115:/tmp/
 ```
 
 ## 三、现场替换操作 (场地服务器执行)

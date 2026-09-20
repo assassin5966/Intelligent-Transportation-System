@@ -39,7 +39,7 @@ docker compose logs backend --tail=2000 \
 ### 方法 B：直接调 WVP API（绕过后端，确认 WVP 侧正常）
 
 ```bash
-WVP=http://23.45.1.112:18080
+WVP=http://23.45.1.115:18080
 
 # 1. 登录拿 token
 TOKEN=$(curl -s -X POST $WVP/api/login -H "Content-Type: application/json" \
