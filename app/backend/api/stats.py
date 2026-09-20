@@ -15,6 +15,7 @@ from ..core.realtime import (
     get_stats,
     get_device_stats,
     get_all_device_stats,
+    reset_current,
 )
 from ..core.congestion import record_congestion, latest_congestion, evaluate_congestion
 from .devices import geo_by_name, category_by_name
@@ -295,6 +296,19 @@ async def congestion_report(body: CongestionIn):
         body.person_flow_per_min,
         body.roi_persons,
     )
+
+
+@router.post("/reset", status_code=200)
+async def reset_stats(device_id: Optional[str] = Query(None, description="可选: 仅重置该设备; 缺省重置全局存量")):
+    """存量清零校准 (当前车辆/人员数量).
+
+    - 不带 device_id: 清全局 sc:realtime:current + 全部逐设备在場 key
+      (今日累计/小时累计等流量账不动).
+    - 带 device_id: 仅清该设备在場人数.
+    用途: Exit 漏检/AI 重启导致的存量虚高校准.
+    """
+    await reset_current(device_id)
+    return {"status": "ok", "scope": device_id or "global", "stats": await get_stats()}
 
 
 @router.get("/hourly/history")

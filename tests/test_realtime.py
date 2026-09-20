@@ -198,6 +198,14 @@ class FakeRedis:
             return v[start:stop + 1]
         return v[start:]
 
+    async def delete(self, *keys):
+        n = 0
+        for k in keys:
+            if k in self.data:
+                del self.data[k]
+                n += 1
+        return n
+
 
 def _patch_redis(fake: FakeRedis):
     """patch realtime.get_redis 返回 fake 实例."""
@@ -329,6 +337,47 @@ def test_negative_current_clamped():
     assert int(cur.get("current_vehicles", 0)) >= 0
 
 
+# ===================== 存量清零 =====================
+
+def test_reset_current_global():
+    """全局清零: 清 sc:realtime:current + 逐设备在場 key; 日累计/小时累计保留."""
+    fake = FakeRedis()
+    occurred = datetime(2026, 8, 9, 12, 0, 0, tzinfo=timezone.utc)
+    with _patch_redis(fake):
+        asyncio.run(realtime.apply_event(VEHICLE_ENTER, "CAM-A", occurred))
+        asyncio.run(realtime.apply_event(VEHICLE_ENTER, "CAM-B", occurred))
+    # 预置日累计/小时累计 (流量账, 应保留)
+    daily_key = "sc:realtime:daily:20260809"
+    hourly_key = "sc:hourly:CAM-A:2026080912"
+    fake.data[daily_key] = {"today_vehicle_in": "2"}
+    fake.data[hourly_key] = {"vehicle_in": "2"}
+    device_daily = "sc:realtime:device:CAM-A:daily:20260809"
+    fake.data[device_daily] = {"today_vehicle_in": "1"}
+
+    with _patch_redis(fake):
+        asyncio.run(realtime.reset_current())
+
+    assert realtime._CUR_KEY not in fake.data  # 全局存量已清
+    assert "sc:realtime:device:CAM-A" not in fake.data  # 逐设备在場已清
+    assert "sc:realtime:device:CAM-B" not in fake.data
+    assert fake.data.get(daily_key) == {"today_vehicle_in": "2"}  # 流量账保留
+    assert fake.data.get(hourly_key) == {"vehicle_in": "2"}
+    assert fake.data.get(device_daily) == {"today_vehicle_in": "1"}
+
+
+def test_reset_current_single_device():
+    """指定设备清零: 仅清该设备在場 key, 其他设备与全局存量不动."""
+    fake = FakeRedis()
+    occurred = datetime(2026, 8, 9, 12, 0, 0, tzinfo=timezone.utc)
+    with _patch_redis(fake):
+        asyncio.run(realtime.apply_event(VEHICLE_ENTER, "CAM-A", occurred))
+        asyncio.run(realtime.apply_event(VEHICLE_ENTER, "CAM-B", occurred))
+        asyncio.run(realtime.reset_current("CAM-A"))
+    assert "sc:realtime:device:CAM-A" not in fake.data  # 目标设备已清
+    assert "sc:realtime:device:CAM-B" in fake.data  # 其他设备保留
+    assert realtime._CUR_KEY in fake.data  # 全局存量不动
+
+
 # ===================== 自运行入口 =====================
 
 def _run_all():
@@ -341,6 +390,8 @@ def _run_all():
         test_list_events_empty,
         test_list_events_limit,
         test_negative_current_clamped,
+        test_reset_current_global,
+        test_reset_current_single_device,
     ]
     passed = 0
     for t in tests:

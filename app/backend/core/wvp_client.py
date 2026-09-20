@@ -6,9 +6,8 @@ WVP 无标准对外 HTTP webhook, 本客户端配合 wvp_sync 定时轮询使用
 认证: GET /api/user/login (密码 md5 摘要) 取 access-token, 缓存在内存, 遇 401 自动重登.
 点播: GET /api/play/start/{deviceId}/{channelId} 返回 flv/rtsp 地址 (跨版本结构兼容).
 """
-from typing import Optional
-
 import hashlib
+from typing import Optional
 
 import httpx
 

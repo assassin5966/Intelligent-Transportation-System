@@ -209,10 +209,23 @@ async def get_stats() -> dict:
     }
 
 
-async def reset_current() -> None:
-    """重置当前计数 (设备重启/校准时调用)."""
+async def reset_current(device_id: Optional[str] = None) -> None:
+    """重置当前计数 (设备重启/校准时调用).
+
+    device_id 为空: 清全局 current + 全部逐设备在場人数;
+    指定 device_id: 仅清该设备在場人数 (全局 key 无法安全扣减, 不动).
+    """
     redis = get_redis()
+    if device_id:
+        await redis.delete(_device_key(device_id))
+        return
     await redis.delete(_CUR_KEY)
+    # 逐设备在場 key 一并清理 (sc:realtime:device:{id}); 日累计 :daily: 属流量账, 不动
+    async for key in redis.scan_iter(f"{settings.redis_prefix}:realtime:device:*"):
+        name = key if isinstance(key, str) else key.decode()
+        if ":daily:" in name:
+            continue
+        await redis.delete(name)
 
 
 async def get_device_crowd(device_id: str) -> dict:
