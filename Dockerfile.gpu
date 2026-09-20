@@ -56,6 +56,8 @@ COPY tool /app/tool
 COPY static /app/static
 # models/ 构建前必须本地准备 models/yolo11n.pt
 COPY models /app/models
+# data/ 设备播种文件 (device_geo.json/device_category.json, 生产离线无宿主机挂载, 烘进镜像)
+COPY data /app/data
 
 # ---------- 4. 环境配置 ----------
 ENV TZ=Asia/Shanghai \
@@ -64,9 +66,14 @@ ENV TZ=Asia/Shanghai \
     LANG=C.UTF-8
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
-# 校验权重可加载 + CUDA 可用 (无 GPU 的构建机上 torch.cuda.is_available() 为 False 不阻断,
-# 仅校验 YOLO 权重完整; CUDA 运行时可用性在容器启动时由 nvidia-container-runtime 保证)
-RUN python -c "from ultralytics import YOLO; YOLO('models/yolo11n.pt'); import torch; print('torch', torch.__version__, 'cuda_built:', torch.backends.cuda.is_built())"
+# 校验权重可加载 + CUDA 可用 (交叉构建/QEMU 下传 --build-arg SKIP_VALIDATE=1 跳过,
+# torch 导入在模拟层极慢; 权重完整性由 start_offline.sh 首启健康检查兜底)
+ARG SKIP_VALIDATE=0
+RUN if [ "$SKIP_VALIDATE" = "1" ]; then \
+        echo "SKIP_VALIDATE=1, 跳过 YOLO 权重校验 (交叉构建模式)"; \
+    else \
+        python -c "from ultralytics import YOLO; YOLO('models/yolo11n.pt'); import torch; print('torch', torch.__version__, 'cuda_built:', torch.backends.cuda.is_built())"; \
+    fi
 
 # ---------- 5. 端口 ----------
 EXPOSE 8000 8001
