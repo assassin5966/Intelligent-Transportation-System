@@ -14,10 +14,6 @@
 //      生产同源部署（页面由后端/网关提供）时直接命中后端。
 export const API_BASE = import.meta.env.VITE_API_BASE || location.origin
 
-// AI 分析服务基地址（v0.11.0：AI 服务不对前端开放，前端不连接此地址）。
-// 仅保留常量以兼容可能的内部/调试用途，正常前端链路不使用。
-export const AI_BASE = import.meta.env.VITE_AI_BASE || 'http://172.16.168.9:8001'
-
 // Bearer Token：文档 §2 未显式定义鉴权，此处按增强需求预留统一鉴权头。
 // 留空则不附加 Authorization 头（兼容无鉴权后端）。
 export const API_TOKEN = import.meta.env.VITE_API_TOKEN || ''

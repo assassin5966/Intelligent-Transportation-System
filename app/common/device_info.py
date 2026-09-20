@@ -30,6 +30,8 @@ CREATE TABLE IF NOT EXISTS {_TABLE} (
     latitude DECIMAL(10,6) NULL COMMENT '纬度',
     status VARCHAR(16) NULL COMMENT '验证状态(已验证/待验证)',
     region VARCHAR(64) NULL COMMENT '区域(如 大同古城)',
+    entrance_type VARCHAR(16) NULL COMMENT '出入口类型(入口/出口/出入口, 由 category 派生)',
+    point_type VARCHAR(16) NULL COMMENT '点位类型(便道/车辆卡口, 由 category 派生)',
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (id),
@@ -40,8 +42,12 @@ CREATE TABLE IF NOT EXISTS {_TABLE} (
 # 区域默认值 (与前端顶栏区域选项对应)
 _REGION_DEFAULT = "大同古城"
 
-# 内存缓存: {归一化名称: {point_id, category, longitude, latitude, status, region}}
+# 内存缓存: {归一化名称: {point_id, category, longitude, latitude, status, region,
+#                         entrance_type, point_type}}
 _cache: dict[str, dict] = {}
+
+# 短名 -> 白名单全名 的解析缓存 (见 _resolve_key); 缓存增删改时清空
+_alias: dict[str, str] = {}
 
 # 云冈类设备 (设备信息汇总表.xlsx 中"类=云冈类", 现为 JTKK 卡口, 无经纬度) —
 # 暂不迁入 MySQL: 点位编号以 JTKK 开头 或 名称含"云冈"者一律排除.
@@ -58,6 +64,31 @@ def normalize(name: str) -> str:
     return (name or "").replace(" ", "")
 
 
+def derive_entrance_type(category: Optional[str]) -> Optional[str]:
+    """从点位分类派生出入口类型: 含"出入口"→出入口, 含"入口"→入口, 含"出口"→出口.
+
+    注意判定顺序: "城墙出入口便道监控点位"同时含"出入口"与"入口", 需先判"出入口".
+    """
+    cat = category or ""
+    if "出入口" in cat:
+        return "出入口"
+    if "入口" in cat:
+        return "入口"
+    if "出口" in cat:
+        return "出口"
+    return None
+
+
+def derive_point_type(category: Optional[str]) -> Optional[str]:
+    """从点位分类派生点位类型: 含"便道"→便道, 含"卡口"→车辆卡口."""
+    cat = category or ""
+    if "便道" in cat:
+        return "便道"
+    if "卡口" in cat:
+        return "车辆卡口"
+    return None
+
+
 def is_yungang(name: str, point_id: Optional[str] = None) -> bool:
     """是否"云冈类"设备 (暂不迁入 MySQL).
 
@@ -72,22 +103,51 @@ def is_yungang(name: str, point_id: Optional[str] = None) -> bool:
     return any(k in norm for k in _YUN_GANG_KEYWORDS)
 
 
+async def _has_column(cur, column: str) -> bool:
+    """表是否已有该列 (旧表迁移前检查)."""
+    await cur.execute(
+        "SELECT COUNT(*) FROM information_schema.COLUMNS "
+        "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s AND COLUMN_NAME = %s",
+        (_TABLE, column),
+    )
+    row = await cur.fetchone()
+    return bool(row and int(row[0]) > 0)
+
+
 async def ensure_table() -> None:
-    """建表 (幂等), 并对旧表补齐 region 列 (迁移)."""
+    """建表 (幂等), 并对旧表补齐 region / 出入口类型 / 点位类型列 (迁移)."""
     pool = await get_pool()
     async with pool.acquire() as conn:
         async with conn.cursor() as cur:
             await cur.execute(_DDL)
             # 旧表无 region 列: 补列并把已有数据区域默认置为"大同古城"
-            await cur.execute(
-                "SELECT COUNT(*) FROM information_schema.COLUMNS "
-                "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s AND COLUMN_NAME = 'region'",
-                (_TABLE,),
-            )
-            row = await cur.fetchone()
-            if not row or int(row[0]) == 0:
+            if not await _has_column(cur, "region"):
                 await cur.execute(f"ALTER TABLE {_TABLE} ADD COLUMN region VARCHAR(64) NULL COMMENT '区域(如 大同古城)' AFTER status")
                 await cur.execute(f"UPDATE {_TABLE} SET region = %s WHERE region IS NULL", (_REGION_DEFAULT,))
+            # 旧表无出入口类型/点位类型列: 补列并按 category 回填派生值 (规则同 derive_*)
+            if not await _has_column(cur, "entrance_type"):
+                await cur.execute(
+                    f"ALTER TABLE {_TABLE} ADD COLUMN entrance_type VARCHAR(16) NULL "
+                    "COMMENT '出入口类型(入口/出口/出入口, 由 category 派生)' AFTER region"
+                )
+                await cur.execute(
+                    f"UPDATE {_TABLE} SET entrance_type = CASE "
+                    "WHEN category LIKE '%出入口%' THEN '出入口' "
+                    "WHEN category LIKE '%入口%' THEN '入口' "
+                    "WHEN category LIKE '%出口%' THEN '出口' END "
+                    "WHERE entrance_type IS NULL"
+                )
+            if not await _has_column(cur, "point_type"):
+                await cur.execute(
+                    f"ALTER TABLE {_TABLE} ADD COLUMN point_type VARCHAR(16) NULL "
+                    "COMMENT '点位类型(便道/车辆卡口, 由 category 派生)' AFTER entrance_type"
+                )
+                await cur.execute(
+                    f"UPDATE {_TABLE} SET point_type = CASE "
+                    "WHEN category LIKE '%便道%' THEN '便道' "
+                    "WHEN category LIKE '%卡口%' THEN '车辆卡口' END "
+                    "WHERE point_type IS NULL"
+                )
 
 
 async def count() -> int:
@@ -100,9 +160,36 @@ async def count() -> int:
     return int(row[0]) if row else 0
 
 
+def _resolve_key(norm: str) -> Optional[str]:
+    """精确未命中时, 用"短名是白名单全名前缀"再匹配一次.
+
+    device_info 的 name 取自白名单 (含通道后缀, 如 '...以东90米(球)041216'),
+    而人工注册/运维页录入的设备名常不带后缀, 归一化后无法精确命中.
+    仅当候选唯一时命中: 同一前缀对应多个通道 (如卡口的 A/B 车道) 时返回 None,
+    避免落到错误的点位分类/经纬度.
+    """
+    if not norm:
+        return None
+    if norm in _alias:
+        return _alias[norm]
+    matches = [k for k in _cache if k.startswith(norm)]
+    if len(matches) != 1:
+        return None
+    _alias[norm] = matches[0]
+    return matches[0]
+
+
 def get(name: str) -> Optional[dict]:
-    """按名称查设备信息 (去空格匹配), 未匹配返回 None. 同步读内存缓存 (热路径)."""
-    return _cache.get(normalize(name))
+    """按名称查设备信息 (去空格匹配), 未匹配返回 None. 同步读内存缓存 (热路径).
+
+    精确未命中时按前缀兼容短名 (见 _resolve_key).
+    """
+    norm = normalize(name)
+    row = _cache.get(norm)
+    if row is not None:
+        return row
+    key = _resolve_key(norm)
+    return _cache.get(key) if key else None
 
 
 def geo_map() -> dict[str, tuple[float, float]]:
@@ -125,10 +212,12 @@ async def reload_cache() -> None:
     async with pool.acquire() as conn:
         async with conn.cursor(aiomysql.DictCursor) as cur:
             await cur.execute(
-                f"SELECT name, point_id, category, longitude, latitude, status, region FROM {_TABLE}"
+                f"SELECT name, point_id, category, longitude, latitude, status, region, "
+                f"entrance_type, point_type FROM {_TABLE}"
             )
             rows = await cur.fetchall()
     _cache = {}
+    _alias.clear()
     for r in rows:
         try:
             longitude = float(r["longitude"]) if r["longitude"] is not None else None
@@ -142,6 +231,9 @@ async def reload_cache() -> None:
             "latitude": latitude,
             "status": r["status"] or None,
             "region": r["region"] or _REGION_DEFAULT,
+            # 列为空时按 category 兜底派生 (旧数据未回填也能正确展示)
+            "entrance_type": r["entrance_type"] or derive_entrance_type(r["category"]),
+            "point_type": r["point_type"] or derive_point_type(r["category"]),
         }
     logger.info(f"设备信息表已加载 {len(_cache)} 条到内存缓存")
 
@@ -152,7 +244,8 @@ async def fetch(name: str) -> Optional[dict]:
     async with pool.acquire() as conn:
         async with conn.cursor(aiomysql.DictCursor) as cur:
             await cur.execute(
-                f"SELECT id, name, point_id, category, longitude, latitude, status, region FROM {_TABLE} "
+                f"SELECT id, name, point_id, category, longitude, latitude, status, region, "
+                f"entrance_type, point_type FROM {_TABLE} "
                 f"WHERE name = %s",
                 (normalize(name),),
             )
@@ -167,38 +260,54 @@ async def upsert(
     latitude: Optional[float] = None,
     status: Optional[str] = None,
     region: Optional[str] = None,
+    entrance_type: Optional[str] = None,
+    point_type: Optional[str] = None,
 ) -> str:
-    """新增/更新一条设备信息 (name 唯一, 冲突则覆盖), 并同步内存缓存. 返回归一化名称."""
+    """新增/更新一条设备信息 (name 唯一, 冲突则覆盖), 并同步内存缓存. 返回归一化名称.
+
+    出入口类型/点位类型未显式传入时按 category 自动派生; 显式传入则以此为准
+    (运维页面手工改过的值不会被 category 覆盖).
+    """
     norm = normalize(name)
     if not norm:
         raise ValueError("设备名称不能为空")
     region = region or _REGION_DEFAULT
+    category = category or None
+    entrance_type = entrance_type or derive_entrance_type(category)
+    point_type = point_type or derive_point_type(category)
     pool = await get_pool()
     sql = f"""
-    INSERT INTO {_TABLE} (name, point_id, category, longitude, latitude, status, region)
-    VALUES (%s, %s, %s, %s, %s, %s, %s)
+    INSERT INTO {_TABLE} (name, point_id, category, longitude, latitude, status, region,
+                          entrance_type, point_type)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
     ON DUPLICATE KEY UPDATE
         point_id = VALUES(point_id),
         category = VALUES(category),
         longitude = VALUES(longitude),
         latitude = VALUES(latitude),
         status = VALUES(status),
-        region = VALUES(region)
+        region = VALUES(region),
+        entrance_type = VALUES(entrance_type),
+        point_type = VALUES(point_type)
     """
     async with pool.acquire() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
                 sql,
-                (norm, point_id or None, category or None, longitude, latitude, status or None, region),
+                (norm, point_id or None, category, longitude, latitude, status or None, region,
+                 entrance_type, point_type),
             )
     _cache[norm] = {
         "point_id": point_id or None,
-        "category": category or None,
+        "category": category,
         "longitude": longitude,
         "latitude": latitude,
         "status": status or None,
         "region": region,
+        "entrance_type": entrance_type,
+        "point_type": point_type,
     }
+    _alias.clear()  # 新增/改名后短名解析失效, 下次查询重建
     return norm
 
 
@@ -212,6 +321,7 @@ async def delete(name: str) -> bool:
             affected = cur.rowcount
     if affected:
         _cache.pop(norm, None)
+        _alias.clear()
     return bool(affected)
 
 
@@ -221,7 +331,8 @@ async def list_all() -> list[dict]:
     async with pool.acquire() as conn:
         async with conn.cursor(aiomysql.DictCursor) as cur:
             await cur.execute(
-                f"SELECT id, name, point_id, category, longitude, latitude, status, region, updated_at "
+                f"SELECT id, name, point_id, category, longitude, latitude, status, region, "
+                f"entrance_type, point_type, updated_at "
                 f"FROM {_TABLE} ORDER BY id"
             )
             rows = await cur.fetchall()
@@ -248,14 +359,16 @@ def list_cached() -> list[dict]:
             "latitude": r["latitude"],
             "status": r["status"],
             "region": r["region"] or _REGION_DEFAULT,
+            "entrance_type": r["entrance_type"],
+            "point_type": r["point_type"],
         }
         for n, r in _cache.items()
     ]
 
 
 def is_registered(name: str) -> bool:
-    """是否已在 device_info 表注册 (去空格匹配, WVP 启流选取用)."""
-    return normalize(name) in _cache
+    """是否已在 device_info 表注册 (去空格匹配, WVP 启流选取用; 兼容不带通道后缀的短名)."""
+    return get(name) is not None
 
 
 async def seed_from_json_if_empty() -> int:
@@ -292,6 +405,10 @@ async def seed_from_json_if_empty() -> int:
             longitude=d.get("longitude"),
             latitude=d.get("latitude"),
             status=d.get("status") or None,
+            region=d.get("region") or None,
+            # JSON 显式给值则优先, 否则 upsert 按 category 派生
+            entrance_type=d.get("entrance_type") or None,
+            point_type=d.get("point_type") or None,
         )
         imported += 1
     logger.info(f"设备信息种子导入完成: {imported} 条 (已排除云冈类设备)")

@@ -21,6 +21,11 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - BACKEND_URL=http://backend:8000
       - PYTHONUNBUFFERED=1
+      # 计数可观测性 (排查漏计/误计): 控制台日志级别 / 运行统计周期 / 逐事件明细
+      # LOG_LEVEL=DEBUG 时 docker logs 可看到详细日志 (文件日志 logs/*.log 始终 DEBUG)
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - COUNT_STATS_INTERVAL=${COUNT_STATS_INTERVAL:-30}
+      - COUNT_EVENT_LOG=${COUNT_EVENT_LOG:-false}
     volumes:
       - ./app:/app/app:cached
       - ./models:/app/models:cached

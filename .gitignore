@@ -76,6 +76,12 @@ simulator/
 # ---- 打包产物 (zip 等, 不入库) ----
 *.zip
 
+# ---- 本地备份与抓包 (不入库) ----
+DT_bak/
+setting-server-bak/
+*.pcap
+*.pcapng
+
 # ---- 排查报告 (含真实 IP/国标编码/密码, 不入库) ----
 scripts/拉流故障分析报告.txt
 scripts/拉流超时排查流程.txt

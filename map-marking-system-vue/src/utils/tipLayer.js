@@ -7,9 +7,16 @@
  *   3. 连接线从 tip 卡边缘指向点位锚点（map.lngLatToContainer 投影坐标），
  *      且 tip 卡与锚点保持固定间距（gap），不遮挡点位本身；
  *   4. 卡片之间做碰撞避让（多轮两两分离）+ 视口裁剪，尽量互不重叠、不出界；
- *   5. 连接线颜色支持主题切换（setLineColor）；
- *   6. rAF 节流：高频调用 update() 时只保留最后一帧，避免闪烁卡顿；
- *   7. 卡片入场/离场动画：opacity + scale 过渡，平滑显示隐藏。
+ *   5. 布局模式可切换（opts.layoutMode）：
+ *        'auto' —— 自动避让（默认，原行为）；
+ *        'zone' —— 分区固定布局：调用方给每张卡一个 zone（left/right/top/bottom），
+ *                  TipLayer 把同 zone 的卡片排成"左/右竖直单列、上/下水平多行"的固定通道，
+ *                  通道位置以 setFrame() 传入的区域屏幕矩形为基准，位置确定、不互相推挤；
+ *   6. 连接线颜色支持主题切换（setLineColor）；
+ *   7. rAF 节流：高频调用 update() 时只保留最后一帧，避免闪烁卡顿；
+ *   8. 卡片入场/离场动画：opacity + scale 过渡，平滑显示隐藏；
+ *   9. 视口裁剪（viewportCull，anchor 布局）：锚点完全移出视口的卡片自动隐藏
+ *      （DOM/数据保留，回到视口自动恢复），避免缩放到局部时卡片堆在视口边缘。
  *
  * 使用：
  *   const tl = new TipLayer({ lineColor: '#2f9bff', gap: 26 })
@@ -23,6 +30,7 @@ export class TipLayer {
     this.lineColor = opts.lineColor || '#00e1ff' // 连接线颜色
     this.lineOpacity = opts.lineOpacity ?? 0.8   // 连接线透明度（80%）
     this.strokeWidth = opts.strokeWidth ?? 2     // 连接线线宽（2px 实线）
+    this.showLines = opts.showLines !== false    // 是否绘制点位→tip 连接线（含 pin 箭头）；false = 纯悬浮卡片，不画任何连线/箭头
     this.gap = opts.gap ?? 26                    // tip 卡与点位锚点的间距（px）
     this.maxLine = opts.maxLine ?? null          // 连接线最大长度（null=按 gap 推导），null 时取 max(150, gap+100)
     this.zIndex = opts.zIndex ?? 9600            // 提示层 z 值（高于点位 marker）
@@ -33,6 +41,19 @@ export class TipLayer {
     this.arrowGap = opts.arrowGap ?? 10          // 新版箭头尖端与 tip 卡上沿的间距
     this.elbowClear = opts.elbowClear ?? 24      // 新版水平段位于 tip 卡上沿之上的偏移
     this.minUpLen = opts.minUpLen ?? 60          // 新版向上段最小长度，保证 elbow 视觉可见
+    // —— 布局模式 ——
+    //   'auto'（默认）—— 自动避让布局（原有算法，保持向后兼容）
+    //   'zone'        —— 分区固定布局：每张卡按 item.zone（left/right/top/bottom）
+    //                    进入固定通道，位置完全确定、不参与自动避让（对应"古城四面图"）
+    this.layoutMode = opts.layoutMode || 'auto'
+    this.zoneSpacing = opts.zoneSpacing ?? 12    // 同一通道内相邻卡片的间距（px）
+    this._frame = opts.frame || null             // 区域屏幕矩形 { x, y, w, h }，zone 模式定位基准
+    // —— 视口裁剪（anchor 布局专用）——
+    //   锚点（如框线「进/出」徽标）完全移出视口的卡片自动隐藏：DOM 与数据保持挂载
+    //   （属性不丢、实时数值刷新不中断），锚点回到视口内自动恢复显示。
+    //   场景：地图放大到单个城门时，其余门的卡不再被"钳位回视口"堆在屏幕边缘。
+    this.viewportCull = !!opts.viewportCull      // 默认关闭，由调用方按层开启
+    this.cullMargin = opts.cullMargin ?? 40      // 边缘余量（px）：锚点越界在此距离内仍显示（徽标擦边可见）
     this._root = null
     this._lines = null
     this._cards = null
@@ -40,6 +61,7 @@ export class TipLayer {
     this._rafId = 0  // rAF 节流 ID
     this._pendingItems = null // 待处理的 items（rAF 节流用）
     this._sideMemo = new Map() // 方向记忆（id → side）：跨布局保持卡片方位稳定，防止地图操作时上下跳变
+    this.cardScale = 1         // 卡片整体缩放系数（随地图缩放级别联动：与古城框线屏幕尺寸成正比）
   }
 
   /** 挂载到父容器（重复调用只移动位置） */
@@ -182,27 +204,70 @@ export class TipLayer {
       this._lines.appendChild(pinArrow)
       return {
         id: it.id, x: it.x, y: it.y, html: it.html,
+        zone: it.zone,   // 分区布局方位（left/right/top/bottom），必须随卡片一起带上
+        // anchor 布局的落位方位（top/bottom/left/right）：由调用方按
+        // "大卡贴城墙框线内侧还是外侧"给出，例如北墙门贴内侧 → 卡片落在点位下方
+        place: it.place,
         el, line, pinArrow, w: 0, h: 0, rx: 0, ry: 0, side: 'top'
       }
     })
   }
 
   /**
-   * 布局：期望位置 -> 智能方向选择 -> 卡片碰撞避让(带引线长度上限) -> 视口裁剪 -> 应用位置 -> 重绘连接线
+   * 布局总入口：测量 → 定位（两种模式二选一）→ 应用位置 → 重绘连接线。
+   *
+   * 两种定位模式：
+   *   layoutMode = 'auto'（默认）—— 自动避让布局：
+   *       期望位置 → 智能方向选择 → 卡片碰撞避让(带引线长度上限) → 视口裁剪；
+   *       适用于点位分散、数量不多的场景（设备编辑标点、点击详情卡等）。
+   *   layoutMode = 'zone' —— 分区固定布局（对应"古城四面图"排版）：
+   *       每张卡按 zone 进入固定通道，左/右为竖直单列、上/下为水平多行，
+   *       位置完全确定、不参与自动避让，依托 setFrame(区域屏幕矩形) 紧贴区域外侧。
+   *
    * 关键约束：
    *   - 卡边与点位锚点始终保持 ≥ gap 的间距，点位永不被遮挡；
-   *   - 碰撞避让每轮后将卡拉回"引线长度 ∈ [gap, maxLine]"内，确保连接线不过长、布局平衡；
+   *   - auto 模式下碰撞避让每轮后将卡拉回"引线长度 ∈ [gap, maxLine]"内，确保连接线不过长；
    *   - 连接线样式由 `legacyMode` 控制：
    *       true  → 二次贝塞尔曲线 + 车道偏移（旧版，锚点在坐标点）；
-   *       false → 直角 Π 折线（新版，锚点在点位圆圈正上方，tip 卡位于连接线下方、不被遮挡）。
+   *       false → 4 方向 cubic Bezier 曲线（新版，锚点在点位圆圈正上方/正下方）。
    */
   _layout() {
     const root = this._root
     const W = root.clientWidth || root.parentNode?.clientWidth || 800
     const H = root.clientHeight || root.parentNode?.clientHeight || 600
-    const gap = this.gap
     const items = this._items
     if (!items.length) return
+
+    this._measure(items)
+    if (this.layoutMode === 'zone') this._placeZoneLayout(W, H)
+    else if (this.layoutMode === 'anchor') this._placeAnchorLayout(W, H)
+    else this._placeAutoLayout(W, H)
+    this._applyPositions()
+    this._drawLines(W, H)
+  }
+
+  /**
+   * 统一测量卡片尺寸（两种布局模式共用）。
+   * 注意：外层 .tip-card 被 CSS `width: stretch; max-width: min(500px, 94vw)` 撑满，
+   * 真实可见的是内层卡片（.cam-flow 等，自带 max-width），因此以内层尺寸为准，
+   * 否则分区通道会按 500px 留位、卡片之间出现大片空白。
+   */
+  _measure(items) {
+    const s = this.cardScale
+    items.forEach((it) => {
+      const inner = it.el.firstElementChild
+      it.w = (inner && inner.offsetWidth ? inner.offsetWidth * s : (it.w || 300 * s))
+      it.h = (inner && inner.offsetHeight ? inner.offsetHeight * s : (it.h || 120 * s))
+    })
+  }
+
+  /**
+   * 自动避让布局（原算法，保持默认行为不变）。
+   * 期望位置 -> 智能方向选择 -> 卡片碰撞避让(带引线长度上限) -> 视口裁剪 -> Phase B 兜底分离。
+   */
+  _placeAutoLayout(W, H) {
+    const gap = this.gap
+    const items = this._items
 
     // —— 0) 智能方向预分配（按锚点在视口中的"象限位置"决定初次方向，避免全部堆叠在点位的同一边） ——
     // 规则：
@@ -213,8 +278,8 @@ export class TipLayer {
     //   · 中间区域 → 默认上方（side=top）
     //   · 当周围 60px 范围内已有同侧卡片时，反转方向形成交错
     items.forEach((it) => {
-      it.w = it.el.offsetWidth || 300
-      it.h = it.el.offsetHeight || 120
+      it.w = (it.el.offsetWidth || 300) * this.cardScale
+      it.h = (it.el.offsetHeight || 120) * this.cardScale
 
       const distTop = it.y          // 锚点到顶部
       const distBot = H - it.y      // 锚点到底部
@@ -468,11 +533,299 @@ export class TipLayer {
       })
       if (!movedB) break
     }
+  }
 
-    // 3) 应用位置（transform 提升性能，避免频繁触发回流）
+  /**
+   * 分区固定布局：按 item.zone 把卡片摆进「左 / 右 / 上 / 下」四条专用通道。
+   *
+   *   · zone='left'   → 清远门（西墙）：竖直单列，整列贴西墙 pin 的**左（西）侧**
+   *   · zone='right'  → 和阳门（东墙）：竖直单列，整列贴东墙 pin 的**右（东）侧**
+   *   · zone='top'    → 武定门（北墙）：水平多行，整组贴北墙 pin 的**上（北）侧**
+   *   · zone='bottom' → 永泰门（南墙）：水平多行，整组贴南墙 pin 的**下（南）侧**
+   *
+   * 自适应规则（保证任何窗口尺寸下都摆得下、且互不压叠）：
+   *   1) 左右通道优先放"城市外侧"，若某一侧外扩空间不足（区域占满视口），
+   *      左右**一起**翻到内侧（贴墙内侧排开），保持画面左右对称；
+   *   2) 上下通道同理：北/南外侧放得下就贴外，放不下就翻到城墙内侧；
+   *   3) 上下两组行优先收进"左右两列之间的空走廊"（列数按走廊宽度自动收敛），
+   *      这样它们与左右两列在横向上天然错开、左右两列可用满整屏高度；
+   *   4) 走廊过窄放不下时，行才铺满整屏宽度，此时左右两列改按纵向避让上下两组行；
+   *   5) 空间仍不够则继续降级：压缩通道内间距 → 退回整屏高度。
+   *
+   * 通道内的卡片顺序由调用方决定（MapPanel 用 sortPointsForZoneLayout 排好：
+   * 同城门按"北/南""西/东"分段 → 段内车卡在前便道在后 → 段内按坐标推进）。
+   * 位置完全由本方法算出、不做两两避让，因此任何一次重排结果都稳定可预期。
+   *
+   * @param {number} W 容器宽（container 像素）
+   * @param {number} H 容器高（container 像素）
+   */
+  _placeZoneLayout(W, H) {
+    const items = this._items
+    const gap = this.gap
+    const sp = this.zoneSpacing
+    const f = this._frame || { x: 0, y: 0, w: W, h: H }
+    const ZONES = ['left', 'right', 'top', 'bottom']
+    const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v))
+
+    // 1) 按方位分组（zone 非法/缺省时归入 top，保证卡片一定有位置）
+    const G = { left: [], right: [], top: [], bottom: [] }
     items.forEach((it) => {
-      it.el.style.transform = `translate(${Math.round(it.rx)}px, ${Math.round(it.ry)}px)`
+      if (ZONES.indexOf(it.zone) === -1) it.zone = 'top'
+      G[it.zone].push(it)
     })
+    /** 某组锚点在容器内的取值区间 */
+    const span = (g, axis) => {
+      let lo = Infinity, hi = -Infinity
+      g.forEach((it) => {
+        const v = axis === 'x' ? it.x : it.y
+        if (v < lo) lo = v
+        if (v > hi) hi = v
+      })
+      return [lo, hi]
+    }
+
+    // 2) 左 / 右通道：先定水平通道（它决定中部走廊宽度），竖直位置留到第 4 步
+    const band = { left: null, right: null }   // { x, w, side }
+    const colW = { left: 0, right: 0 }
+    const ax = { left: [0, 0], right: [W, W] }
+    ;['left', 'right'].forEach((k) => {
+      if (!G[k].length) return
+      colW[k] = Math.max(...G[k].map((i) => i.w))
+      ax[k] = span(G[k], 'x')
+    })
+    const fitOutL = G.left.length ? ax.left[0] - 4 >= colW.left + gap : true
+    const fitOutR = G.right.length ? W - 4 - ax.right[1] >= colW.right + gap : true
+    const outsideLR = fitOutL && fitOutR   // 左右"外侧/内侧"必须一致，避免画面一边内一边外
+    if (G.left.length) {
+      const raw = outsideLR ? ax.left[0] - gap - colW.left : ax.left[1] + gap
+      band.left = {
+        x: clamp(Math.round(raw), 4, Math.max(4, W - 4 - colW.left)),
+        w: colW.left,
+        side: outsideLR ? 'left' : 'right'
+      }
+    }
+    if (G.right.length) {
+      const raw = outsideLR ? ax.right[1] + gap : ax.right[0] - gap - colW.right
+      band.right = {
+        x: clamp(Math.round(raw), 4, Math.max(4, W - 4 - colW.right)),
+        w: colW.right,
+        side: outsideLR ? 'right' : 'left'
+      }
+    }
+    const corridorL = band.left ? band.left.x + band.left.w + sp : 6
+    const corridorR = band.right ? band.right.x - sp : W - 6
+
+    // 3) 上 / 下通道：水平多行（默认 2 行铺开，放不下自动减列加行）
+    const hBand = { top: null, bottom: null }  // { x, y, w, h, side, inCorridor }
+    ;['top', 'bottom'].forEach((k) => {
+      const g = G[k]
+      if (!g.length) return
+      const rowW = Math.max(...g.map((i) => i.w))
+      const rowH = Math.max(...g.map((i) => i.h))
+      const corridorW = Math.max(1, corridorR - corridorL)
+
+      // 优先把整组卡塞进「左右两列之间」的空走廊 —— 这样左右两列可以吃满整屏高度且互不重叠；
+      // 走廊太窄时（连一列都放不下）才放开到整屏宽度，改为让左右两列纵向避让上下两组行。
+      let cols = Math.min(g.length, Math.max(1, Math.ceil(g.length / 2)))
+      while (cols > 1 && cols * rowW + (cols - 1) * sp > corridorW) cols--
+      let inCorridor = cols * rowW + (cols - 1) * sp <= corridorW
+      if (!inCorridor) {
+        cols = Math.min(g.length, Math.max(1, Math.ceil(g.length / 2)))
+        while (cols > 1 && cols * rowW + (cols - 1) * sp > W - 8) cols--
+      }
+      const rows = Math.ceil(g.length / cols)
+      const totalW = cols * rowW + (cols - 1) * sp
+      const totalH = rows * rowH + (rows - 1) * sp
+
+      const bx = clamp(
+        Math.round(inCorridor
+          ? corridorL + (corridorW - totalW) / 2
+          : f.x + f.w / 2 - totalW / 2),
+        4, Math.max(4, W - 4 - totalW)
+      )
+
+      const [lo, hi] = span(g, 'y')
+      // 外侧（北墙朝北、南墙朝南）放得下就贴外，否则翻到城墙内侧
+      const fitOut = k === 'top' ? (lo - 4 >= totalH + gap) : (H - 4 - hi >= totalH + gap)
+      const side = k === 'top' ? (fitOut ? 'top' : 'bottom') : (fitOut ? 'bottom' : 'top')
+      const yRaw = side === 'top' ? lo - gap - totalH : hi + gap
+      const by = clamp(Math.round(yRaw), 4, Math.max(4, H - 4 - totalH))
+      hBand[k] = { x: bx, y: by, w: totalW, h: totalH, side, inCorridor }
+
+      g.forEach((it, i) => {
+        const r = Math.floor(i / cols)
+        const c = i % cols
+        it.side = side
+        it.ux = 0
+        it.uy = side === 'top' ? -1 : 1
+        it.halfAlong = it.h / 2
+        it.rx = Math.round(bx + c * (rowW + sp) + (rowW - it.w) / 2)
+        it.ry = Math.round(by + r * (rowH + sp) + (rowH - it.h) / 2)
+        it.ax = it.x
+        // 卡片在 pin 上方 → 锚点取圆圈上方；在 pin 下方 → 锚点取圆圈下方（连线不穿过圆圈）
+        it.ay = side === 'bottom' ? it.y + this.pinHeight : it.y - this.pinHeight
+      })
+    })
+
+    // 4) 左 / 右通道竖直落位。
+    //    若上下两组行都收在走廊内（与左右列横向天然错开）→ 左右列可用满整屏高度；
+    //    否则（走廊过窄、行被迫铺满全宽）→ 左右列纵向避让上下两组行，保证不压叠。
+    const bandsInCorridor =
+      (hBand.top ? hBand.top.inCorridor : true) &&
+      (hBand.bottom ? hBand.bottom.inCorridor : true)
+    const vTop = bandsInCorridor ? 6 : (hBand.top ? hBand.top.y + hBand.top.h + sp : 6)
+    const vBot = bandsInCorridor ? H - 6 : (hBand.bottom ? hBand.bottom.y - sp : H - 6)
+    ;['left', 'right'].forEach((k) => {
+      const g = G[k]
+      const b = band[k]
+      if (!g.length || !b) return
+      const n = g.length
+      const sumH = g.reduce((s, i) => s + i.h, 0)
+      let avail = vBot - vTop
+      let baseY = vTop
+      if (avail < sumH + sp * (n - 1)) {
+        // 走廊高度不足：间距压缩；连卡片本体都放不下则退回整屏高度
+        if (avail < sumH) { avail = H - 12; baseY = 6 }
+      }
+      let step = sp
+      if (sumH + sp * (n - 1) > avail) {
+        step = Math.max(2, Math.floor((avail - sumH) / Math.max(1, n - 1)))
+      }
+      const totalH = sumH + step * (n - 1)
+      let y = clamp(Math.round(baseY + (avail - totalH) / 2), 6, Math.max(6, H - 6 - totalH))
+      g.forEach((it) => {
+        it.side = b.side
+        it.ux = b.side === 'left' ? -1 : 1
+        it.uy = 0
+        it.halfAlong = it.w / 2
+        // 贴外时左对齐 / 贴内时右对齐：同一通道内所有卡片朝区域那一侧边缘齐平
+        it.rx = b.side === 'left' ? b.x : b.x + b.w - it.w
+        it.ry = y
+        it.ax = it.x
+        it.ay = it.y - this.pinHeight
+        y += it.h + step
+      })
+    })
+  }
+
+  /**
+   * 锚点布局（anchor）：每张卡片按 item.place 贴附在对应地图点位的指定一侧。
+   * 适用于「初始化 tip 各卡归位到自身点位」场景：8 个城门点位天然分散在古城四至，
+   * 贴附展示即可，无需分区走廊；关闭连接线时卡片即悬浮在点位旁，视觉与交互保持统一。
+   *
+   * item.place 由调用方按「大卡贴城墙框线内侧 / 外侧」决定：
+   *   'top'    卡片在点位上方（南墙门贴框线内侧）
+   *   'bottom' 卡片在点位下方（北墙门贴框线内侧）
+   *   'left'   卡片在点位左侧（西墙门贴框线外侧）
+   *   'right'  卡片在点位右侧（东墙门贴框线外侧）
+   * 仅做视口裁剪 + 同侧卡片纵向去重，避免极端缩放下的重叠；方位不会被自动翻转。
+   */
+  _placeAnchorLayout(W, H) {
+    const gap = this.gap
+    const items = this._items
+    const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v))
+    const placeGap = Math.max(14, Math.round(gap * 0.6))   // 卡片与点位圆圈的最小间距
+    const cullM = this.cullMargin
+    const visible = []   // 视口内（参与定位/去重）的卡片
+    items.forEach((it) => {
+      // —— 视口裁剪（viewportCull）：锚点完全移出视口 → 本轮跳过该卡 ——
+      //    只跳过定位与去重（不拆 DOM、不删数据，_applyPositions 里同步隐藏/恢复）；
+      //    不参与去重很关键：被裁掉的卡若仍以"钳位回视口"的矩形参与碰撞，会把可见卡挤走。
+      if (this.viewportCull) {
+        it.culled = !(it.x > -cullM && it.x < W + cullM && it.y > -cullM && it.y < H + cullM)
+        if (it.culled) return
+      } else if (it.culled) {
+        it.culled = false
+      }
+      // 尺寸取「内层可见卡片」（.rp-card 等自带固定宽高）：外层 .tip-card 是 width:stretch 的容器，
+      // 直接量 outer 会得到容器宽度，导致锚点定位/去重全部错位。
+      const inner = it.el.firstElementChild
+      it.w = (inner && inner.offsetWidth ? inner.offsetWidth * this.cardScale : (it.w || 300 * this.cardScale))
+      it.h = (inner && inner.offsetHeight ? inner.offsetHeight * this.cardScale : (it.h || 120 * this.cardScale))
+      const place = (it.place === 'bottom' || it.place === 'left' || it.place === 'right')
+        ? it.place : 'top'
+      it.side = place
+      let x, y
+      if (place === 'bottom') {
+        x = it.x - it.w / 2
+        y = it.y + placeGap
+      } else if (place === 'left') {
+        x = it.x - placeGap - it.w
+        y = it.y - it.h / 2
+      } else if (place === 'right') {
+        x = it.x + placeGap
+        y = it.y - it.h / 2
+      } else {
+        x = it.x - it.w / 2
+        y = it.y - placeGap - it.h
+      }
+      x = clamp(x, 6, Math.max(6, W - it.w - 6))
+      y = clamp(y, 6, Math.max(6, H - it.h - 6))
+      it.rx = x
+      it.ry = y
+      it.ax = it.x
+      // 连线起点：底部放置取圆圈正下方，其余取正上方（线条不穿过 pin 圆圈）
+      it.ay = place === 'bottom' ? it.y + this.pinHeight : it.y - this.pinHeight
+      visible.push(it)
+    })
+    // 轻量去重：按 y 排序后，若与已放置卡片矩形相交则优先向下推开，触底则水平错开
+    // （仅对视口内的卡；被裁剪隐藏的卡不参与碰撞）
+    const placed = visible.sort((a, b) => (a.ry - b.ry) || (a.rx - b.rx))
+    for (let i = 1; i < placed.length; i++) {
+      const cur = placed[i]
+      for (let j = 0; j < i; j++) {
+        const o = placed[j]
+        const ox = Math.min(cur.rx + cur.w, o.rx + o.w) - Math.max(cur.rx, o.rx)
+        const oy = Math.min(cur.ry + cur.h, o.ry + o.h) - Math.max(cur.ry, o.ry)
+        if (ox > 0 && oy > 0) {
+          const down = o.ry + o.h + gap
+          if (down + cur.h <= H - 6) {
+            cur.ry = down
+          } else {
+            const right = o.rx + o.w + gap
+            if (right + cur.w <= W - 6) { cur.rx = right; cur.ry = o.ry }
+            else cur.ry = clamp(down, 6, Math.max(6, H - cur.h - 6))
+          }
+        }
+      }
+    }
+  }
+
+  /** 应用最终位置（transform 提升性能，避免频繁触发回流） */
+  _applyPositions() {
+    const s = this.cardScale
+    this._items.forEach((it) => {
+      // 视口裁剪：被裁掉的卡保留 DOM 与数据（属性在页面中），仅不可见、不响应指针；
+      // 回到视口后恢复显示，位置/缩放由下方常规路径重设
+      if (it.culled) {
+        it.el.style.visibility = 'hidden'
+        it.el.style.pointerEvents = 'none'
+        if (it.line) it.line.style.display = 'none'
+        if (it.pinArrow) it.pinArrow.style.display = 'none'
+        return
+      }
+      it.el.style.visibility = ''
+      it.el.style.pointerEvents = ''
+      if (it.line) it.line.style.display = ''
+      if (it.pinArrow) it.pinArrow.style.display = ''
+      // transform-origin 必须是 0 0：rx/ry 已是"缩放后可视左上角"（_measure 用缩放尺寸算的布局），
+      // 默认 origin(center) 会让可视位置整体偏移 W·(1-s)/2（500px 卡、s=0.38 时偏 155px，
+      // 表现为西墙卡压住框线、东墙卡飘离锚点 190px 的不对称错位）
+      it.el.style.transformOrigin = '0 0'
+      it.el.style.transform = `translate(${Math.round(it.rx)}px, ${Math.round(it.ry)}px) scale(${s})`
+    })
+  }
+
+  /** 重绘连接线（两种布局模式共用） */
+  _drawLines(W, H) {
+    const items = this._items
+
+    // 关闭连接线：纯悬浮卡片模式（showLines=false）—— 隐藏整层 SVG，不绘制任何 path / 箭头
+    if (!this.showLines) {
+      if (this._lines) this._lines.style.display = 'none'
+      return
+    }
+    if (this._lines) this._lines.style.display = ''
 
     // 4) 重绘连接线
     //    legacyMode = true  → 旧版贝塞尔曲线 + 车道偏移（保持原行为，便于一键恢复）
@@ -494,6 +847,7 @@ export class TipLayer {
       const BASE_OFFSET = 5
       const MAX_OFFSET  = 14
       items.forEach((it) => {
+        if (it.culled) return   // 视口裁剪：隐藏的卡不画连接线（锚点/矩形均为陈旧值）
         const [ex, ey] = nearestPointOnRect(it.ax, it.ay, it.rx, it.ry, it.w, it.h)
         const dx = ex - it.ax
         const dy = ey - it.ay
@@ -528,6 +882,7 @@ export class TipLayer {
     const clampV = (v, lo, hi) => Math.max(lo, Math.min(hi, v))
 
     items.forEach((it) => {
+      if (it.culled) return   // 视口裁剪：隐藏的卡不画连接线/箭头（锚点/矩形均为陈旧值）
       const ax = it.ax
       const ay = it.ay                         // 已按方向对齐（top/left/right 在圆圈上方，bottom 在圆圈下方）
       const r = it.rx, t = it.ry
@@ -621,7 +976,8 @@ export class TipLayer {
    */
   updateFlowText(cb) {
     if (!this._cards) return
-    this._cards.querySelectorAll('.cam-flow').forEach((el) => {
+    // 兼容两种初始化 tip 卡结构：旧版 .cam-flow / 新版「四车道道路平面图」.rp-card
+    this._cards.querySelectorAll('.cam-flow[data-id], .rp-card[data-id]').forEach((el) => {
       const id = el.getAttribute('data-id')
       if (id != null) cb(el, id)
     })
@@ -631,6 +987,38 @@ export class TipLayer {
   setGap(g) {
     this.gap = g
     if (this._items.length) this._layout()
+  }
+
+  /**
+   * 设置卡片整体缩放系数（随地图缩放级别联动，使大卡与古城框线等比放大缩小）。
+   * 系数 = 2^(当前zoom − 城市基准zoom)：基准 zoom 时 = 1（设计尺寸），与框线 polygon 的
+   * 屏幕尺寸严格成正比；放大时系数 > 1、缩小时 < 1。定位尺寸与 transform 同步乘此系数，
+   * 卡片既跟着框线缩放，又不会与锚点/避让错位。
+   * @param {number} f 缩放系数（非正/非有限值忽略）
+   */
+  setCardScale(f) {
+    const v = Number(f)
+    if (!Number.isFinite(v) || v <= 0) return
+    if (v === this.cardScale) return
+    this.cardScale = v
+    // 仅重设 transform（定位尺寸在下一次 update/layout 时由 _measure 以新系数重算），轻量、可高频调用
+    if (this._items.length) this._applyPositions()
+  }
+
+  /**
+   * 设置"区域屏幕矩形"（container 像素坐标 { x, y, w, h }）。
+   * zone 布局模式下，左/右/上/下四条卡片通道以此矩形为基准向外偏移，
+   * 因此地图平移/缩放后需重新调用（MapPanel 在每次 update 前刷新），
+   * 使四向卡片始终贴着区域边界外侧，而不是钉死在屏幕上。
+   */
+  setFrame(rect) {
+    this._frame = (rect && Number.isFinite(rect.x) && Number.isFinite(rect.w)) ? rect : null
+    if (this.layoutMode !== 'zone' || !this._items.length) return
+    if (this._rafId) return   // 已有待执行的 update，复用那一帧即可，避免重复布局
+    this._rafId = requestAnimationFrame(() => {
+      this._rafId = 0
+      this._layout()
+    })
   }
 
   /** 销毁：取消 rAF + 移除提示层 DOM */

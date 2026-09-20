@@ -271,7 +271,7 @@ select#styleSelect {
     position: fixed;
     top: 73px;
     bottom: 0;
-    width: 360px;
+    width: 288px; /* 原 360px 的 80% */
     z-index: 850;
     display: flex;
     flex-direction: column;
@@ -283,6 +283,12 @@ select#styleSelect {
 
 .side-left {
     left: 0;
+}
+
+/* 左栏卡片（交通通行指标/警力分配/断面图例）高度自适应内容，不再均分拉满整列 */
+.side-left .card,
+.side-left .chart-card {
+    flex: 0 0 auto;
 }
 
 .side-right {
@@ -895,7 +901,7 @@ select#styleSelect {
 .side-col {
     top: 96px;
     bottom: 62px;
-    width: 360px;
+    width: 288px; /* 原 360px 的 80%，与上方基础规则保持一致 */
     gap: 12px;
 }
 
@@ -1577,6 +1583,112 @@ select#styleSelect {
     backdrop-filter: blur(8px);
     box-shadow: 0 0 14px rgba(57, 168, 255, .45);
     text-shadow: 0 0 6px rgba(0, 0, 0, .5);
+}
+
+/* —— 古城框线「进出标识」：框线与点位交会处的 进 / 出 闸口 ——
+   几何来自 cityWallPoints.js 的 cross 字段（门点垂直投影到最近框线边），
+   配色全部走主题令牌，深浅主题自动跟随，无需重绘地图。 */
+.io-badge-icon {
+    background: none !important;
+    border: none !important;
+    pointer-events: none;
+}
+
+.io-badge {
+    position: absolute;
+    left: 0;
+    top: 0;
+    transform: translate(-50%, -50%);
+    width: max-content;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 4px 10px;
+    border-radius: 999px;
+    font-size: 13px;
+    font-weight: 700;
+    line-height: 1;
+    white-space: nowrap;
+    backdrop-filter: blur(6px);
+    /* 兜底 = 待定态，下面按 data-kind 覆写 */
+    color: var(--c-rp-muted);
+    background: var(--c-rp-bg);
+    border: 1.5px solid var(--c-rp-border);
+}
+
+/* 闸口断口：沿框线方向在徽标两侧各留一段高亮短边（使框线在此处"断开"） */
+.io-jamb {
+    position: absolute;
+    background: currentColor;
+    border-radius: 2px;
+    opacity: 1;
+    box-shadow: 0 0 6px currentColor;
+}
+
+/* 竖墙（东/西墙）→ 短边在徽标上下 */
+.io-badge[data-axis="v"] .io-jamb {
+    left: 50%;
+    width: 3px;
+    height: 12px;
+    transform: translateX(-50%);
+}
+
+.io-badge[data-axis="v"] .io-jamb-a { bottom: 100%; margin-bottom: 1px; }
+.io-badge[data-axis="v"] .io-jamb-b { top: 100%; margin-top: 1px; }
+
+/* 横墙（南/北墙）→ 短边在徽标左右 */
+.io-badge[data-axis="h"] .io-jamb {
+    top: 50%;
+    height: 3px;
+    width: 12px;
+    transform: translateY(-50%);
+}
+
+.io-badge[data-axis="h"] .io-jamb-a { right: 100%; margin-right: 1px; }
+.io-badge[data-axis="h"] .io-jamb-b { left: 100%; margin-left: 1px; }
+
+.io-badge .io-body {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+}
+
+.io-badge .io-arrow {
+    display: inline-block;
+    font-size: 9px;
+    font-style: normal;
+    line-height: 1;
+    /* 旋转角度由内联样式给出（按所在框线边决定：进→朝城内，出→朝城外） */
+}
+
+.io-badge .io-txt {
+    font-style: normal;
+    letter-spacing: 1px;
+}
+
+/* 进：绿色（车流语义色） */
+.io-badge[data-kind="in"] {
+    color: var(--c-flow-veh-data);
+    background: var(--c-flow-veh-bg);
+    border-color: var(--c-flow-veh-border);
+    box-shadow: var(--c-flow-veh-shadow);
+}
+
+/* 出：蓝色（人流语义色） */
+.io-badge[data-kind="out"] {
+    color: var(--c-flow-per-data);
+    background: var(--c-flow-per-bg);
+    border-color: var(--c-flow-per-border);
+    box-shadow: var(--c-flow-per-shadow);
+}
+
+/* 待定：中性虚线（direction = 其他，待示意图/人工确认） */
+.io-badge[data-kind="tbd"] {
+    color: var(--c-rp-muted);
+    background: var(--c-rp-bg);
+    border-color: var(--c-rp-border);
+    border-style: dashed;
+    box-shadow: none;
 }
 
 /* —— 默认点位 pin：可点击 / 可悬浮，恢复点位标记交互 —— */
@@ -2509,6 +2621,628 @@ select#styleSelect {
 }
 
 /* ============================================================================
+ * 初始化 tip 卡片：完整复刻参考页「四车道道路平面图」大卡
+ * ----------------------------------------------------------------------------
+ * 结构（与 public/FourLaneRoadPlan.html 的 .big-card 一一对应）：
+ *   .rp-card                大卡外壳（参考页 1100px → tip 尺度 360px）
+ *   .rp-head / .rp-sub      卡头：点位名 + 属性副标题 + 编号坐标 + 状态胶囊
+ *   .rp-body / .rp-cross    主体断面：双侧便道（斜纹）+ 四车道（2 实线 3 虚线）
+ *                           + 2 组摄像头 + 覆盖范围虚线 + N/S 方位
+ *   .rp-mini ×4             骑在断面上的小数据卡（车流量绿 ×2 / 人流量蓝 ×2）
+ *   （.rp-foot 脚注图例已移除：集中展示于左栏信息卡 FlowLegendPanel，警力分配下方）
+ * 外层 .tip-card 由 TipLayer 用 transform 定位，内部一律走常规流式布局；
+ * 颜色全部取 --c-rp-* / --c-flow-* 主题令牌 → 浅色 / 深色主题自动适配。
+ * ========================================================================== */
+.tip-card .rp-card {
+    /* 整卡宽度即设计基准（内部所有尺寸按此宽度排布），需要缩放时改这一处 */
+    width: 380px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    background: var(--c-rp-bg);
+    border: 1.5px solid var(--c-rp-border); /* 外框线加粗（1px → 1.5px），颜色随 data-kind 入口绿/出口蓝 */
+    border-radius: 12px;
+    box-shadow: var(--c-rp-shadow);
+    color: var(--c-rp-ink);
+    font-size: 7.5px;
+    line-height: 1.2;
+    white-space: normal;
+}
+
+/* 大卡外边框随进出口语义变色（与 .rp-io 徽标同色系）：
+   入口 = 绿（车流量语义色）/ 出口 = 蓝（人流量语义色）；data-kind 恒为 in|out */
+.tip-card .rp-card[data-kind="in"] {
+    border-color: var(--c-flow-veh-border);
+}
+
+.tip-card .rp-card[data-kind="out"] {
+    border-color: var(--c-flow-per-border);
+}
+
+/* —— 卡头：名称 + 状态 —— */
+.tip-card .rp-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 9px 11px 8px;
+    border-bottom: 1px solid var(--c-rp-headline);
+}
+
+.tip-card .rp-head-l {
+    min-width: 0;
+}
+
+.tip-card .rp-head h1 {
+    font-size: 14px;
+    font-weight: 800;
+    letter-spacing: 2px;
+    color: var(--c-rp-title);
+}
+
+.tip-card .rp-sub {
+    margin-top: 3px;
+    font-size: 8px;
+    line-height: 1.35;
+    letter-spacing: .3px;
+    color: var(--c-rp-muted);
+}
+
+/* 「详情」入口：按钮样式（原状态胶囊），data-level 仅驱动指示灯圆点颜色 */
+.tip-card .rp-status {
+    appearance: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    flex: none;
+    padding: 3px 9px;
+    border-radius: 4px;
+    border: 1px solid var(--c-btn-border);
+    background: var(--c-btn-bg);
+    color: var(--c-accent);
+    font-family: inherit;
+    font-size: 8.5px;
+    font-weight: 600;
+    line-height: 1.2;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: background .15s ease, border-color .15s ease, box-shadow .15s ease, transform .1s ease;
+}
+
+.tip-card .rp-status:hover {
+    background: var(--c-btn-bg-hover);
+    border-color: var(--c-accent);
+    box-shadow: 0 0 8px var(--c-accent-glow);
+}
+
+.tip-card .rp-status:active {
+    transform: translateY(1px);
+}
+
+.tip-card .rp-status:focus-visible {
+    outline: 1px solid var(--c-accent);
+    outline-offset: 1px;
+}
+
+.tip-card .rp-status i {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: var(--c-rp-off);
+    box-shadow: 0 0 6px var(--c-rp-off);
+    flex: none;
+}
+
+.tip-card .rp-status[data-level="free"] i {
+    background: var(--c-rp-ok);
+    box-shadow: 0 0 6px var(--c-rp-ok);
+}
+
+.tip-card .rp-status[data-level="slow"] i {
+    background: var(--c-rp-warn);
+    box-shadow: 0 0 6px var(--c-rp-warn);
+}
+
+.tip-card .rp-status[data-level="congested"] i,
+.tip-card .rp-status[data-level="severe"] i {
+    background: var(--c-rp-bad);
+    box-shadow: 0 0 6px var(--c-rp-bad);
+}
+
+/* —— 主体：道路断面 —— */
+.tip-card .rp-body {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 8px 5px 7px;
+}
+
+/* 断面容器：宽 = rp-body 内容宽 100%（370px），ns 高 214px / ew 高 246px。
+ * 内部 .rp-rot 绝对定位并按 --rot 整体旋转；4 张小数据卡是 .rp-cross 的直接子元素，
+ * 由 JS 按旋转角直接算「可视坐标」落位（下游侧一整排/列），不再随断面旋转。 */
+.tip-card .rp-cross {
+    position: relative;
+    flex: none;
+}
+
+.tip-card .rp-cross[data-axis="ns"] {
+    width: 100%;
+    height: 214px;
+}
+
+.tip-card .rp-cross[data-axis="ew"] {
+    width: 100%;
+    height: 246px;
+}
+
+/* 旋转组：便道 + 车道区(flex) + 便道 一行，6 段等宽（便道 = 车道宽度）。
+ * ns：横贯断面全宽、高 136（原 118 加厚 15%，原上游 18px 方位标区已随方位标移除回收）；
+ *     rot=180 时断面靠下停靠（top = 214-136），小卡带翻转到上方。
+ * ew：预旋尺寸 246×239（旋转 ±90° 后可视 239×246，断面带加厚 15%），按流向水平停靠，
+ *     下游侧留给小卡列（4 张竖排）。 */
+.tip-card .rp-rot {
+    position: absolute;
+    display: flex;
+    align-items: stretch;
+    transform: rotate(var(--rot, 0deg));
+}
+
+.tip-card .rp-cross[data-axis="ns"] .rp-rot { left: 0; top: 0; width: 100%; height: 136px; }
+.tip-card .rp-cross[data-axis="ns"][data-rot="180"] .rp-rot { top: 78px; }
+.tip-card .rp-cross[data-axis="ew"] .rp-rot { width: 246px; height: 239px; top: -16px; }
+.tip-card .rp-cross[data-axis="ew"][data-rot="-90"] .rp-rot { left: 58.5px; }
+/* rot=90 用「右侧内缩 58.5」与 -90 左右镜像：旋转组可视宽 239，
+ * 若沿用左侧偏移 153.5 会使右边界达 399.5（超断面 367、超卡宽 380），被 overflow:hidden 裁掉。 */
+.tip-card .rp-cross[data-axis="ew"][data-rot="90"] .rp-rot { right: 58.5px; }
+
+/* 双侧便道（人行道）：斜纹条，与车道等宽 —— 6 段等分（2 便道 + 4 车道，扣除 7px 标线：
+ * 2 实线×2px + 3 虚线×1px），随断面带宽自动缩放 */
+.tip-card .rp-sw {
+    position: relative;
+    width: calc((100% - 7px) / 6);
+    flex: none;
+    background: repeating-linear-gradient(45deg, transparent 0 3px, var(--c-rp-sw-hatch) 3px 4px), var(--c-rp-sw-bg);
+}
+
+.tip-card .rp-sw-l {
+    border: 1px solid var(--c-rp-sw-border);
+    border-right: none;
+    border-radius: 3px 0 0 3px;
+}
+
+.tip-card .rp-sw-r {
+    border: 1px solid var(--c-rp-sw-border);
+    border-left: none;
+    border-radius: 0 3px 3px 0;
+}
+
+.tip-card .rp-sw-label {
+    position: absolute;
+    top: 4px;
+    left: 50%;
+    /* 自身反旋：「便道」标签永远水平 */
+    transform: translateX(-50%) rotate(calc(-1 * var(--rot, 0deg)));
+    font-size: 6px;
+    letter-spacing: 0;
+    color: var(--c-rp-lane-tag);
+    white-space: nowrap;
+    z-index: 9;
+}
+
+/* 道路：2 实线 + 4 车道 + 3 虚线
+ * 156 × 124：横向 = 4 车道并列宽度；纵向 = 车头方向长度，需容纳
+ * 车道名(0-11) → 车道号(14-33) → 摄像头覆盖线(41) → 行驶方向箭头(46-74) → 小数据卡(79-123) 五段互不重叠 */
+.tip-card .rp-road {
+    position: relative;
+    display: flex;
+    flex: 1;            /* 撑满 .rp-rot 内除去两侧便道后的全部宽度 */
+    height: 100%;       /* 撑满 .rp-rot 高度（路面随断面区一起变宽扁） */
+    box-shadow: 0 0 0 1px var(--c-rp-road-edge);
+}
+
+.tip-card .rp-line { flex: none; }
+
+.tip-card .rp-solid {
+    width: 2px;
+    background: var(--c-rp-line);
+}
+
+.tip-card .rp-dash {
+    width: 1px;
+    background-image: repeating-linear-gradient(180deg, var(--c-rp-line) 0 9px, transparent 9px 18px);
+}
+
+.tip-card .rp-lane {
+    flex: 1;
+    position: relative;
+    background: var(--c-rp-road-bg);
+    transition: background .25s;
+}
+
+.tip-card .rp-lane:hover { background: var(--c-rp-road-hover); }
+
+.tip-card .rp-lane-tag {
+    position: absolute;
+    top: 1.5%;
+    left: 50%;
+    /* 自身反旋：车道名永远水平（随断面旋转就位，仅文字转正） */
+    transform: translateX(-50%) rotate(calc(-1 * var(--rot, 0deg)));
+    font-size: 7.5px;
+    letter-spacing: 1px;
+    color: var(--c-rp-lane-tag);
+    white-space: nowrap;
+}
+
+.tip-card .rp-lane-num {
+    position: absolute;
+    top: 18%;
+    left: 50%;
+    /* 自身反旋：车道号永远水平 */
+    transform: translate(-50%, -50%) rotate(calc(-1 * var(--rot, 0deg)));
+    font-size: 15px;
+    font-weight: 800;
+    color: var(--c-rp-lane-num);
+    user-select: none;
+}
+
+/* 车辆行驶方向指示线（每车道一根）：竖线 + 箭头；随断面旋转 → 自动指向真实行驶方向。
+ * 纵向位置 29%（36–58px）经四向旋转实测无遮挡：既不压车道号，也不被小数据卡压住 */
+.tip-card .rp-lane-flow {
+    position: absolute;
+    top: 29%;
+    left: 50%;
+    width: 12px;
+    height: 22px;
+    margin-left: -6px;
+    pointer-events: none;
+    user-select: none;
+}
+
+.tip-card .rp-fl-tail {
+    position: absolute;
+    left: 50%;
+    top: 0;
+    width: 2px;
+    height: 15px;
+    margin-left: -1px;
+    border-radius: 1px;
+    background: var(--c-rp-flow);
+    box-shadow: 0 0 6px var(--c-rp-flow-glow);
+}
+
+.tip-card .rp-fl-head {
+    position: absolute;
+    left: 50%;
+    bottom: 0;
+    width: 0;
+    height: 0;
+    margin-left: -3.5px;
+    border-left: 3.5px solid transparent;
+    border-right: 3.5px solid transparent;
+    border-top: 7px solid var(--c-rp-flow);
+    filter: drop-shadow(0 0 4px var(--c-rp-flow-glow));
+}
+
+/* 摄像头图标（每 2 条车道一组，架在虚线上） */
+.tip-card .rp-anchor {
+    position: absolute;
+    left: var(--x, 50%);
+    top: var(--y, 50%);
+    transform: translate(-50%, -50%);
+    z-index: 9;
+}
+
+.tip-card .rp-cam {
+    position: relative;
+    display: block;
+    width: 14px;
+    height: 11px;
+}
+
+.tip-card .rp-cam-body {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 12px;
+    height: 7px;
+    border: 1.5px solid var(--c-rp-accent);
+    border-radius: 2px 4px 4px 2px;
+    background: var(--c-rp-road-bg);
+    box-shadow: 0 0 6px var(--c-rp-accent-glow);
+}
+
+.tip-card .rp-cam-body::after {
+    content: "";
+    position: absolute;
+    right: 2px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 2.5px;
+    height: 2.5px;
+    border-radius: 50%;
+    background: var(--c-rp-accent);
+}
+
+.tip-card .rp-cam-pole {
+    position: absolute;
+    left: 50%;
+    bottom: 0;
+    width: 1px;
+    height: 4px;
+    background: var(--c-rp-accent);
+    transform: translateX(-50%);
+}
+
+/* 摄像头覆盖范围（红色细虚线，各横跨 2 条车道） */
+.tip-card .rp-cov {
+    position: absolute;
+    height: 0;
+    border-top: 1px dashed var(--c-rp-cov);
+    z-index: 4;
+}
+
+.tip-card .rp-cov-1 { left: 5px; right: 50%; top: 48%; }
+
+.tip-card .rp-cov-2 { left: 50%; right: 5px; top: 48%; }
+
+/* —— 小数据卡（参考页 .card）：一排 4 张横贯断面全宽、贴下游侧 ——
+ * 是 .rp-cross 的直属子元素（不随 .rp-rot 旋转），坐标由 JS 按断面 rot 映射到可视位置，
+ * 元素本身无需反旋 → 文字天然水平 */
+.tip-card .rp-mini {
+    position: absolute;
+    left: var(--x, 50%);
+    top: var(--y, 50%);
+    transform: translate(-50%, -50%);
+    z-index: 7;
+    /* 宽度按内容取，只受 max-width 约束：避免绝对定位按 left 起算可用宽度而提前折行；
+     * 槽位中心距 91.7px，限宽 88 → 相邻小卡不重叠、最外侧也不越出断面（367px） */
+    width: max-content;
+    max-width: 88px;
+    padding: 2px;
+    line-height: 1.3;
+    border-radius: 6px;
+    border: 1px solid var(--c-rp-border);
+    background: var(--c-rp-bg);
+    box-shadow: 0 4px 14px rgba(0, 0, 0, .35);
+    font-size: 7px;
+    color: var(--c-rp-ink);
+    /* 数值位数增多时换行撑高，而不是横向撑宽压盖相邻卡 */
+    white-space: normal;
+    overflow-wrap: anywhere;
+}
+
+/* 小数据卡可点击：打开该路设备的接口数据详情弹窗（交互绑定见 MapPanel.vue 事件委托） */
+.tip-card .rp-mini:hover {
+    cursor: pointer;
+    filter: brightness(1.12);
+    border-color: var(--c-rp-accent);
+}
+
+/* 标题行：圆点 + 标题文字（类型角标换行独占一行，见 .rp-kind） */
+.tip-card .rp-mini-t {
+    font-size: 7px;
+    font-weight: 700;
+    margin-bottom: 1px;
+}
+
+.tip-card .rp-mini .rp-dot {
+    display: inline-block;
+    vertical-align: middle;
+    width: 4px;
+    height: 4px;
+    margin-right: 2px;
+    border-radius: 50%;
+    background: var(--c-rp-muted);
+}
+
+.tip-card .rp-rows {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    line-height: 1.35;
+    color: var(--c-rp-muted);
+}
+
+.tip-card .rp-rows b {
+    font-size: 7.5px;
+    font-weight: 700;
+    margin-right: 2px;
+    font-variant-numeric: tabular-nums;
+}
+
+/* 车流量卡：绿色高亮外框 + 绿色标题/数据 */
+.tip-card .rp-mini.rp-veh {
+    border-color: var(--c-flow-veh-border);
+    background: var(--c-flow-veh-bg);
+    box-shadow: var(--c-flow-veh-shadow);
+}
+
+.tip-card .rp-mini.rp-veh .rp-mini-t { color: var(--c-flow-veh-title); }
+.tip-card .rp-mini.rp-veh .rp-dot { background: var(--c-flow-veh-dot); }
+.tip-card .rp-mini.rp-veh .rp-rows b { color: var(--c-flow-veh-data); }
+
+/* 人流量卡：蓝色高亮外框 + 蓝色标题/数据 */
+.tip-card .rp-mini.rp-per {
+    border-color: var(--c-flow-per-border);
+    background: var(--c-flow-per-bg);
+    box-shadow: var(--c-flow-per-shadow);
+}
+
+.tip-card .rp-mini.rp-per .rp-mini-t { color: var(--c-flow-per-title); }
+.tip-card .rp-mini.rp-per .rp-dot { background: var(--c-flow-per-dot); }
+.tip-card .rp-mini.rp-per .rp-rows b { color: var(--c-flow-per-data); }
+
+/* 小数据卡类型角标：车卡=绿、便道=蓝，沿用原有高亮色令牌。
+ * 换行独占一行（不再挤在标题右侧），避免标题行被撑宽导致相邻小卡互相重叠。 */
+.tip-card .rp-kind {
+    display: block;
+    width: fit-content;
+    margin: 1px 0 0;
+    padding: 0 2px;
+    height: 12px;
+    line-height: 12px;
+    border-radius: 6px;
+    font-size: 7.5px;
+    font-weight: 700;
+    letter-spacing: .5px;
+    border: 1px solid transparent;
+    white-space: nowrap;
+}
+.tip-card .rp-kind-veh {
+    color: var(--c-flow-veh-title);
+    background: rgba(52, 209, 123, .16);
+    border-color: var(--c-flow-veh-border);
+}
+.tip-card .rp-kind-per {
+    color: var(--c-flow-per-title);
+    background: rgba(78, 161, 255, .16);
+    border-color: var(--c-flow-per-border);
+}
+
+/* 便道人流小卡已改为 .rp-cross 直属子元素（与其他小卡同排），原 rp-side-l/r 悬挂规则废弃删除 */
+
+/* —— 卡头右侧：进出标签 + 状态胶囊 —— */
+.tip-card .rp-head-r {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 5px;
+    flex: none;
+}
+
+/* 进出口标签：只显示「入口/出口」，色系 = 所在大卡边框色（入口绿/出口蓝，同 --c-flow-* 令牌） */
+.tip-card .rp-io {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 3px 7px;
+    border-radius: 999px;
+    border: 1px solid var(--c-flow-veh-border);
+    background: var(--c-flow-veh-bg);
+    color: var(--c-flow-veh-title);
+    font-size: 8px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.tip-card .rp-io b {
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: 1px;
+}
+
+.tip-card .rp-io[data-kind="out"] {
+    border-color: var(--c-flow-per-border);
+    background: var(--c-flow-per-bg);
+    color: var(--c-flow-per-title);
+}
+
+/* —— 脚注首行：行驶方向说明 —— */
+.tip-card .rp-flowcap {
+    flex: none;
+    width: 100%;
+    text-align: center;
+    font-size: 7px;
+    font-weight: 600;
+    letter-spacing: .3px;
+    color: var(--c-rp-muted);
+    padding-bottom: 1px;
+}
+
+.tip-card .rp-flowcap b {
+    font-size: 8px;
+    color: var(--c-rp-flow);
+}
+
+/* —— 脚注：图例 —— */
+.tip-card .rp-foot {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: center;
+    gap: 2px 7px;
+    padding: 5px 9px 5px;
+    border-top: 1px solid var(--c-rp-headline);
+    font-size: 6.5px;
+    color: var(--c-rp-muted);
+}
+
+/* 图例项图标绘制：大数据卡（.tip-card）与右上角集中图例面板（.flow-legend）共用同一套，
+ * 颜色令牌同源 → 图例说明与卡内图形永远一致 */
+.tip-card .rp-fi, .flow-legend .rp-fi {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    white-space: nowrap;
+}
+
+.tip-card .rp-fi-solid, .flow-legend .rp-fi-solid {
+    width: 18px;
+    height: 2px;
+    background: var(--c-rp-line);
+    border-radius: 1px;
+}
+
+.tip-card .rp-fi-dash, .flow-legend .rp-fi-dash {
+    width: 18px;
+    height: 0;
+    border-top: 2px dashed var(--c-rp-line);
+}
+
+/* 行驶方向箭头图例 */
+.tip-card .rp-fi-flow, .flow-legend .rp-fi-flow {
+    width: 0;
+    height: 0;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-top: 7px solid var(--c-rp-flow);
+    filter: drop-shadow(0 0 3px var(--c-rp-flow-glow));
+}
+
+.tip-card .rp-fi-sw, .flow-legend .rp-fi-sw {
+    width: 14px;
+    height: 9px;
+    border: 1px solid var(--c-rp-sw-border);
+    background: repeating-linear-gradient(45deg, transparent 0 3px, var(--c-rp-sw-hatch) 3px 4px), var(--c-rp-sw-bg);
+}
+
+.tip-card .rp-fi-cam, .flow-legend .rp-fi-cam {
+    position: relative;
+    width: 13px;
+    height: 7px;
+    border: 1.5px solid var(--c-rp-accent);
+    border-radius: 2px 4px 4px 2px;
+    background: var(--c-rp-road-bg);
+}
+
+.tip-card .rp-fi-cam::after, .flow-legend .rp-fi-cam::after {
+    content: "";
+    position: absolute;
+    right: 1px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 2px;
+    height: 2px;
+    border-radius: 50%;
+    background: var(--c-rp-accent);
+}
+
+.tip-card .rp-fi-box, .flow-legend .rp-fi-box {
+    width: 11px;
+    height: 8px;
+    border-radius: 2px;
+    border: 1px solid var(--c-flow-veh-border);
+    background: var(--c-flow-veh-bg);
+}
+
+.tip-card .rp-fi-box.rp-p, .flow-legend .rp-fi-box.rp-p {
+    border-color: var(--c-flow-per-border);
+    background: var(--c-flow-per-bg);
+}
+
+/* ============================================================================
  * 科技感监控 tip 卡：荧光边框 + 脉冲指示灯 + 路段监控行 + 流量数据 + 扫描线
  * ========================================================================== */
 
@@ -3384,6 +4118,58 @@ select#styleSelect {
     --c-video-border: rgba(110, 170, 255, .3);
     --c-video-ph: #7f93b8;
     --c-video-note: #8fa6cc;
+    /* —— 初始化 tip 卡片：车/人流量语义色（随主题翻转） —— */
+    --c-flow-veh-border: rgba(52, 209, 123, .65);
+    --c-flow-veh-bg: rgba(14, 36, 26, .92);
+    --c-flow-veh-title: #55d6a2;
+    --c-flow-veh-data: #3ddc84;
+    --c-flow-veh-dot: #3ddc84;
+    --c-flow-veh-shadow: 0 6px 20px rgba(0, 0, 0, .5), 0 0 14px rgba(52, 209, 123, .22);
+    --c-flow-per-border: rgba(78, 161, 255, .78);
+    --c-flow-per-bg: rgba(19, 31, 51, .92);
+    --c-flow-per-title: #7fc0ff;
+    --c-flow-per-data: #5aa9ff;
+    --c-flow-per-dot: #5aa9ff;
+    --c-flow-per-shadow: 0 6px 20px rgba(0, 0, 0, .5), 0 0 16px rgba(78, 161, 255, .30);
+    /* —— 初始化 tip「四车道道路平面图」大卡：结构色（随主题翻转） —— */
+    --c-rp-bg: rgba(9, 17, 30, .94);
+    --c-rp-border: rgba(110, 170, 255, .34);
+    --c-rp-headline: rgba(120, 160, 220, .20);
+    --c-rp-shadow: 0 16px 44px rgba(0, 0, 0, .58), 0 2px 10px rgba(0, 0, 0, .45), 0 0 20px rgba(0, 170, 255, .14);
+    --c-rp-title: #f2f5fa;
+    --c-rp-ink: #e6eaf2;
+    --c-rp-muted: #8fa6c4;
+    --c-rp-road-bg: #10141a;
+    --c-rp-road-hover: #181d25;
+    --c-rp-road-edge: rgba(110, 170, 255, .16);
+    --c-rp-line: #e8f2ff;
+    --c-rp-lane-num: rgba(232, 242, 255, .10);
+    --c-rp-lane-flow: rgba(232, 242, 255, .22);
+    --c-rp-lane-tag: rgba(232, 242, 255, .48);
+    --c-rp-sw-bg: #0a0e14;
+    --c-rp-sw-hatch: rgba(232, 242, 255, .08);
+    --c-rp-sw-border: rgba(110, 170, 255, .20);
+    --c-rp-accent: #ff5a52;
+    --c-rp-accent-glow: rgba(255, 90, 82, .35);
+    --c-rp-cov: rgba(255, 90, 82, .6);
+    /* 车辆行驶方向指示线（暖橙，与红色摄像头覆盖线区分） */
+    --c-rp-flow: #ffb347;
+    --c-rp-flow-glow: rgba(255, 179, 71, .45);
+    /* 方位罗盘 */
+    --c-rp-compass-bg: rgba(9, 17, 30, .90);
+    --c-rp-compass-n: #ff7a72;
+    --c-rp-ok: #3ddc84;
+    --c-rp-ok-bg: rgba(61, 220, 132, .10);
+    --c-rp-ok-bd: rgba(61, 220, 132, .35);
+    --c-rp-warn: #ffbe3d;
+    --c-rp-warn-bg: rgba(255, 190, 61, .10);
+    --c-rp-warn-bd: rgba(255, 190, 61, .38);
+    --c-rp-bad: #ff5a52;
+    --c-rp-bad-bg: rgba(255, 90, 82, .12);
+    --c-rp-bad-bd: rgba(255, 90, 82, .42);
+    --c-rp-off: #8fa6c4;
+    --c-rp-off-bg: rgba(143, 166, 196, .10);
+    --c-rp-off-bd: rgba(143, 166, 196, .32);
 }
 
 [data-theme="light"] {
@@ -3435,6 +4221,55 @@ select#styleSelect {
     --c-video-border: rgba(0, 119, 200, .3);
     --c-video-ph: #5a6b7b;
     --c-video-note: #5a6b7b;
+    /* —— 初始化 tip 卡片：浅色主题下的语义色（更柔和、可读优先） —— */
+    --c-flow-veh-border: rgba(40, 160, 100, .6);
+    --c-flow-veh-bg: rgba(232, 247, 238, .96);
+    --c-flow-veh-title: #157a4a;
+    --c-flow-veh-data: #0f6e42;
+    --c-flow-veh-dot: #1a9c5e;
+    --c-flow-veh-shadow: 0 6px 18px rgba(20, 80, 50, .18);
+    --c-flow-per-border: rgba(40, 120, 210, .6);
+    --c-flow-per-bg: rgba(232, 242, 252, .96);
+    --c-flow-per-title: #1c66b8;
+    --c-flow-per-data: #15579e;
+    --c-flow-per-dot: #2f7fd6;
+    --c-flow-per-shadow: 0 6px 18px rgba(20, 60, 110, .18);
+    /* —— 初始化 tip「四车道道路平面图」大卡：浅色主题（纸质平面图观感：浅灰路面 + 中灰标线） —— */
+    --c-rp-bg: rgba(255, 255, 255, .97);
+    --c-rp-border: rgba(0, 119, 200, .30);
+    --c-rp-headline: rgba(60, 90, 130, .16);
+    --c-rp-shadow: 0 14px 34px rgba(20, 50, 90, .18), 0 2px 8px rgba(20, 50, 90, .12);
+    --c-rp-title: #0b1622;
+    --c-rp-ink: #1f2d3d;
+    --c-rp-muted: #5a6b7b;
+    --c-rp-road-bg: #eaeff6;
+    --c-rp-road-hover: #e1e8f1;
+    --c-rp-road-edge: rgba(0, 119, 200, .16);
+    --c-rp-line: #93a8bf;
+    --c-rp-lane-num: rgba(31, 45, 61, .10);
+    --c-rp-lane-flow: rgba(31, 45, 61, .22);
+    --c-rp-lane-tag: rgba(31, 45, 61, .45);
+    --c-rp-sw-bg: #f4f7fb;
+    --c-rp-sw-hatch: rgba(31, 45, 61, .08);
+    --c-rp-sw-border: rgba(0, 119, 200, .18);
+    --c-rp-accent: #e04a42;
+    --c-rp-accent-glow: rgba(224, 74, 66, .28);
+    --c-rp-cov: rgba(224, 74, 66, .55);
+    /* 车辆行驶方向指示线（暖橙，与红色摄像头覆盖线区分） */
+    --c-rp-flow: #c46a00;
+    --c-rp-flow-glow: rgba(196, 106, 0, .30);
+    --c-rp-ok: #128a55;
+    --c-rp-ok-bg: rgba(18, 138, 85, .10);
+    --c-rp-ok-bd: rgba(18, 138, 85, .32);
+    --c-rp-warn: #b4780c;
+    --c-rp-warn-bg: rgba(180, 120, 12, .10);
+    --c-rp-warn-bd: rgba(180, 120, 12, .32);
+    --c-rp-bad: #c0392b;
+    --c-rp-bad-bg: rgba(192, 57, 43, .10);
+    --c-rp-bad-bd: rgba(192, 57, 43, .32);
+    --c-rp-off: #6b7a8c;
+    --c-rp-off-bg: rgba(107, 122, 140, .10);
+    --c-rp-off-bd: rgba(107, 122, 140, .30);
 }
 
 /* —— 浅色主题：tip 徽章与阴影适配 —— */
@@ -3840,6 +4675,9 @@ body,
 .cam-pin,
 .cam-pin .pin,
 .cam-pin .badge,
+.io-badge,
+.io-badge .io-body,
+.io-badge .io-jamb,
 .tip-overlay,
 .tip-card,
 .tip-line,
@@ -4158,10 +4996,46 @@ body,
     border-width: 1px;
 }
 
-/* 时序预测卡片：在页面垂直方向整体下移，优化底部布局与视觉重心 */
-.prediction-chart {
-    margin-top: 14px;
+/* 断面图例面板（左栏 · 警力分配下方）：原 8 张大数据卡脚注图例集中于此。
+ * flex:none 固定内容高度，与左栏其他卡同为内容自适应 */
+.flow-legend {
+    flex: none;
 }
+
+.flow-legend .legend-sub {
+    font-size: 10px;
+    color: var(--c-text-dim);
+    white-space: nowrap;
+}
+
+.flow-legend .legend-body {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 12px;
+    padding: 9px 12px 10px;
+    font-size: 11px;
+    color: var(--c-text-dim);
+    line-height: 1.35;
+}
+
+/* 面板是正常 UI 尺度（不被 cardScale 缩放），图例项文字与图标适当放大 */
+.flow-legend .rp-fi {
+    font-size: 11px;
+    color: var(--c-text-dim);
+    gap: 6px;
+}
+
+.flow-legend .rp-fi-solid { width: 22px; height: 2.5px; }
+.flow-legend .rp-fi-dash { width: 22px; border-top-width: 2.5px; }
+.flow-legend .rp-fi-flow {
+    border-left-width: 5px;
+    border-right-width: 5px;
+    border-top-width: 8px;
+}
+.flow-legend .rp-fi-sw { width: 18px; height: 11px; }
+.flow-legend .rp-fi-cam { width: 16px; height: 9px; }
+.flow-legend .rp-fi-box { width: 14px; height: 10px; }
 
 .chart-toolbar {
     display: flex;
@@ -4248,6 +5122,185 @@ body,
 .chart-info b {
     color: var(--c-text-strong);
     font-size: 12px;
+}
+
+/* ==================== 视频详情列表（右栏 · 按天统计下方/列底） ====================
+ * 点击大数据卡右上角「详情」展开：4 路设备 = 大卡断面 4 张小数据卡，
+ * 每路横排「截图占位(16:9) + 元信息」，数据口径与 mini 卡一致 */
+.video-detail {
+    flex: 0 0 auto;
+}
+
+.video-detail .vd-title {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.video-detail .vd-close {
+    flex: none;
+    cursor: pointer;
+    font-size: 12px;
+    color: var(--c-text-dim);
+    padding: 0 2px;
+}
+
+.video-detail .vd-close:hover {
+    color: var(--c-accent);
+}
+
+.video-detail .vd-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: 40vh; /* 右栏上方还有两卡平分空间，列表自滚防挤压 */
+    overflow-y: auto;
+}
+
+.vd-item {
+    flex: none;
+    display: flex;
+    gap: 8px;
+    padding: 7px;
+    border: 1px solid rgba(0, 225, 255, .16);
+    border-radius: 8px;
+    background: rgba(8, 16, 30, .5);
+}
+
+/* 视频截图占位：16:9 深色底 + 扫描线 + 通道号/LIVE 角标（无真实码流，口径同全局"暂无视频流"） */
+.vd-shot {
+    position: relative;
+    flex: none;
+    width: 96px;
+    aspect-ratio: 16 / 9;
+    border-radius: 5px;
+    overflow: hidden;
+    background: linear-gradient(160deg, #0b1424, #10203a 55%, #0a1220);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    border: 1px solid rgba(0, 225, 255, .14);
+}
+
+.vd-scan {
+    position: absolute;
+    inset: 0;
+    background: repeating-linear-gradient(0deg, rgba(255, 255, 255, .035) 0 1px, transparent 1px 3px);
+    pointer-events: none;
+}
+
+.vd-ph-ic {
+    font-size: 13px;
+    line-height: 1;
+    opacity: .85;
+}
+
+.vd-ph-tx {
+    font-size: 8.5px;
+    color: #7f93b8;
+}
+
+.vd-ch {
+    position: absolute;
+    top: 3px;
+    left: 4px;
+    font-size: 7.5px;
+    font-weight: 700;
+    color: var(--c-accent);
+    letter-spacing: .5px;
+    font-variant-numeric: tabular-nums;
+}
+
+.vd-live {
+    position: absolute;
+    top: 3px;
+    right: 4px;
+    font-size: 7px;
+    font-weight: 800;
+    letter-spacing: 1px;
+    color: #ff5b5b;
+    padding: 1px 4px;
+    border: 1px solid rgba(255, 91, 91, .55);
+    border-radius: 999px;
+}
+
+/* 元信息：设备名 + 状态 + 两行数据 + 活跃 */
+.vd-meta {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    font-size: 10px;
+    color: var(--c-text-dim);
+}
+
+.vd-name {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    min-width: 0;
+}
+
+.vd-dot {
+    flex: none;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #34d17b; /* per 便道默认绿点，veh 下方覆盖为蓝 */
+}
+
+.vd-dot[data-kind="veh"] {
+    background: #4ea1ff;
+}
+
+.vd-name-tx {
+    font-size: 10.5px;
+    font-weight: 600;
+    color: var(--c-text-strong);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.vd-status {
+    flex: none;
+    margin-left: auto;
+    font-size: 8.5px;
+    padding: 1px 5px;
+    border-radius: 999px;
+    border: 1px solid rgba(110, 170, 255, .3);
+    color: var(--c-text-dim);
+}
+
+.vd-status[data-level="abnormal"] {
+    border-color: rgba(255, 170, 70, .55);
+    color: #ffb46e;
+}
+
+.vd-status[data-level="offline"] {
+    border-color: rgba(255, 91, 91, .5);
+    color: #ff8080;
+}
+
+.vd-status[data-level="online"] {
+    border-color: rgba(52, 209, 123, .5);
+    color: #34d17b;
+}
+
+.vd-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 6px;
+    font-size: 9.5px;
+    line-height: 1.35;
+}
+
+.vd-row b {
+    color: var(--c-text-strong);
+    font-variant-numeric: tabular-nums;
 }
 
 .chart-info b.warn {
@@ -4387,4 +5440,148 @@ body,
 .congestion-list::-webkit-scrollbar-track,
 .chart-filters::-webkit-scrollbar-track {
     background: transparent;
+}
+
+/* --------------------------------------------------------------------------
+ * 单路设备数据详情弹窗（点大卡内槽位小数据卡打开）
+ * 结构见 MapPanel.vue 的 Teleport 模板；配色走 --c-rp-* / --c-flow-* 主题令牌，
+ * 深浅主题自动适配。卡片本体注入在 #container 内，弹窗 Teleport 到 body，
+ * 故此处为全局样式（非 scoped）。
+ * ------------------------------------------------------------------------ */
+.cam-detail-mask {
+    position: fixed;
+    inset: 0;
+    z-index: 9998;
+    background: var(--c-modal-mask, rgba(2, 8, 18, .62));
+    backdrop-filter: blur(2px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 4vh 4vw;
+}
+
+.cam-detail-modal {
+    width: min(560px, 92vw);
+    max-height: 88vh;
+    display: flex;
+    flex-direction: column;
+    border-radius: 12px;
+    border: 1px solid var(--c-rp-border);
+    background: var(--c-rp-bg);
+    box-shadow: var(--c-rp-shadow);
+    color: var(--c-rp-ink);
+    overflow: hidden;
+}
+
+.cdm-hd {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--c-rp-headline);
+    background: var(--c-rp-headline);
+    flex: none;
+}
+
+.cdm-hd-l {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 0;
+}
+
+.cdm-title {
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--c-rp-title);
+    letter-spacing: .5px;
+}
+
+.cdm-sub {
+    font-size: 11px;
+    color: var(--c-rp-muted);
+    word-break: break-all;
+}
+
+.cdm-close {
+    flex: none;
+    width: 26px;
+    height: 26px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    line-height: 1;
+    border: 1px solid var(--c-rp-border);
+    background: transparent;
+    color: var(--c-rp-ink);
+}
+
+.cdm-close:hover {
+    background: var(--c-rp-headline);
+}
+
+.cdm-bd {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    padding: 12px 16px 4px;
+}
+
+.cdm-grp+.cdm-grp {
+    margin-top: 14px;
+}
+
+.cdm-grp-t {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: .5px;
+    color: var(--c-rp-muted);
+    padding-bottom: 5px;
+    margin-bottom: 6px;
+    border-bottom: 1px dashed var(--c-rp-headline);
+}
+
+.cdm-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: 4px 12px;
+}
+
+.cdm-item {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 12px;
+    padding: 3px 0;
+}
+
+.cdm-k {
+    color: var(--c-rp-muted);
+    flex: none;
+}
+
+.cdm-v {
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+    word-break: break-all;
+}
+
+.cdm-ft {
+    flex: none;
+    padding: 8px 16px;
+    font-size: 10px;
+    color: var(--c-rp-muted);
+    border-top: 1px solid var(--c-rp-headline);
+}
+
+.cdm-bd::-webkit-scrollbar {
+    width: 3px;
+}
+
+.cdm-bd::-webkit-scrollbar-thumb {
+    background: var(--c-rp-border);
+    border-radius: 2px;
 }

@@ -124,6 +124,10 @@ class ROIDetector:
 
         if best_len < 0:
             # 线段完全在 ROI 外, 标记整段失效 (t0>t1)
+            logger.warning(
+                "计数线与 ROI 不相交 (线完全落在 ROI 外), 越线段失效, "
+                "该线将不再产生任何越线事件; 请检查 roi_polygon 与 line_coords 配置"
+            )
             return 1.0, 0.0, list(line_start), list(line_end)
 
         clip_p0 = [p1x + best_t0 * dx, p1y + best_t0 * dy]

@@ -52,17 +52,13 @@ async function load() {
     const [devs, stats] = await Promise.all([listDevices(), getDeviceStats().catch(() => [])])
     state.devices = devs || []
     applyStats(stats)
-    // 落点：优先用后端返回的 longitude/latitude（§3.2，v0.9.0），
-    // 其次保留前端已维护落点（拖拽/新增），否则按城市中心散开。
-    // 严格类型校验：仅接受有限数值（排除 undefined/NaN/null/字符串/布尔），非法回退散开默认值
-    devs.forEach((d, i) => {
-      if (!state.positions[d.id]) {
-        const geo = normalizeGeo(d)
-        state.positions[d.id] = geo || {
-          lng: 113.3132 + (i % 5) * 0.0016 - 0.004,
-          lat: 40.0931 + Math.floor(i / 5) * 0.0016 - 0.004
-        }
-      }
+    // 落点：严格以后端返回的 longitude/latitude 为准（§3.2）。
+    // 后端匹配不到 device_geo.json 时该值为 null，此时不落点（设备仍在列表/统计中，只是不上图），
+    // 前端不再伪造坐标；已由用户拖拽/新增写入的落点保持不变。
+    devs.forEach((d) => {
+      if (state.positions[d.id]) return
+      const geo = normalizeGeo(d)
+      if (geo) state.positions[d.id] = geo
     })
   } catch (e) {
     push('设备加载失败：' + (e.detail || e.message), 'error')
@@ -161,7 +157,7 @@ async function refreshStats() {
 async function create(payload, pos) {
   try {
     await registerDevice(payload)
-    // 仅为合法数值坐标写入落点，非法（含 NaN）时不设位置，交由 load() 兜底散开
+    // 仅为合法数值坐标写入落点；非法（含 NaN）时不设位置，设备不上图（不再伪造兜底坐标）
     if (pos && typeof pos.lng === 'number' && typeof pos.lat === 'number' &&
         Number.isFinite(pos.lng) && Number.isFinite(pos.lat)) {
       state.positions[payload.id] = pos

@@ -8,6 +8,33 @@
     <!-- 设备编辑 / 添加弹窗 -->
     <DeviceEditor :open="editorOpen" :mode="editorMode" :device="editorDevice" :pos="editorPos"
       @close="editorOpen = false" @save="onEditorSave" @remove="onEditorRemove" />
+
+    <!-- 单路摄像头 · 接口数据详情弹窗（点大卡内某张槽位小卡打开） -->
+    <Teleport to="body">
+      <div v-if="camDetail" class="cam-detail-mask" @click.self="closeCamDetail">
+        <div class="cam-detail-modal">
+          <div class="cdm-hd">
+            <div class="cdm-hd-l">
+              <span class="cdm-title">{{ camDetail.title }}</span>
+              <span class="cdm-sub">{{ camDetail.subtitle }}</span>
+            </div>
+            <button type="button" class="cdm-close" title="关闭" @click="closeCamDetail">✕</button>
+          </div>
+          <div class="cdm-bd">
+            <div class="cdm-grp" v-for="grp in camDetail.groups" :key="grp.title">
+              <div class="cdm-grp-t">{{ grp.title }}</div>
+              <div class="cdm-grid">
+                <div class="cdm-item" v-for="it in grp.items" :key="it.k">
+                  <span class="cdm-k">{{ it.k }}</span>
+                  <b class="cdm-v">{{ it.v }}</b>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="cdm-ft">数据来源：/api/devices（设备信息）· ws://…/ws stats.devices（实时计数，随推送刷新）</div>
+        </div>
+      </div>
+    </Teleport>
   </div>
 </template>
 
@@ -18,7 +45,8 @@ import { useDevices } from '../composables/useDevices.js'
 import { useMapControl } from '../composables/useMapControl.js'
 import { useToast } from '../composables/useToast.js'
 import { useTheme } from '../composables/useTheme.js'
-import { CITY_WALL_POINTS, sortPointsByPriority } from '../data/cityWallPoints.js'
+import { useVideoDetail } from '../composables/useVideoDetail.js'
+import { sortPointsByPriority, sortPointsForZoneLayout, zoneOfPoint, ioKindOf, ioArrowDeg, IO_LABEL, roadInfoOf, anchorOutOfCross, metersPerPixelAt, CARD_BADGE_CLEAR_PX, WALL_OUT_SIDE, projectToWall } from '../data/cityWallPoints.js'
 import { TipLayer } from '../utils/tipLayer.js'
 import DeviceEditor from './DeviceEditor.vue'
 
@@ -26,15 +54,17 @@ const { state: dev, load, create, remove, configure, setPosition, select } = use
 const { mapCtl } = useMapControl()
 const { push } = useToast()
 const { theme, mapStyle, overlayColors } = useTheme()
+const { state: videoDetailState, open: openVideoDetail, close: closeVideoDetail } = useVideoDetail()
 
 // —— 坐标转换工具（Leaflet 使用 [lat, lng]，数据使用 [lng, lat]）——
 function toLatLng(p) { return [p[1], p[0]] }
 function toLatLngArr(pts) { return pts.map(toLatLng) }
 
-// —— 瓦片图层配置（通过环境变量配置内网瓦片服务器地址）——
-// 深色/浅色可分别配置，未配置时默认使用同一地址
-const TILE_URL_LIGHT = import.meta.env.VITE_TILE_URL_LIGHT || import.meta.env.VITE_TILE_URL || 'http://localhost:8080/tiles/{z}/{x}/{y}.png'
-const TILE_URL_DARK  = import.meta.env.VITE_TILE_URL_DARK  || import.meta.env.VITE_TILE_URL || 'http://localhost:8080/tiles/{z}/{x}/{y}.png'
+// —— 瓦片图层配置（同源相对路径，由 nginx.conf 的 location /tiles/ 直接静态服务）——
+// 深色/浅色可分别配置，未配置时回退 VITE_TILE_URL，最终兜底同源 /tiles/{z}/{x}/{y}.png
+const TILE_FALLBACK = '/tiles/{z}/{x}/{y}.png'
+const TILE_URL_LIGHT = import.meta.env.VITE_TILE_URL_LIGHT || import.meta.env.VITE_TILE_URL || TILE_FALLBACK
+const TILE_URL_DARK  = import.meta.env.VITE_TILE_URL_DARK  || import.meta.env.VITE_TILE_URL || TILE_FALLBACK
 const TILE_ATTR = import.meta.env.VITE_TILE_ATTR || ''
 
 // 1×1 透明兜底瓦片：未下载到的格子显示容器底色，而非破图白块（主题匹配关键）
@@ -45,23 +75,6 @@ let tileLayerLight = null  // 浅色瓦片层
 let tileLayerDark = null   // 深色瓦片层
 
 // —— 城市配置 ——
-function computeHull(pts) {
-  const p = pts.slice().sort((a, b) => a[0] - b[0] || a[1] - b[1])
-  const n = p.length
-  if (n < 3) return p.slice()
-  const cross = (O, A, B) => (A[0] - O[0]) * (B[1] - O[1]) - (A[1] - O[1]) * (B[0] - O[0])
-  const lower = []
-  for (let i = 0; i < n; i++) {
-    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p[i]) <= 0) lower.pop()
-    lower.push(p[i])
-  }
-  const upper = []
-  for (let i = n - 1; i >= 0; i--) {
-    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p[i]) <= 0) upper.pop()
-    upper.push(p[i])
-  }
-  return lower.slice(0, -1).concat(upper.slice(0, -1))
-}
 function boundsToPolygon(b) {
   const [sw, ne] = b
   return [[sw[0], sw[1]], [ne[0], sw[1]], [ne[0], ne[1]], [sw[0], ne[1]]]
@@ -75,6 +88,10 @@ const CITY = {
   datong: {
     center: [113.3025, 40.09325],
     zoom: 15.68,
+    // 卡片缩放基准：默认视图下 2^(15.68-16.5) ≈ 0.57 → 大卡 ~215px 宽，
+    // 8 张卡沿框线外环排开（tipLayer Phase B 兜底微调防挤叠）；
+    // 放大地图时按 2^(zoom-16.5) 同步放大——z17 时 1.41 倍（~540px）、z18 时触顶 2.5 倍（~950px）
+    cardBaseZoom: 16.5,
     bounds: [[113.289814, 40.083292], [113.315134, 40.103218]],
     polygon: [
       [113.2899, 40.083292],
@@ -99,9 +116,46 @@ let regionGlow = null       // 边界外发光层
 let regionMask = null       // 圈外遮罩层
 let regionLabel = null      // 区域标签
 let regionHit = null        // 区域透明命中面
+let ioLayer = null          // 框线「进出标识」层（框线与点位交会处的 进/出 闸口）
 let flowTipLayer = null     // 默认车流提示框层
 let clickTipLayer = null    // 点击交互提示框层
+let flowConnLayer = null    // 大数据卡 → 古城框线 的虚线连接层（cross→coord）
+let videoDetailClick = null // 大卡「详情」点击委托（挂 #container，卸载时移除）
 const markerMap = {}        // deviceId -> L.marker
+
+/* --------------------------------------------------------------------------
+ * 信息卡布局模式
+ *
+ *   'anchor' —— 卡片贴附在指定一侧（当前采用）：8 张大卡的锚点是
+ *               「框线交会点（进/出 徽标处）沿所在墙边垂直法向外偏
+ *               CARD_BADGE_CLEAR_PX 像素」得到的经纬度 —— 即卡片挂靠在
+ *               地图上已有的 进/出 标识上，与进出口保持固定位置关系，
+ *               随地图平移/缩放始终锁定；卡片展开侧由 WALL_OUT_SIDE 给出
+ *               （永远朝城外），内容按 cardScale 与地图等比缩放。
+ *               另开启 TipLayer 视口裁剪（viewportCull）：锚点徽标完全出
+ *               视口的卡自动隐藏（DOM/数据保留），放大单个城门时其余卡
+ *               不堆在视口边缘，缩回总览自动全部恢复。
+ *   TipLayer 内部还保留 'zone' / 'auto' 两种旧布局实现，MapPanel 已不再使用。
+ * -------------------------------------------------------------------------- */
+const FLOW_LAYOUT_MODE = 'anchor'
+const FLOW_ZONE_SPACING = 12        // TipLayer 'zone' 布局的通道内卡片间距（当前未用）
+const FLOW_ZONE_MIN_PAD_X = 300     // 非大同城市 fitCity() 的左右预留最小留白（px）
+
+// —— 大数据卡随地图缩放等比放大缩小 ——
+// 系数 = 2^(当前 zoom − 当前城市基准 zoom)：基准 zoom 时 = 1（即设计尺寸），
+// 与古城框线 polygon 的屏幕尺寸严格成正比；放大系数 >1、缩小 <1。
+// 系数做钳制，避免缩太小卡片消失 / 放太大卡片溢出。
+// MIN 0.38：默认视图（z15.68）下 8 张大卡按 ~0.4 渲染（约 150px 宽），
+// 恰好沿框线外环排开、互不重叠也不压框线；越放大越大，符合"随地图缩放"。
+const CARD_SCALE_MIN = 0.38
+const CARD_SCALE_MAX = 2.5
+function cardScaleNow() {
+  if (!map || !CITY[current]) return 1
+  // 卡片缩放基准与地图初始 zoom 解耦：cardBaseZoom 才是"卡片 = 原始尺寸"的缩放级
+  const base = CITY[current].cardBaseZoom || CITY[current].zoom
+  const raw = Math.pow(2, map.getZoom() - base)
+  return Math.min(CARD_SCALE_MAX, Math.max(CARD_SCALE_MIN, raw))
+}
 
 const selectedRegion = ref(null)
 const pointMarkers = []
@@ -141,19 +195,54 @@ function dirOf(name) {
   if (name && name.includes('出口')) return '出口'
   return '其他'
 }
+/**
+ * 门级进 / 出方向：从该门 4 路设备里任意一路的名字 / 分类中提取。
+ * 卡口设备名（如「GAKK-0021和阳北门御河西路-卡口193015」）不带出入口字样，
+ * 方向只出现在便道设备名里，因此必须扫全组而不是只看卡口。
+ */
+function gateDirectionOf(items) {
+  for (const x of items) {
+    const txt = `${(x.d && x.d.name) || ''} ${(x.d && x.d.category) || ''}`
+    if (txt.includes('入口')) return '入口'
+    if (txt.includes('出口')) return '出口'
+  }
+  return '其他'
+}
+/** 车辆卡口设备判定（后端 camera_type 缺失时按名称 / 分类兜底）。 */
+function isVehDevice(d) {
+  if (!d) return false
+  if (d.camera_type === 'vehicle') return true
+  if (d.camera_type === 'person') return false
+  return /摄像头|卡口|车道/.test(`${d.name || ''} ${d.category || ''}`)
+}
+
+/**
+ * 后端设备 → 标点点位（一门 4 路，共 32 个标点）。
+ * 设备基础信息（名称 / 类型 / 状态 / 分类 / 经纬度）全部取自 /api/devices；
+ * cross / edge 由设备坐标垂直投影到古城框线几何算出（见 projectToWall）；
+ * 计数不在这里取，统一走 WS stats.devices（dev.statsById）实时刷新。
+ * 注意：这里产出的是「一台设备一个标点」，地图上仍是 32 路标点；
+ *      8 张门级大卡由 backendGateCards 聚合产出。
+ */
 function backendWallPoints() {
+  const poly = CITY.datong.polygon
   const list = []
   dev.devices.forEach((d) => {
     if (!d || !d.id) return
     if (!dev.showOffline && d.status !== 'online') return
     const pos = dev.positions[d.id]
     if (!pos || !Number.isFinite(pos.lng) || !Number.isFinite(pos.lat)) return
-    const isKakou = d.camera_type === 'vehicle' || /卡口/.test(d.category || '')
+    const isKakou = isVehDevice(d)
+    const coord = [pos.lng, pos.lat]
+    const proj = projectToWall(coord, poly) || {}
     list.push({
       id: d.id, desc: d.name || d.id,
       type: isKakou ? '卡口' : '便道',
       gate: gateOf(d.name), direction: dirOf(d.name),
-      coord: [pos.lng, pos.lat], lastActive: '',
+      coord,
+      cross: proj.cross || null,
+      edge: proj.edge || '东墙',
+      lastActive: d.last_heartbeat ? String(d.last_heartbeat).slice(0, 10) : '—',
       status: d.status || 'syncing',
       typeLabel: isKakou ? '车行' : '人行',
       count: 0, category: d.category || '', camera_type: d.camera_type || ''
@@ -161,12 +250,185 @@ function backendWallPoints() {
   })
   return list
 }
-const wallPoints = computed(() => {
-  const back = backendWallPoints()
-  return back.length ? back : CITY_WALL_POINTS
-})
+/**
+ * 标点点位集合 = 后端 /api/devices 的设备（有几台画几个标点）。
+ * 设备基础信息以 /api/devices 为准，实时计数以 WS stats.devices 为准；
+ * cross / edge 由设备坐标投影到古城框线自动计算，硬编码城门点位表已退出主链路。
+ */
+const wallPoints = computed(() => backendWallPoints())
 const WALL_IDS = computed(() => new Set(wallPoints.value.map((p) => p.id)))
 function findPoint(id) { return wallPoints.value.find((p) => p.id === id) }
+
+/* --------------------------------------------------------------------------
+ * 按门聚合：32 路设备（8 门 × 4 路）→ 8 张门级大卡
+ *
+ * 数据侧一门 4 路（见 data/device_geo.json）：
+ *   便道 ×2（GAJK-*，point_type=便道）  +  卡口 ×2（GAKK-*，point_type=车辆卡口）
+ * 分组键 = 城门断面完整名（和阳北门 / 和阳南门 / 永泰东门 / 永泰西门 /
+ *          清远南门 / 清远北门 / 武定西门 / 武定东门），从设备名 / 分类里识别；
+ * 识不出断面名时回落到 gateOf() 的四大城门，保证不丢设备。
+ *
+ * 4 路设备归槽（按设备归属，标签与数据一一对应）：
+ *   per0 = 断面左便道（方位与 roadInfoOf().sideText[0] 一致的便道）
+ *   vehA = 摄像头A·车道1-2      vehB = 摄像头B·车道3-4
+ *   per1 = 断面右便道
+ * 便道左右不能只看设备名方位词：断面随行驶方向旋转后「左/右」对应哪个方位
+ * 由「所在城墙边 + 进/出」推出（sideText），须按该方位认领对应便道设备。
+ *
+ * 卡片锚点 = 该门卡口点（多台卡口取坐标中点，兼容武定西门 GAKK-821/822
+ * 两个不同 point_id 的情况）；标点仍走 wallPoints（32 路，不聚合）。
+ * ------------------------------------------------------------------------ */
+
+/** 断面完整名 → 所属大城门（用于分区布局 zone / 排序） */
+const GATE_KEY_DEFS = [
+  ['和阳北门', '和阳门'], ['和阳南门', '和阳门'],
+  ['永泰东门', '永泰门'], ['永泰西门', '永泰门'],
+  ['清远南门', '清远门'], ['清远北门', '清远门'],
+  ['武定西门', '武定门'], ['武定东门', '武定门']
+]
+
+function gateKeyOf(d) {
+  const txt = `${(d && d.name) || ''} ${(d && d.category) || ''}`
+  for (const [key, gate] of GATE_KEY_DEFS) {
+    if (txt.includes(key)) return { key, gate }
+  }
+  const gate = gateOf(d && d.name)
+  return { key: gate, gate }
+}
+
+/**
+ * 单路设备 → 槽位。
+ * @param {object} d 设备
+ * @param {string[]} sideText 断面旋转后左 / 右便道朝向的方位字（roadInfoOf）
+ */
+function slotOfDevice(d, sideText) {
+  const txt = `${(d && d.name) || ''} ${(d && d.category) || ''}`
+  if (isVehDevice(d)) {
+    if (/摄像头A|车道1-2|车道1·2/.test(txt)) return 'vehA'
+    if (/摄像头B|车道3-4|车道3·4/.test(txt)) return 'vehB'
+    // 分类里没带 A/B 时按「进 = 车道1-2、出 = 车道3-4」兜底
+    return /出口/.test(txt) ? 'vehB' : 'vehA'
+  }
+  const side = /北侧/.test(txt) ? '北'
+    : (/南侧/.test(txt) ? '南' : (/东侧/.test(txt) ? '东' : (/西侧/.test(txt) ? '西' : '')))
+  if (!side) return 'per0'
+  return side === sideText[0] ? 'per0' : 'per1'
+}
+
+function backendGateCards() {
+  const poly = CITY.datong.polygon
+  const groups = new Map()
+  dev.devices.forEach((d) => {
+    if (!d || !d.id) return
+    if (!dev.showOffline && d.status !== 'online') return
+    const pos = dev.positions[d.id]
+    if (!pos || !Number.isFinite(pos.lng) || !Number.isFinite(pos.lat)) return
+    const { key, gate } = gateKeyOf(d)
+    let g = groups.get(key)
+    if (!g) { g = { key, gate, items: [] }; groups.set(key, g) }
+    g.items.push({ d, pos })
+  })
+
+  const cards = []
+  groups.forEach((g) => {
+    // 锚点 = 卡口点（一门两台时取中点）；无卡口数据时退到该门任一设备
+    const vehItems = g.items.filter((x) => isVehDevice(x.d))
+    const anchorItems = vehItems.length ? vehItems : g.items
+    const coord = [
+      anchorItems.reduce((s, x) => s + x.pos.lng, 0) / anchorItems.length,
+      anchorItems.reduce((s, x) => s + x.pos.lat, 0) / anchorItems.length
+    ]
+    const proj = projectToWall(coord, poly) || {}
+    // 方向必须扫全组：卡口设备名不含「入口/出口」，只看卡口会判成「其他」，
+    // 进而 roadInfoOf 的 sideText 失真、便道左右认领出错。
+    const direction = gateDirectionOf(g.items) || dirOf((vehItems[0] || g.items[0]).d.name)
+    const ri = roadInfoOf({ edge: proj.edge || '东墙', direction })
+
+    const slots = {}
+    g.items.forEach((x) => {
+      const slot = slotOfDevice(x.d, ri.sideText)
+      if (!slots[slot]) slots[slot] = x.d.id
+    })
+    const statuses = g.items.map((x) => x.d.status || 'syncing')
+    const latest = g.items.reduce((acc, x) => {
+      const t = (x.d.last_heartbeat && String(x.d.last_heartbeat).slice(0, 10)) || ''
+      return t > acc ? t : acc
+    }, '')
+    cards.push({
+      id: g.key, desc: g.key,
+      type: '卡口', typeLabel: '车行',
+      gate: g.gate, direction,
+      coord, cross: proj.cross || null, edge: proj.edge || '东墙',
+      lastActive: latest || '—',
+      status: statuses.includes('online') ? 'online' : statuses[0],
+      count: 0, category: '', camera_type: '', slots
+    })
+  })
+  return cards
+}
+
+/** 门级大卡集合 = 8 张（一步聚合 8 门）；标点仍用 wallPoints（32 路）。 */
+const gateCards = computed(() => backendGateCards())
+function findGateCard(id) { return gateCards.value.find((p) => p.id === id) }
+
+/** 门卡 4 槽位定义（顺序即横贯断面全宽的展示顺序） */
+const GATE_SLOTS = [
+  { key: 'per0', dim: 'per', kind: 'per', label: (ri) => `${ri.sideText[0] || '北'}侧便道·人流` },
+  { key: 'vehA', dim: 'veh', kind: 'veh', label: () => '摄像头A·车道1-2' },
+  { key: 'vehB', dim: 'veh', kind: 'veh', label: () => '摄像头B·车道3-4' },
+  { key: 'per1', dim: 'per', kind: 'per', label: (ri) => `${ri.sideText[1] || '南'}侧便道·人流` }
+]
+
+const LEVEL_RANK = { free: 0, slow: 1, congested: 2, severe: 3, abnormal: 4, offline: 4 }
+
+/**
+ * 单槽位统计：口径 = 该设备「进 + 出」双向合计（用户确认口径）。
+ * @param {string|undefined} id 该槽位归属设备 id（无设备则不传）
+ * @param {'per'|'veh'} dim 人 / 车维度
+ * @returns {object|null} null 表示该槽位无设备或无实时数据（显示 —）
+ */
+function slotStatOf(id, dim) {
+  const ws = id ? dev.statsById[id] : null
+  if (!ws) return null
+  const status = ws.status || 'abnormal'
+  if (status !== 'online') {
+    return {
+      id, dim, status, ok: false, daily: null, hourly: null, current: 0,
+      level: status === 'offline' ? 'offline' : 'abnormal'
+    }
+  }
+  const isVeh = dim === 'veh'
+  const din = isVeh ? (ws.today_vehicle_in || 0) : (ws.today_person_in || 0)
+  const dout = isVeh ? (ws.today_vehicle_out || 0) : (ws.today_person_out || 0)
+  const hin = isVeh ? (ws.hour_vehicle_in || 0) : (ws.hour_person_in || 0)
+  const hout = isVeh ? (ws.hour_vehicle_out || 0) : (ws.hour_person_out || 0)
+  const congScore = ws.congestion_score || 0
+  const congested = isVeh ? !!ws.vehicle_congested : !!ws.person_congested
+  const level = congested ? 'severe'
+    : (congScore >= 0.66 ? 'congested' : (congScore >= 0.33 ? 'slow' : 'free'))
+  return {
+    id, dim, status, ok: true, daily: din + dout, hourly: hin + hout,
+    current: isVeh ? (ws.current_vehicles || 0) : (ws.current_persons || 0),
+    level, congScore
+  }
+}
+
+/** 门卡 4 槽位统计表（key 同 GATE_SLOTS.key） */
+function gateSlotStats(p) {
+  const out = {}
+  for (const s of GATE_SLOTS) out[s.key] = slotStatOf((p.slots || {})[s.key], s.dim)
+  return out
+}
+
+/** 门卡整体等级 = 4 槽位中最差的一路（任一路离线/异常 → 整卡随之降级） */
+function gateCardLevel(p) {
+  const stats = gateSlotStats(p)
+  const list = GATE_SLOTS.map((s) => stats[s.key]).filter(Boolean)
+  if (!list.length) return 'abnormal'
+  let lvl = 'free'
+  for (const s of list) if ((LEVEL_RANK[s.level] || 0) > (LEVEL_RANK[lvl] || 0)) lvl = s.level
+  return lvl
+}
 
 function statusTextOf(level, isVeh) {
   if (level === 'offline') return '离线'
@@ -175,6 +437,113 @@ function statusTextOf(level, isVeh) {
   if (level === 'congested') return '拥堵'
   if (level === 'slow' || level === 'crowd') return isVeh ? '缓行' : '拥挤'
   return '畅通'
+}
+
+/* --------------------------------------------------------------------------
+ * 单路设备数据详情弹窗
+ *
+ * 交互：点大卡内某一张槽位小数据卡（左便道 / 摄像头A / 摄像头B / 右便道）
+ *       → 弹窗列出「这一路设备」接口返回的全部字段。
+ * 数据源（两接口合并，与地图取数同源）：
+ *   - /api/devices（含 WS 合并回写）→ dev.devices：名称 / 类型 / 分类 / 状态 / 经纬度 / 心跳
+ *   - ws stats.devices（v0.11.0 主通道）→ dev.statsById：计数 + 拥挤度全字段
+ * 弹窗内容走 computed → WS 每次推送自动刷新，无需手动重开。
+ * ------------------------------------------------------------------------ */
+const camDetailKey = ref(null)   // { gateId, slotKey } | null
+
+const STATUS_LABEL = { online: '在线', offline: '离线', abnormal: '异常', syncing: '同步中' }
+
+const camDetail = computed(() => {
+  const k = camDetailKey.value
+  if (!k) return null
+  const p = findGateCard(k.gateId)
+  const slot = GATE_SLOTS.find((s) => s.key === k.slotKey)
+  if (!p || !slot) return null
+  const devId = (p.slots || {})[k.slotKey] || ''
+  const ri = roadInfoOf(p)
+  const ws = devId ? (dev.statsById[devId] || null) : null
+  const d = devId ? (dev.devices.find((x) => x.id === devId) || null) : null
+  const isVeh = slot.dim === 'veh'
+  const f = (v) => (v == null || v === '' ? '—' : String(v))
+  const n = (v) => (v == null || v === '' ? '—' : Number(v).toLocaleString())
+  const yesNo = (v) => (v ? '是' : '否')
+  const cnt = (v) => n(v) + (isVeh ? ' 辆' : ' 人次')
+  // 拥挤阈值: 0 / null 都表示该维度未开启拥挤判断, 展示为「未设置」比 0 更准确。
+  // 取值优先 statsById（WS 侧保留 null），其次 /api/devices（空值已被合并成 0）。
+  const maxOf = (v) => (v == null || Number(v) <= 0 ? '未设置' : String(v))
+  // 后端 last_heartbeat 是 UTC ISO8601（datetime.now(timezone.utc)），必须转本地时区再展示
+  const fmtLocalTime = (s) => {
+    if (!s) return '—'
+    const t = new Date(s)
+    if (Number.isNaN(t.getTime())) return String(s)
+    const p2 = (x) => String(x).padStart(2, '0')
+    return `${t.getFullYear()}-${p2(t.getMonth() + 1)}-${p2(t.getDate())} ` +
+      `${p2(t.getHours())}:${p2(t.getMinutes())}:${p2(t.getSeconds())}`
+  }
+
+  const groups = [{
+    title: '设备信息（/api/devices）',
+    items: [
+      { k: '槽位', v: `${slot.label(ri)}（${isVeh ? '车辆卡口' : '便道'}）` },
+      { k: '所属断面', v: f(p.desc) },
+      { k: '设备编号', v: f(devId) },
+      { k: '设备名称', v: f((d && d.name) || (ws && ws.name)) },
+      { k: '设备类型', v: isVeh ? '车辆' : '人流' },
+      { k: '设备分类', v: f(d && d.category) },
+      { k: '运行状态', v: STATUS_LABEL[(d && d.status) || (ws && ws.status)] || f((d && d.status) || (ws && ws.status)) },
+      { k: '最大容量', v: maxOf(ws ? (isVeh ? ws.max_vehicles : ws.max_persons) : (d && (isVeh ? d.max_vehicles : d.max_persons))) },
+      { k: '经纬度', v: d && d.longitude != null && d.latitude != null ? `${d.longitude}, ${d.latitude}` : '—' },
+      { k: '最近心跳', v: fmtLocalTime(d && d.last_heartbeat) }
+    ]
+  }]
+
+  if (!ws) {
+    groups.push({ title: '实时计数（ws stats.devices）', items: [{ k: '数据', v: '该路暂无实时推送数据' }] })
+    return { title: slot.label(ri), subtitle: `${p.desc} · ${devId || '未匹配设备'}`, groups }
+  }
+
+  groups.push({
+    title: isVeh ? '车辆计数（进 + 出）' : '人流计数（进 + 出）',
+    items: [
+      { k: '当前在区', v: cnt(isVeh ? ws.current_vehicles : ws.current_persons) },
+      { k: '今日进入', v: cnt(isVeh ? ws.today_vehicle_in : ws.today_person_in) },
+      { k: '今日离开', v: cnt(isVeh ? ws.today_vehicle_out : ws.today_person_out) },
+      { k: '今日合计', v: cnt((isVeh ? ws.today_vehicle_in + ws.today_vehicle_out : ws.today_person_in + ws.today_person_out)) },
+      { k: '当前小时', v: f(ws.hour) === '—' ? '—' : `${ws.hour} 时` },
+      { k: '小时进入', v: cnt(isVeh ? ws.hour_vehicle_in : ws.hour_person_in) },
+      { k: '小时离开', v: cnt(isVeh ? ws.hour_vehicle_out : ws.hour_person_out) },
+      { k: '小时合计', v: cnt((isVeh ? ws.hour_vehicle_in + ws.hour_vehicle_out : ws.hour_person_in + ws.hour_person_out)) }
+    ]
+  })
+
+  groups.push({
+    title: '拥挤度指标',
+    items: [
+      { k: '拥堵判定', v: yesNo(ws.congested) },
+      { k: '综合拥挤分', v: n(ws.congestion_score) },
+      { k: '车流拥挤', v: yesNo(ws.vehicle_congested) },
+      { k: '人流拥挤', v: yesNo(ws.person_congested) },
+      { k: '车流评分', v: n(ws.vehicle_score) },
+      { k: '人流评分', v: n(ws.person_score) },
+      { k: '车流/分钟', v: n(ws.vehicle_flow_per_min) },
+      { k: '人流/分钟', v: n(ws.person_flow_per_min) },
+      { k: 'ROI 车辆', v: n(ws.roi_vehicles) },
+      { k: 'ROI 人数', v: n(ws.roi_persons) }
+    ]
+  })
+
+  return {
+    title: slot.label(ri),
+    subtitle: `${p.desc} · ${f((d && d.name) || ws.name)}（${f(devId)}）`,
+    groups
+  }
+})
+
+function openCamDetail(gateId, slotKey) {
+  camDetailKey.value = { gateId, slotKey }
+}
+function closeCamDetail() {
+  camDetailKey.value = null
 }
 
 let hoverPointId = null
@@ -242,11 +611,12 @@ function renderDevices() {
 
   dev.devices.forEach((d) => {
     if (WALL_IDS.value.has(d.id)) return
-    const pos = dev.positions[d.id] || CITY[current].center
+    // 落点严格以后端经纬度为准：后端未匹配到坐标（null）时不落点，不再回退到城市中心
+    const pos = dev.positions[d.id]
     if (!pos ||
       typeof pos.lng !== 'number' || typeof pos.lat !== 'number' ||
       !Number.isFinite(pos.lng) || !Number.isFinite(pos.lat)) {
-      console.warn('[renderDevices] 设备坐标无效，已跳过：', d.id, pos)
+      console.warn('[renderDevices] 设备无有效坐标（后端未匹配到经纬度），已跳过：', d.id)
       return
     }
     const stat = dev.statsById[d.id]
@@ -372,12 +742,96 @@ function refreshWallPointPins() {
 }
 
 // —— 区域圈地可视化（Leaflet Polygon）——
+/** 容器可用尺寸（叶子地图容器） */
+function mapBox() {
+  const el = document.getElementById('container')
+  return { w: (el && el.clientWidth) || 1800, h: (el && el.clientHeight) || 1000 }
+}
+
+/** 定位到当前城市的区域范围（大同时连带把「大卡挂靠位 + 大卡本体」纳入取景）。 */
+function fitCity() {
+  const b = map && CITY[current] && CITY[current].bounds
+  if (!map || !b) return
+  const { w, h } = mapBox()
+  const padX = Math.max(FLOW_ZONE_MIN_PAD_X, Math.min(380, Math.round(w * 0.21)))
+  const padY = Math.max(60, Math.min(120, Math.round(h * 0.075)))
+  let sw = [b[0][0], b[0][1]]
+  let ne = [b[1][0], b[1][1]]
+  // 大同：把「卡片挂靠位（框线外一点）+ 大卡本体」一起纳入取景。卡片随地图等比缩放，
+  // 其地理占幅恒定（内层卡 ~500×289px，屏幕米/像素 × 缩放系数抵消后 ≈ 883×510m），
+  // 外扩后 fitBounds 自动选到"8 张大卡全部落在两侧信息板之间"的缩放级。
+  if (current === 'datong') {
+    const midLat = (b[0][1] + b[1][1]) / 2
+    // 挂靠外推量按卡片基准缩放级换算（与 badgeAnchorOf 同一口径），再加上卡宽/卡高
+    const base = CITY[current].cardBaseZoom || CITY[current].zoom
+    const clearM = CARD_BADGE_CLEAR_PX * metersPerPixelAt(base, midLat)
+    const padXm = clearM + 883 + 30   // 徽标间距 + 卡宽 883m + 余量
+    const padYm = clearM + 510 + 30   // 徽标间距 + 卡高 510m + 余量
+    const mx = padXm / (111320 * Math.cos((midLat * Math.PI) / 180))
+    const my = padYm / 110540
+    sw = [sw[0] - mx, sw[1] - my]
+    ne = [ne[0] + mx, ne[1] + my]
+  }
+  const bounds = L.latLngBounds(L.latLng(sw[1], sw[0]), L.latLng(ne[1], ne[0]))
+  // 大同用信息板实际宽度做留白（左右各 ~23.5% 窗宽），保证卡环不被信息板遮挡
+  const padX2 = current === 'datong' ? Math.max(370, Math.round(w * 0.235)) : padX
+  map.fitBounds(bounds, {
+    paddingTopLeft: [padX2, padY],
+    paddingBottomRight: [padX2, padY]
+  })
+}
+
+/* --------------------------------------------------------------------------
+ * 框线「进出标识」
+ *
+ *   把 8 个城门点位垂直投影到最近一条古城框线边上的交会点（坐标在
+ *   cityWallPoints.js 的 cross 字段，几何算定，非手工估点），在交会点渲染
+ *   进 / 出 徽标；徽标两侧各有一段高亮短边，使框线在该处呈现"闸口断开"的
+ *   观感 —— 即原先框线与点位交叉的地方改由进出标识表达。
+ *
+ *   进 = 箭头指向城内，出 = 箭头指向城外；箭头朝向由 edge（东/西/南/北墙）决定。
+ *   配色直接复用主题令牌：进 → --c-flow-veh-*（绿）/ 出 → --c-flow-per-*（蓝）/
+ *   待定 → --c-rp-muted，深浅主题切换纯由 CSS 完成，无需重绘地图。
+ * ------------------------------------------------------------------------ */
+function renderIoBadges() {
+  if (ioLayer) { try { map.removeLayer(ioLayer) } catch (e) { } ioLayer = null }
+  if (!map) return
+
+  // 一门一个进出徽标（走门级集合）：32 路设备投影后 4 路交会点几乎重合，
+  // 若按设备逐个画会叠成 4 层，故此处与门卡同源、一门只画一个。
+  const pts = (gateCards.value || []).filter((p) => p && p.cross && p.cross.length >= 2)
+  if (!pts.length) return
+
+  ioLayer = L.layerGroup()
+  pts.forEach((p) => {
+    const kind = ioKindOf(p)                       // 'in' | 'out' | null（direction='其他' → 待定）
+    const label = kind ? IO_LABEL[kind] : '待定'
+    const axis = (p.edge === '北墙' || p.edge === '南墙') ? 'h' : 'v'
+    const deg = kind ? ioArrowDeg(p.edge, kind) : 0
+    const html =
+      `<span class="io-badge" data-kind="${kind || 'tbd'}" data-axis="${axis}"` +
+      ` title="${p.desc} · ${p.direction || '未指定'}">` +
+      `<i class="io-jamb io-jamb-a"></i><i class="io-jamb io-jamb-b"></i>` +
+      `<span class="io-body">` +
+      (kind ? `<b class="io-arrow" style="transform:rotate(${deg}deg)">▶</b>` : '') +
+      `<em class="io-txt">${label}</em>` +
+      `</span>` +
+      `</span>`
+    L.marker(toLatLng(p.cross), {
+      icon: L.divIcon({ className: 'io-badge-icon', html, iconSize: [0, 0], iconAnchor: [0, 0] }),
+      interactive: false,
+      zIndexOffset: 120
+    }).addTo(ioLayer)
+  })
+  ioLayer.addTo(map)
+}
+
 function renderRegionOverlay() {
   if (!map) return
-  ;[regionBorder, regionGlow, regionMask, regionLabel, regionHit].forEach((m) => {
+  ;[regionBorder, regionGlow, regionMask, regionLabel, regionHit, ioLayer].forEach((m) => {
     if (m) try { map.removeLayer(m) } catch (e) { }
   })
-  regionBorder = regionGlow = regionMask = regionLabel = regionHit = null
+  regionBorder = regionGlow = regionMask = regionLabel = regionHit = ioLayer = null
 
   const poly = CITY[current] && CITY[current].polygon
   if (!poly || poly.length < 3) return
@@ -434,6 +888,9 @@ function renderRegionOverlay() {
   regionHit.on('mouseout', () => setRegionHover(false))
 
   if (isSel) applyRegionSelectedStyle()
+
+  // 6) 框线「进出标识」：框线与点位交会处 → 进 / 出 闸口
+  renderIoBadges()
 }
 
 function applyRegionSelectedStyle() {
@@ -446,7 +903,6 @@ function applyRegionSelectedStyle() {
   }
 }
 
-let _hoverTimer = null
 function setRegionHover(on) {
   if (!regionBorder) return
   try {
@@ -571,57 +1027,125 @@ function buildTipHtml(p) {
   )
 }
 
+/**
+ * 初始化 tip：完整复刻参考页 public/FourLaneRoadPlan.html 的「大卡」版式
+ * —— 卡头：点位名（h1）+ 属性副标题 + 编号/坐标 + 进出标签 + 状态胶囊
+ * —— 主体：方位罗盘（上北下南）+ 双侧便道（斜纹条）· 四车道（2 实线 + 3 虚线）
+ *          · 2 组摄像头 + 覆盖虚线 · 4 根车辆行驶方向指示线 · 两端方位标
+ * —— 4 张小数据卡一排横贯断面全宽、贴下游侧：车流量 ×2（绿框）/ 人流量 ×2（蓝框）
+ * —— 脚注图例不再逐卡渲染：集中展示于右侧信息栏 FlowLegendPanel（样式与时序预测卡一致）
+ * 结构与参考页一一对应，尺寸按 tip 尺度重排（卡宽 380px，正文 7.5–15px）；
+ * 颜色统一走 --c-rp-* / --c-flow-* 主题令牌 → 浅色 / 深色主题自动适配。
+ *
+ * 断面朝向：断面区（.rp-rot：便道 + 车道 + 方位标）按 roadInfoOf().rot 旋转，使图中箭头 = 真实行驶方向；
+ *           方位标元素自身反旋（rotate(-rot)）→ 位置随图走、文字永远水平；
+ *           小数据卡是 .rp-cross 直属子元素（不随断面旋转），坐标经 miniPos 映射到可视位置 → 天然水平。
+ * 数据取自该门 4 路设备的实时统计（WS 主通道，每槽 = 该路设备「进 + 出」合计），
+ * 数值随推送实时刷新（updateFlowTipContent）。
+ * 入参 p 是门级大卡（gateCards，8 张），不是单路设备点位。
+ */
 function buildFlowTipHtml(p) {
-  const info = resolvePointInfo(p)
-  const isVeh = info.isVeh
-  const colorCls = flowColorCls(info.congCls)
-  const statusText = statusTextOf(info.level, isVeh)
-  const typeBadge = p.type === '卡口'
-    ? `<span class="flow-tag flow-tag-kakou">卡口</span>`
-    : `<span class="flow-tag flow-tag-biandao">便道</span>`
-  const dailyLabel = isVeh ? '日过车(veh/d)' : '日过人(per/d)'
-  const hourlyLabel = isVeh ? '时过车(veh/h)' : '时过人(per/h)'
-  const curUnit = isVeh ? 'veh' : 'per'
-  if (info.abnormal) {
+  const ri = roadInfoOf(p)          // 走向 / 行驶方向 / 旋转角 / 城墙内外落位
+  const stats = gateSlotStats(p)     // 4 槽位（左便道 / 摄像头A / 摄像头B / 右便道）
+  const level = gateCardLevel(p)
+  // 各槽位口径：该设备「进 + 出」合计；无设备 / 无实时数据 → —
+  const num = (v) => (v == null ? '—' : Number(v).toLocaleString())
+  const sv = (k) => stats[k] || {}
+
+  // 车道：底部一根「车辆行驶方向指示线」（竖线 + 箭头）。它随断面整体一起旋转，
+  // 所以 4 根箭头自动指向该门真实的车辆行驶方向（方向由 roadInfoOf 依城墙四至算出）。
+  const lane = (n, name) =>
+    `<div class="rp-lane" title="第 ${n} 车道 · 行驶方向${ri.flowPhrase}">` +
+    `<span class="rp-lane-tag">${name}</span>` +
+    `<span class="rp-lane-num">${n}</span>` +
+    `<span class="rp-lane-flow"><i class="rp-fl-tail"></i><i class="rp-fl-head"></i></span>` +
+    `</div>`
+  const dash = `<div class="rp-line rp-dash"></div>`
+  const cam = (x) =>
+    `<div class="rp-anchor" style="--x:${x}%; --y:26%">` +
+    `<span class="rp-cam"><i class="rp-cam-body"></i><i class="rp-cam-pole"></i></span>` +
+    `</div>`
+  const mini = (cls, x, y, title, rows, kind, slotKey) => {
+    // 便道 / 车卡 类型角标（绿=车卡、蓝=便道，沿用原有高亮色令牌）
+    const tag = kind === 'veh'
+      ? `<span class="rp-kind rp-kind-veh">车卡</span>`
+      : `<span class="rp-kind rp-kind-per">便道</span>`
     return (
-      `<div class="cam-flow flow-compact tip-monitor" data-flow="${colorCls}" data-kind="${info.kind}" data-id="${p.id}">` +
-      `<div class="flow-head">` +
-      `<span class="flow-dot flow-dot-${colorCls}"></span>` +
-      `<span class="flow-title" title="${p.desc}">${p.desc}</span>` +
-      typeBadge +
-      `<span class="flow-pill flow-pill-${colorCls}">${statusText}</span>` +
-      `</div>` +
-      `<div class="flow-metrics">` +
-      `<span class="fm"><b>—</b><i>无实时数据</i></span>` +
-      `</div>` +
+      // data-slot = 该槽位归属（per0 / vehA / vehB / per1）；点击时按此定位到唯一一路设备
+      `<div class="rp-mini ${cls}" data-slot="${slotKey}" title="点击查看该路设备接口数据详情"` +
+      ` style="${x != null ? `--x:${x}%; ` : ''}--y:${y}%">` +
+      `<div class="rp-mini-t"><span class="rp-dot"></span>${title}${tag}</div>` +
+      `<div class="rp-rows">${rows}</div>` +
       `</div>`
     )
   }
+  const cell = (fld, v, unit) => `<span><b data-fld="${fld}">${v}</b>${unit}</span>`
+
+  // 小数据卡槽位（断面预旋坐标系，% of cross 盒）：y=85 为下游侧小卡带（原 87 贴近断面边缘，
+  // 数值换行撑高后会被挤出卡片，故内收 2%）；四槽横贯全宽：左便道 12.5 → 摄像头A 37.5 → 摄像头B 62.5
+  // → 右便道 87.5（均布，中心距 91.7px，故 .rp-mini 限宽 88px）。
+  // 小卡是 .rp-cross 直属子元素（不随 .rp-rot 旋转），坐标需按断面 rot 旋转映射：
+  // rot 0 → (x, y)；180 → (100−x, 100−y)；90 → (100−y, x)；−90 → (y, 100−x)
+  const miniPos = (sx, sy) => {
+    const r = ri.rot
+    if (r === 180) return [100 - sx, 100 - sy]
+    if (r === 90) return [100 - sy, sx]
+    if (r === -90) return [sy, 100 - sx]
+    return [sx, sy]
+  }
+  const [s0x, s0y] = miniPos(12.5, 85)   // 左便道（sideText[0]）
+  const [vax, vay] = miniPos(37.5, 85)   // 摄像头A · 车道1-2
+  const [vbx, vby] = miniPos(62.5, 85)   // 摄像头B · 车道3-4
+  const [s1x, s1y] = miniPos(87.5, 85)   // 右便道（sideText[1]）
+
   return (
-    `<div class="cam-flow flow-compact tip-monitor" data-flow="${colorCls}" data-kind="${info.kind}" data-id="${p.id}">` +
-    `<div class="flow-head">` +
-    `<span class="flow-dot flow-dot-${colorCls}"></span>` +
-    `<span class="flow-title" title="${p.desc}">${p.desc}</span>` +
-    typeBadge +
-    `<span class="flow-pill flow-pill-${colorCls}">${statusText}</span>` +
+    `<div class="rp-card" data-id="${p.id}" data-level="${level}" data-kind="${ri.kind}" ` +
+    `data-axis="${ri.axis}" data-rot="${ri.rot}" data-place="${ri.place}" style="--rot:${ri.rot}deg">` +
+    // —— 卡头：名称 + 进出标签 + 状态 ——
+    `<div class="rp-head">` +
+    `<div class="rp-head-l">` +
+    `<h1>${p.desc}</h1>` +
+    `<div class="rp-sub">${p.typeLabel || ''}${p.type || ''} · 单向四车道（${ri.flowPhrase}）· 双侧便道</div>` +
     `</div>` +
-    `<div class="flow-metrics">` +
-    `<span class="fm"><b data-fld="daily">${info.daily.toLocaleString()}</b><i>${dailyLabel}</i></span>` +
-    `<span class="fm-sep"></span>` +
-    `<span class="fm"><b data-fld="hourly">${info.hourly.toLocaleString()}</b><i>${hourlyLabel}</i></span>` +
-    `<span class="fm-sep"></span>` +
-    `<span class="fm"><b data-fld="current">${info.current}</b><i>${curUnit}</i></span>` +
-    `<span class="fm-sep"></span>` +
-    `<span class="fm fpm"><b data-fld="fpm">${info.isVeh ? info.vehicleFlowPerMin : info.personFlowPerMin}</b><i title="${info.isVeh ? '车辆速率(辆/min)' : '人流速率(人/min)'}">速率</i></span>` +
+    `<div class="rp-head-r">` +
+    `<span class="rp-io" data-kind="${ri.kind}" title="${ri.kindLabel} · ${ri.dirLabel} · ${ri.intoCity ? '驶入城内' : '驶离城外'}">${ri.dirLabel}</span>` +
+    `<button type="button" class="rp-status" data-level="${level}" title="查看该门 4 路视频设备详情"><i></i>详情</button>` +
+    `</div>` +
+    `</div>` +
+    // —— 主体：道路断面（整体旋转到真实行驶方向）——
+    `<div class="rp-body">` +
+    `<div class="rp-cross" data-axis="${ri.axis}" data-rot="${ri.rot}">` +
+    `<div class="rp-rot">` +
+    `<div class="rp-sw rp-sw-l"><span class="rp-sw-label">便道</span></div>` +
+    `<div class="rp-road">` +
+    `<div class="rp-line rp-solid"></div>` +
+    lane(1, '车道一') + dash + lane(2, '车道二') + dash + lane(3, '车道三') + dash + lane(4, '车道四') +
+    `<div class="rp-line rp-solid"></div>` +
+    cam(26) + cam(74) +
+    `<div class="rp-cov rp-cov-1"></div><div class="rp-cov rp-cov-2"></div>` +
+    `</div>` +
+    `<div class="rp-sw rp-sw-r"><span class="rp-sw-label">便道</span></div>` +
+    `</div>` +
+    // —— 小数据卡：cross 直属子元素（不随断面旋转），一排 4 张横贯断面全宽、贴下游侧；
+    //    槽位经 miniPos 映射后，卡的左右顺序与真实地理方位一致（绿=车卡、蓝=便道）——
+    mini('rp-per', s0x, s0y, GATE_SLOTS[0].label(ri),
+      cell('per-in-daily', num(sv('per0').daily), '人次/日') +
+      cell('per-in-hourly', num(sv('per0').hourly), '人次/h'), 'per', 'per0') +
+    mini('rp-veh', vax, vay, GATE_SLOTS[1].label(ri),
+      cell('veh-in-daily', num(sv('vehA').daily), '辆/日') +
+      cell('veh-in-hourly', num(sv('vehA').hourly), '辆/h'), 'veh', 'vehA') +
+    mini('rp-veh', vbx, vby, GATE_SLOTS[2].label(ri),
+      cell('veh-out-daily', num(sv('vehB').daily), '辆/日') +
+      cell('veh-out-hourly', num(sv('vehB').hourly), '辆/h'), 'veh', 'vehB') +
+    mini('rp-per', s1x, s1y, GATE_SLOTS[3].label(ri),
+      cell('per-out-daily', num(sv('per1').daily), '人次/日') +
+      cell('per-out-hourly', num(sv('per1').hourly), '人次/h'), 'per', 'per1') +
     `</div>` +
     `</div>`
   )
 }
 
 // —— 点位标记：Leaflet DivIcon ——
-const ICON_CAR = `<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M5 11l1.5-4.6A2 2 0 0 1 8.4 5h7.2a2 2 0 0 1 1.9 1.4L19 11h1a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1h-1v1a1 1 0 0 1-2 0v-1H7v1a1 1 0 0 1-2 0v-1H4a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1h1zm2.2-.6L6 13h12l-1.2-2.6A.8.8 0 0 0 16 9.8H8a.8.8 0 0 0-.8.6zM7.5 15.2a1.2 1.2 0 1 0 0 .01zM16.5 15.2a1.2 1.2 0 1 0 0 .01z"/></svg>`
-const ICON_USER = `<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zm0 2c-4 0-7 2-7 5v1h14v-1c0-3-3-5-7-5z"/></svg>`
-
 function markerTitle(p) {
   const info = resolvePointInfo(p)
   const st = info.status === 'online' ? '在线'
@@ -665,6 +1189,7 @@ function updateClickTip() {
   const p = findPoint(selectedPointId.value)
   if (!p) { clickTipLayer.update([]); return }
   const pt = map.latLngToContainerPoint(L.latLng(p.coord[1], p.coord[0]))
+  clickTipLayer.setCardScale(cardScaleNow())
   clickTipLayer.update([{ id: p.id, x: pt.x, y: pt.y, html: buildTipHtml(p) }])
 }
 function closeClickTip() {
@@ -672,13 +1197,60 @@ function closeClickTip() {
 }
 
 // —— 默认车流提示框 ——
+/**
+ * 大卡锚点 = 框线「进 / 出」徽标（交会点 cross）沿所在墙边垂直法向、向城外偏
+ * CARD_BADGE_CLEAR_PX 像素的位置。
+ *
+ * 为什么用「像素 → 米」换算而不是直接写死米数：
+ *   卡片随地图等比缩放（cardScale = 2^(zoom−base)），徽标是 Leaflet marker 尺寸固定。
+ *   若间距写死米数，缩小地图时间距会被压成 0，卡片会糊在徽标上；
+ *   换算成"当前缩放级下的 N 像素"，则任意缩放级下卡片边缘与徽标都保持同一视觉间距。
+ *
+ * @param {object} p 点位（需带 cross、edge）
+ * @returns {[number, number]|null} 锚点 [经度, 纬度]
+ */
+function badgeAnchorOf(p) {
+  if (!map || !p) return null
+  const lat = Array.isArray(p.cross) ? p.cross[1] : null
+  if (!isFinite(lat)) return null
+  // 缩放级取「卡片基准缩放」而非当前 zoom：这样外推量不随滚轮变化，
+  // 卡片相对徽标的位置恒定（间距的视觉缩放天然由 cardScale 完成）
+  const base = CITY[current].cardBaseZoom || CITY[current].zoom
+  const offsetM = CARD_BADGE_CLEAR_PX * metersPerPixelAt(base, lat)
+  return anchorOutOfCross(p, offsetM)
+}
+
+/**
+ * 大数据卡 → 框线进出口 的虚线连接。
+ * 两端都取自地图几何：起点 = 交会点 cross（进出徽标所在处），终点 = 大卡锚点
+ * （徽标向城外偏 CARD_BADGE_CLEAR_PX 像素）。虚线为 Leaflet 图层，随地图平移/缩放自动重投影。
+ */
+function renderFlowConnLines() {
+  if (flowConnLayer) { try { map.removeLayer(flowConnLayer) } catch (e) {} flowConnLayer = null }
+  if (!map || current !== 'datong') return
+  const pts = gateCards.value
+  if (!pts || !pts.length) return
+  const lines = []
+  for (const p of pts) {
+    if (!p || !p.cross) continue
+    if (!isFinite(p.cross[0]) || !isFinite(p.cross[1])) continue
+    const anchor = badgeAnchorOf(p)
+    if (!anchor || !isFinite(anchor[0]) || !isFinite(anchor[1])) continue
+    lines.push(L.polyline(
+      [[p.cross[1], p.cross[0]], [anchor[1], anchor[0]]],
+      { color: 'rgba(0, 225, 255, .75)', weight: 1.6, dashArray: '3 6', opacity: .85, interactive: false }
+    ))
+  }
+  if (lines.length) flowConnLayer = L.layerGroup(lines).addTo(map)
+}
 function openFlowTips() {
   closeFlowTips()
   if (!map || current !== 'datong') return
-  const pts = wallPoints.value
+  const pts = gateCards.value
   if (!pts || pts.length === 0) return
   if (!flowTipLayer) return
   updateFlowTips()
+  renderFlowConnLines()
 }
 function closeFlowTips() {
   if (flowTipLayer) flowTipLayer.update([])
@@ -686,34 +1258,81 @@ function closeFlowTips() {
 function updateFlowTips() {
   if (!map || !flowTipLayer) return
   if (current !== 'datong') { flowTipLayer.update([]); return }
-  const pts = wallPoints.value
+  // 大卡走门级集合（8 门 × 4 路聚合 = 8 张）；标点仍是 32 路（renderDefaultMarkers）
+  const pts = gateCards.value
   if (!pts || pts.length === 0) { flowTipLayer.update([]); return }
+  const center = CITY.datong.center
+  // 「古城四面图」式排序：同城门 → 南/北(西/东)两段 → 车卡在前便道在后 → 段内按坐标推进
+  const sorted = sortPointsForZoneLayout(pts, center)
   const items = []
-  const sorted = sortPointsByPriority(pts)
   for (const p of sorted) {
-    if (!p.coord || !isFinite(p.coord[0]) || !isFinite(p.coord[1])) continue
-    const pt = map.latLngToContainerPoint(L.latLng(p.coord[1], p.coord[0]))
-    items.push({ id: p.id, x: pt.x, y: pt.y, html: buildFlowTipHtml(p) })
+    // 锚点挂靠在框线「进/出」徽标上（cross 向城外偏 CARD_BADGE_CLEAR_PX 像素），
+    // 不再使用点位自身 coord：卡片与框线进出口建立固定位置关系，跟着进出口走
+    const anchor = badgeAnchorOf(p)
+    if (!anchor || !isFinite(anchor[0]) || !isFinite(anchor[1])) continue
+    const pt = map.latLngToContainerPoint(L.latLng(anchor[1], anchor[0]))
+    const ri = roadInfoOf(p)
+    items.push({
+      id: p.id, x: pt.x, y: pt.y, html: buildFlowTipHtml(p),
+      // 大卡落位：锚点已在徽标外侧，卡片主体再朝城外一侧展开（WALL_OUT_SIDE）
+      place: WALL_OUT_SIDE[ri.wall] || 'top',
+      zone: zoneOfPoint(p, center)   // 清远门→left / 和阳门→right / 永泰门→bottom / 武定门→top
+    })
   }
+  // 卡片缩放随地图 zoom 等比变化（与框线屏幕尺寸成正比）
+  flowTipLayer.setCardScale(cardScaleNow())
   flowTipLayer.update(items)
 }
 function updateFlowTipContent() {
   if (!flowTipLayer) return
   flowTipLayer.updateFlowText((card, id) => {
-    const p = findPoint(id)
+    const p = findGateCard(id)
     if (!p) return
-    const info = resolvePointInfo(p)
-    const colorCls = flowColorCls(info.congCls)
-    const statusText = statusTextOf(info.level, info.isVeh)
-    card.setAttribute('data-flow', colorCls)
-    const dot = card.querySelector('.flow-dot'); if (dot) dot.className = 'flow-dot flow-dot-' + colorCls
+    const stats = gateSlotStats(p)
+    const level = gateCardLevel(p)
+    card.setAttribute('data-level', level)
     const setFld = (k, v) => { const el = card.querySelector('[data-fld="' + k + '"]'); if (el) el.textContent = v }
-    setFld('daily', info.daily.toLocaleString())
-    setFld('hourly', info.hourly.toLocaleString())
-    setFld('current', info.current)
-    setFld('fpm', info.isVeh ? info.vehicleFlowPerMin : info.personFlowPerMin)
-    const st = card.querySelector('.flow-status'); if (st) { st.className = 'flow-status flow-status-' + colorCls; st.textContent = statusText }
-    const pill = card.querySelector('.flow-pill'); if (pill) { pill.className = 'flow-pill flow-pill-' + colorCls; pill.textContent = statusText }
+    const num = (v) => (v == null ? '—' : Number(v).toLocaleString())
+    const s = (k) => stats[k] || {}
+    // 4 槽位：口径 = 该路设备「进 + 出」合计（left 便道 / 摄像头A / 摄像头B / right 便道）
+    setFld('per-in-daily', num(s('per0').daily))
+    setFld('per-in-hourly', num(s('per0').hourly))
+    setFld('veh-in-daily', num(s('vehA').daily))
+    setFld('veh-in-hourly', num(s('vehA').hourly))
+    setFld('veh-out-daily', num(s('vehB').daily))
+    setFld('veh-out-hourly', num(s('vehB').hourly))
+    setFld('per-out-daily', num(s('per1').daily))
+    setFld('per-out-hourly', num(s('per1').hourly))
+    // 「详情」按钮（点击展开左栏视频详情列表）：
+    // 仅同步 data-level 驱动指示灯圆点颜色，文案保持「详情」不变
+    const btn = card.querySelector('.rp-status')
+    if (btn) btn.setAttribute('data-level', level)
+  })
+}
+
+// —— 大卡「详情」→ 左栏视频详情列表数据 ——
+// 4 路设备与大卡断面上的 4 张小数据卡一一对应（左便道 / 摄像头A / 摄像头B / 右便道），
+// 名称按设备归属、数值口径与 mini 卡完全一致（该路设备「进 + 出」合计）
+function buildVideoDevices(p) {
+  const ri = roadInfoOf(p)
+  const stats = gateSlotStats(p)
+  return GATE_SLOTS.map((slot, i) => {
+    const info = stats[slot.key]
+    const isVeh = slot.dim === 'veh'
+    const level = info ? info.level : 'abnormal'
+    const num = (v) => (v == null ? '—' : Number(v).toLocaleString())
+    const unit = isVeh ? ' 辆' : ' 人次'
+    const unitH = isVeh ? ' 辆/h' : ' 人次/h'
+    return {
+      ch: String(i + 1).padStart(2, '0'),
+      name: slot.label(ri), kind: slot.kind,
+      status: statusTextOf(level, isVeh), level,
+      active: p.lastActive || '—',
+      rows: [
+        [isVeh ? '今日车流' : '今日人流', num(info && info.daily) + unit],
+        [isVeh ? '小时车流' : '小时人流', num(info && info.hourly) + unitH]
+      ]
+    }
   })
 }
 
@@ -785,14 +1404,11 @@ function changeCity(key) {
   selectedPointId.value = null
   closeClickTip()
   if (!map) return
-  renderRegionOverlay()
-  const b = CITY[key].bounds
-  if (b) {
-    map.fitBounds(L.latLngBounds(L.latLng(b[0][1], b[0][0]), L.latLng(b[1][1], b[1][0])), { padding: [60, 60, 60, 60] })
-  }
-  clearPointMarkers()
-  renderDefaultMarkers()
-  openFlowTips()
+  // 顺序关键：先 invalidateSize + 取景，让容器尺寸与投影基准定型，再渲染随地图定位的图层。
+  // 若先渲染再取景，已按旧基准定位的框线/徽标/大卡会与取景后的地图错开。
+  map.invalidateSize()
+  fitCity()
+  renderStaticLayers()
   push('已定位至「' + (CITY_NAME[key] || key) + '」', 'info')
 }
 function changeStyle() {
@@ -842,14 +1458,19 @@ function setTopView() { reprojectTips() }
 function setOblique() { reprojectTips() }
 function toggleFree3D() { /* Leaflet 不支持 3D */ }
 function fitRange() {
-  const b = CITY[current] && CITY[current].bounds
-  if (!map || !b) return
-  map.fitBounds(L.latLngBounds(L.latLng(b[0][1], b[0][0]), L.latLng(b[1][1], b[1][0])), { padding: [60, 60, 60, 60] })
+  fitCity()
   reprojectTips()
 }
 
 // —— 渲染静态叠加层 ——
-function renderStaticLayers() {
+/**
+ * @param {boolean} [withFit] 是否顺带重新取景。默认 false：
+ *   初始取景由 onMounted 的 fitAfterSized() 在容器尺寸稳定后统一负责，
+ *   这里再 fit 一次会与它抢时序（两次 fitBounds 之间尺寸已变 → 投影基准不一致 → 标注整体偏移）。
+ *   仅在「切换城市」这类确实需要重新取景的场景才传 true。
+ */
+function renderStaticLayers(withFit = false) {
+  if (withFit) { try { fitCity() } catch (e) { console.error('[fitCity] 失败：', e) } }
   try { renderRegionOverlay() }
   catch (e) { console.error('[renderRegionOverlay] 失败：', e); push('区域边界渲染失败', 'error') }
   try { renderDefaultMarkers() } catch (e) { console.error('[renderDefaultMarkers] 失败：', e) }
@@ -882,7 +1503,8 @@ onMounted(async () => {
       zoom: CITY[current].zoom,
       center: toLatLng(CITY[current].center),
       minZoom: 9,        // 与已下载瓦片下限一致，避免缩太小无瓦片露白
-      maxZoom: 17,       // 古城 z18 仅下载约 80%，封顶到覆盖完整的层级
+      maxZoom: 18,       // 放开到 z18 给大数据卡留放大空间（2^1.5 ≈ 2.83 → 触顶 2.5 倍 ~950px）；
+                         // z18 瓦片仅下载约 80%，缺失块由瓦片层 maxNativeZoom:17 拉伸兜底不露白
       zoomControl: true,
       attributionControl: false,
       zoomEnable: true, dragEnable: true,
@@ -890,8 +1512,9 @@ onMounted(async () => {
     })
 
     // 创建瓦片层（浅色/深色各一，按主题切换可见性）
-    tileLayerLight = L.tileLayer(TILE_URL_LIGHT, { attribution: TILE_ATTR, minZoom: 9, maxZoom: 18, errorTileUrl: ERROR_TILE, noWrap: true })
-    tileLayerDark = L.tileLayer(TILE_URL_DARK, { attribution: TILE_ATTR, minZoom: 9, maxZoom: 18, errorTileUrl: ERROR_TILE, noWrap: true })
+    // maxNativeZoom: 17 → z18 时复用 z17 瓦片放大显示（本地瓦片 z18 覆盖不全，拉伸优于露白）
+    tileLayerLight = L.tileLayer(TILE_URL_LIGHT, { attribution: TILE_ATTR, minZoom: 9, maxZoom: 18, maxNativeZoom: 17, errorTileUrl: ERROR_TILE, noWrap: true })
+    tileLayerDark = L.tileLayer(TILE_URL_DARK, { attribution: TILE_ATTR, minZoom: 9, maxZoom: 18, maxNativeZoom: 17, errorTileUrl: ERROR_TILE, noWrap: true })
     if (theme.value === 'dark') {
       tileLayerDark.addTo(map)
     } else {
@@ -901,7 +1524,22 @@ onMounted(async () => {
     // 容器在挂载时可能尚未完成布局，强制重算尺寸，
     // 否则 Leaflet 会按初始 0 尺寸渲染，地图只显示一半 / 四周露白（"没铺满"主因）
     map.invalidateSize()
-    setTimeout(() => { if (map) map.invalidateSize() }, 250)
+
+    // 初始取景必须放在尺寸稳定之后！
+    // 早期版本在这里直接 fitCity()、但 250ms 后才 invalidateSize：fitBounds 是按
+    // 「尚未定型的容器尺寸」算出中心的，之后尺寸一变，地图中心就不再是 fitBounds 的结果，
+    // 表现为「所有地图标注相对框线整体偏移一个恒定值」（徽标/大卡纬度统一 −0.0042°≈466m）。
+    // 现在两次 invalidateSize 都完成后再取景，并额外在下一帧做一次尺寸校正。
+    const fitAfterSized = () => {
+      if (!map) return
+      map.invalidateSize()
+      if (current === 'datong') fitCity()
+      // 取景后重投影所有随地图定位的图层（框线/徽标/大卡锚点）
+      try { renderRegionOverlay() } catch (e) { console.error('[renderRegionOverlay] 失败：', e) }
+      try { updateFlowTips() } catch (e) { console.error('[updateFlowTips] 失败：', e) }
+      try { renderFlowConnLines() } catch (e) { console.error('[renderFlowConnLines] 失败：', e) }
+    }
+    setTimeout(fitAfterSized, 260)
     window.addEventListener('resize', () => { if (map) map.invalidateSize() })
 
     // 比例尺控件
@@ -922,20 +1560,52 @@ onMounted(async () => {
     mapCtl.setRegionSelectCallback = setRegionSelectCallback
 
     // 挂载 TipLayer
+    // 车流提示层走「古城四面图」分区布局：卡片按城门进四条固定通道，彼此不再压叠
     flowTipLayer = new TipLayer({
       lineColor: overlayColors.value.regionStroke,
+      showLines: false,
       strokeWidth: 2, lineOpacity: 0.8, gap: 56,
-      maxLine: 420, minimumSpacing: 16
+      maxLine: 420, minimumSpacing: 16,
+      layoutMode: FLOW_LAYOUT_MODE,
+      zoneSpacing: FLOW_ZONE_SPACING,
+      // 视口自动裁剪：放大到单个城门时只显示视口内（锚点徽标可见）的卡，
+      // 其余隐藏——DOM/数据保留在页面中，缩回总览自动全部恢复
+      viewportCull: true,
+      cullMargin: 40
     })
     const containerEl = document.getElementById('container')
     if (containerEl) {
       flowTipLayer.mount(containerEl)
       clickTipLayer = new TipLayer({
         lineColor: overlayColors.value.regionStroke,
+        showLines: false,
         strokeWidth: 2, lineOpacity: 0.8, gap: 56,
         maxLine: 200, minimumSpacing: 12, zIndex: 9750
       })
       clickTipLayer.mount(containerEl)
+
+      // 大卡内点击（事件委托，卡片 HTML 由 TipLayer 注入无法逐卡绑定）：
+      //   ① 点槽位小数据卡（单个摄像头）→ 弹窗展示该路设备接口数据详情
+      //   ② 点「详情」按钮 → 展开/收起左栏「警力分配」下方该门 4 路视频设备详情列表
+      videoDetailClick = (e) => {
+        if (!e.target || !e.target.closest) return
+        const miniEl = e.target.closest('.rp-card .rp-mini')
+        if (miniEl) {
+          const card = miniEl.closest('.rp-card')
+          const gateId = card && card.dataset.id
+          const slotKey = miniEl.dataset.slot
+          if (gateId && slotKey) openCamDetail(gateId, slotKey)
+          return
+        }
+        const pill = e.target.closest('.rp-card .rp-status')
+        if (!pill) return
+        const card = pill.closest('.rp-card')
+        const p = card && findGateCard(card.dataset.id)
+        if (!p) return
+        if (videoDetailState.gateId === p.id) { closeVideoDetail(); return }
+        openVideoDetail(p.id, p.desc || p.id, buildVideoDevices(p))
+      }
+      containerEl.addEventListener('click', videoDetailClick)
     }
 
     // 渲染静态叠加层
@@ -962,6 +1632,9 @@ onMounted(async () => {
     map.on('moveend', () => { updateFlowTips(); updateClickTip() })
     map.on('zoomend', () => { updateFlowTips(); updateClickTip() })
     map.on('resize', () => { updateFlowTips(); updateClickTip() })
+    // 注：缩放过程中不再实时改卡片尺寸/位置（冻结在旧屏幕位），缩放结束（zoomend/moveend）
+    // 再一次性精确重投影 + 重算 scale。否则「位置仍锚旧坐标、scale 却提前变化」会导致
+    // 卡片尺寸变小却没跟着框线移动、松手才突跳的错位乱跑（上一版 bug 根因）。
 
     // 启动定时刷新
     startFlowTicker()
@@ -974,14 +1647,21 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   document.body.classList.remove('adding')
   clearPointMarkers()
+  if (videoDetailClick) {
+    const el = document.getElementById('container')
+    if (el) el.removeEventListener('click', videoDetailClick)
+    videoDetailClick = null
+  }
   if (clickTipLayer) { clickTipLayer.destroy(); clickTipLayer = null }
   if (flowTipLayer) { flowTipLayer.destroy(); flowTipLayer = null }
+  if (flowConnLayer) { try { map.removeLayer(flowConnLayer) } catch (e) {} flowConnLayer = null }
   if (map) {
     if (regionBorder) try { map.removeLayer(regionBorder) } catch { }
     if (regionGlow) try { map.removeLayer(regionGlow) } catch { }
     if (regionMask) try { map.removeLayer(regionMask) } catch { }
     if (regionLabel) try { map.removeLayer(regionLabel) } catch { }
     if (regionHit) try { map.removeLayer(regionHit) } catch { }
+    if (ioLayer) try { map.removeLayer(ioLayer) } catch { }
     if (tileLayerLight) try { map.removeLayer(tileLayerLight) } catch { }
     if (tileLayerDark) try { map.removeLayer(tileLayerDark) } catch { }
     try { map.remove() } catch { }
@@ -995,10 +1675,18 @@ watch(
 )
 watch(() => dev.statsById, () => { renderDevices(); updateFlowTipContent(); refreshWallPointPins(); if (selectedPointId.value) updateClickTip() }, { deep: true })
 
-// 点位源变化
+// 标点源变化（32 路设备标点，一台一个）
 watch(
   () => wallPoints.value.map((p) => p.id + ':' + p.status + ':' + (p.coord ? p.coord.join(',') : '')).join('|'),
-  () => { renderDefaultMarkers(); openFlowTips() }
+  () => { renderDefaultMarkers() }
+)
+
+// 门级大卡源变化（8 门聚合：进出徽标 + 8 张大卡 + 连线）
+watch(
+  () => gateCards.value.map((p) =>
+    p.id + ':' + p.status + ':' + (p.coord ? p.coord.join(',') : '') + ':' + Object.values(p.slots || {}).join(',')
+  ).join('|'),
+  () => { renderIoBadges(); openFlowTips() }
 )
 
 // 主题变化

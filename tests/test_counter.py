@@ -177,11 +177,11 @@ def test_jitter_near_line_no_false_event():
 
 
 def test_hold_frames_required():
-    """跨线后仅滞留 2 帧 (< hold_frames=3) → 不产出事件."""
+    """跨线后滞留时长不足 (< hold_frames=3 帧@25fps=0.12s) → 不产出事件."""
     c = _make_counter(hold_frames=3)
-    # F0 上方, F1 上方, F2 刚跨线(不clear), F3 clear(hold1), F4 hold2 → 结束 (无第3帧)
+    # F0 上方, F1 上方, F2 刚跨线(不clear), F3 clear(hold0.04s), F4 hold0.08s → 结束 (<0.12s)
     points = [(640, 300), (640, 330), (640, 370), (640, 400), (640, 430)]
-    events = run_path(c, 1, "car", points)
+    events = run_path(c, 1, "car", points, dt=0.04)
     assert events == []
 
 
