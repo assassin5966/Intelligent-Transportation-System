@@ -1,0 +1,2 @@
+# shell 脚本强制 LF (拷贝到 Linux 服务器执行, CRLF 会导致 bash 报 \r 错误)
+*.sh text eol=lf
