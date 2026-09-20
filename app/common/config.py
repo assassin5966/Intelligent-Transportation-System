@@ -23,6 +23,13 @@ class Settings(BaseSettings):
     yolo_conf: float = 0.4
     yolo_iou: float = 0.5
     track_buffer: int = 30
+    # CPU 推理并发上限 (专用线程池 worker 数): 多路摄像头并发推理会互相争抢 CPU,
+    # 导致单路处理 fps 下降 -> 读帧线程覆盖丢帧 -> 跨线动作整段丢失 (漏计).
+    # 推理是 CPU 密集型, worker 数超过 CPU 核数只会增加切换开销; 0=自动取 CPU 核数.
+    infer_max_workers: int = 0
+    # 推理队列最大等待任务数: 超过时新帧直接丢弃 (计数语义上丢一帧与排队 10 帧等价,
+    # 但丢弃可让该路立即处理下一最新帧, 避免延迟累积与队列雪崩)
+    infer_max_queued: int = 4
 
     # ---- 时序预测 ----
     chronos_model: str = "models"  # 本地 Chronos-2 模型目录

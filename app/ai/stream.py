@@ -125,7 +125,16 @@ async def stream_frames(
                 if cap is None and url_provider is not None:
                     now = time.monotonic()
                     if now - last_refresh < refresh_cooldown:
-                        await asyncio.sleep(refresh_cooldown - (now - last_refresh))
+                        # 冷却等待可被 stop_event 提前打断 (删除设备时立即退出)
+                        remaining = refresh_cooldown - (now - last_refresh)
+                        if stop_event is not None:
+                            try:
+                                await asyncio.wait_for(stop_event.wait(), timeout=remaining)
+                                break  # stop 触发, 正常退出
+                            except asyncio.TimeoutError:
+                                pass
+                        else:
+                            await asyncio.sleep(remaining)
                     try:
                         new_url = await url_provider()
                     except Exception as e:  # noqa: BLE001

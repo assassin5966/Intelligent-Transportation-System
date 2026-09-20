@@ -15,7 +15,7 @@ from pydantic import BaseModel
 from ..common.config import settings
 from ..common.logger import logger
 from .counter import Point
-from .pipeline import DevicePipeline, register_ws_client, unregister_ws_client
+from .pipeline import _WS_QUEUE_MAX, DevicePipeline, register_ws_client, unregister_ws_client
 
 _pipelines: dict[str, DevicePipeline] = {}
 
@@ -102,7 +102,8 @@ async def stop_device(device_id: str):
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
-    queue: asyncio.Queue = asyncio.Queue()
+    # 有界队列: 慢客户端积压到上限后由广播侧丢最旧, 防止内存无限增长
+    queue: asyncio.Queue = asyncio.Queue(maxsize=_WS_QUEUE_MAX)
     register_ws_client(queue)
     logger.info("WebSocket 客户端已连接")
     
