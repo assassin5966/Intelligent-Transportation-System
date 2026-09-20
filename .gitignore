@@ -86,6 +86,16 @@ setting-server-bak/
 scripts/拉流故障分析报告.txt
 scripts/拉流超时排查流程.txt
 
+# ---- 现场调试产物 (备份包/录像/抓包/SSH 临时, 本地保留不入库) ----
+.ssh-temp/
+DT_bak.tar
+*.tar
+VissVideos/
+VissVideos.rar
+*.rar
+*.pcap
+*.pcapng
+
 # ---- 严格脱敏: 命中 IP/国标编码的文件一律不入库 (本地保留, 已 git rm --cached) ----
 /README.md
 /.env.example

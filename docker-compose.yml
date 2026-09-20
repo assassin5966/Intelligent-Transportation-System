@@ -5,7 +5,9 @@
 # 启动 (离线一键拉起 前端 + 后端 + AI + Redis/MySQL):
 #   docker compose up -d                # 直接使用预构建镜像(dt-frontend:latest 等)启动, 离线下用这个
 #   前端为预构建镜像, 不在本机 build(需联网拉 npm 依赖, 离线会失败); 瓦片走宿主机挂载, 替换即可
-#   启用 GPU: 取消下方 ai 服务 deploy 注释后 docker compose up -d
+#   GPU 版 (NVIDIA CUDA 12.2, 如 8x4090): 用 Dockerfile.gpu + 覆盖文件启动
+#     docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
+#     CPU 构建 (本文件默认) 仍可用: docker build -t smart-city-platform:latest .
 # ============================================================
 
 services:

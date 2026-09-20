@@ -1,0 +1,75 @@
+# ============================================================
+# 智慧古城车辆人流监管平台 - GPU 版统一镜像 (NVIDIA CUDA 12.2 / amd64)
+# 适用: x86_64 + NVIDIA GPU 服务器 (8x RTX 4090 等, 需预装 nvidia 驱动 + nvidia-container-toolkit)
+#
+# 构建:
+#   docker build -f Dockerfile.gpu -t smart-city-platform:gpu .
+#
+# 启动 (覆盖文件方式, 只覆盖 ai 服务的镜像构建与 GPU 资源):
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
+#
+# 说明:
+#   - 基础镜像 CUDA 12.2.2 runtime; PyTorch 用 cu121 官方轮子,
+#     CUDA 12.x 小版本兼容 (驱动 R530+ 即可), 4090 (Ada, sm_89) 原生支持
+#   - torch 的 cudnn/cublas 等由 pip nvidia-*-cu12 子包自带, 基础镜像无需 cudnn
+#   - ultralytics YOLO 与 Chronos 均自动 torch.cuda.is_available() 选卡, 业务代码零改动
+#   - 8 卡并行: 单进程 YOLO 默认用 0 号卡; 多路视频由 app/ai/inference_scheduler.py
+#     做进程内并发治理, 如需多卡分片可给不同 AI 容器实例配 CUDA_VISIBLE_DEVICES
+# ============================================================
+
+FROM nvidia/cuda:12.2.2-runtime-ubuntu22.04
+
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+    DEBIAN_FRONTEND=noninteractive
+
+# ---------- 1. 系统依赖 + Python 3.11 (deadsnakes) ----------
+# libgl1/libglib2.0-0: OpenCV 运行库; libgomp1: OpenMP; ffmpeg: RTSP 解码
+RUN sed -i 's|archive.ubuntu.com|mirrors.tuna.tsinghua.edu.cn|g; s|security.ubuntu.com|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list && \
+    apt-get update && apt-get install -y --no-install-recommends \
+        software-properties-common gnupg ca-certificates && \
+    add-apt-repository -y ppa:deadsnakes/ppa && \
+    apt-get update && apt-get install -y --no-install-recommends \
+        python3.11 python3.11-venv python3.11-distutils \
+        libgl1 libglib2.0-0 libgomp1 ffmpeg gcc g++ tzdata && \
+    rm -rf /var/lib/apt/lists/* && \
+    ln -sf /usr/bin/python3.11 /usr/local/bin/python && \
+    python -m ensurepip --upgrade && \
+    ln -sf /usr/local/bin/pip3 /usr/local/bin/pip
+
+WORKDIR /app
+
+# 国内 PyPI 镜像加速 (torch 仍走 pytorch 官方 cu121 源, 见下方 --index-url)
+ENV PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# ---------- 2. GPU 版 PyTorch + 业务依赖 ----------
+# torch cu121: 与 CUDA 12.2 驱动小版本兼容, 自带 cudnn (nvidia-cudnn-cu12 子包)
+COPY requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cu121 && \
+    pip install --no-cache-dir -r /app/requirements.txt
+
+# ---------- 3. 应用代码 (与 CPU 版 Dockerfile 保持一致) ----------
+COPY app /app/app
+COPY configs /app/configs
+COPY scripts /app/scripts
+COPY tool /app/tool
+COPY static /app/static
+# models/ 构建前必须本地准备 models/yolo11n.pt
+COPY models /app/models
+
+# ---------- 4. 环境配置 ----------
+ENV TZ=Asia/Shanghai \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    LANG=C.UTF-8
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+
+# 校验权重可加载 + CUDA 可用 (无 GPU 的构建机上 torch.cuda.is_available() 为 False 不阻断,
+# 仅校验 YOLO 权重完整; CUDA 运行时可用性在容器启动时由 nvidia-container-runtime 保证)
+RUN python -c "from ultralytics import YOLO; YOLO('models/yolo11n.pt'); import torch; print('torch', torch.__version__, 'cuda_built:', torch.backends.cuda.is_built())"
+
+# ---------- 5. 端口 ----------
+EXPOSE 8000 8001
+
+# ---------- 6. 启动命令 (与 CPU 版一致, compose 按 service 覆盖) ----------
+CMD ["uvicorn", "app.backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
