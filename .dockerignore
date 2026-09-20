@@ -29,10 +29,9 @@ build/
 .idea/
 *.swp
 
-# 日志与数据卷内容 (由 compose 挂载, 不打进镜像)
+# 日志与数据卷内容 (data/ 例外: 设备播种文件需烘进离线生产镜像)
 *.log
 logs/
-data/
 redis-data/
 
 # 文档与无关文件
