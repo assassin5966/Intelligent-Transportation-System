@@ -11,12 +11,14 @@
 #   bash scripts/start_offline.sh --no-frontend  # 不起大屏前端 (无 dist 挂载时)
 #
 # 前置:
-#   1) docker load -i <smart-city-platform 的 tar>   (PLATFORM_IMAGE 指定的镜像)
-#   2) docker load -i nginx_1.27-alpine.tar          (起 frontend 时)
-#   3) 同目录 .env 可选 (WVP_ENABLED/ZLM_PUBLIC_BASE/PLATFORM_IMAGE 等, 不写走默认值)
+#   1) docker load -i <smart-city-platform 的 tar>   (镜像自包含 app/configs/models)
+#   2) docker load -i redis_7-alpine.tar
+#   3) docker load -i nginx_1.27-alpine.tar          (起 frontend 时)
 #   4) frontend 需宿主机准备 map-marking-system-vue/{nginx.conf,dist,public/tiles}
-#   5) GPU 部署: .env 写 PLATFORM_IMAGE=smart-city-platform:gpu 并取消
-#      docker-compose.offline.yml 中 ai 服务 deploy 段注释 (8 卡预留)
+#
+# .env 完全可选: 默认已指向 23.45.1.115 的 WVP/ZLM; 镜像自动探测
+#   (载入 smart-city-platform:gpu 后自动用 GPU 版并叠加 docker-compose.offline.gpu.yml)
+#   仅 WVP 账号/地址与默认不同等场景才需要写 .env
 # ============================================================
 set -euo pipefail
 
@@ -27,6 +29,7 @@ START_FRONTEND=1
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 COMPOSE_FILE="$ROOT_DIR/docker-compose.offline.yml"
+COMPOSE_FILES=(-f "$COMPOSE_FILE")   # GPU 镜像时追加 offline.gpu 覆盖文件
 PROJECT="smartcity"
 
 log()  { printf '\n\033[1;36m[%s]\033[0m %s\n' "$(date '+%H:%M:%S')" "$*"; }
@@ -43,20 +46,34 @@ if ! docker info >/dev/null 2>&1; then
 fi
 
 log "======== 1/3 环境自检 ========"
-# 镜像检查 (PLATFORM_IMAGE 默认 smart-city-platform:latest)
+# 镜像选择: .env 的 PLATFORM_IMAGE 优先; 不写则自动探测 (gpu 优先, 回退 latest)
 PLATFORM_IMAGE="$(grep -E '^PLATFORM_IMAGE=' .env 2>/dev/null | cut -d= -f2 || true)"
-PLATFORM_IMAGE="${PLATFORM_IMAGE:-smart-city-platform:latest}"
+PLATFORM_IMAGE="${PLATFORM_IMAGE:-}"
+if [ -z "$PLATFORM_IMAGE" ]; then
+    if docker image inspect smart-city-platform:gpu >/dev/null 2>&1; then
+        PLATFORM_IMAGE=smart-city-platform:gpu
+        ok "自动探测到 GPU 镜像, 使用 $PLATFORM_IMAGE (.env 无需配置)"
+    else
+        PLATFORM_IMAGE=smart-city-platform:latest
+    fi
+fi
 if docker image inspect "$PLATFORM_IMAGE" >/dev/null 2>&1; then
     ok "平台镜像就绪: $PLATFORM_IMAGE"
 else
     warn "缺少镜像 $PLATFORM_IMAGE, 请先: docker load -i <平台镜像tar>"; exit 1
 fi
-# GPU 自检 (仅 GPU 镜像时提示)
+# GPU 覆盖文件 + runtime 自检 (使用 gpu 镜像时)
 if [[ "$PLATFORM_IMAGE" == *gpu* ]]; then
-    if docker info 2>/dev/null | grep -q "RUNC.*nvidia\|nvidia"; then
+    if [ -f "$ROOT_DIR/docker-compose.offline.gpu.yml" ]; then
+        COMPOSE_FILES+=(-f "$ROOT_DIR/docker-compose.offline.gpu.yml")
+        ok "已叠加 GPU 编排覆盖: docker-compose.offline.gpu.yml (8 卡预留)"
+    else
+        warn "缺 docker-compose.offline.gpu.yml, ai 将无 GPU 预留 (以 CPU 模式运行)"
+    fi
+    if docker info 2>/dev/null | grep -qi nvidia; then
         ok "nvidia-container-runtime 已就绪"
     else
-        warn "未检测到 nvidia runtime, GPU 容器将无法启动 (检查 nvidia-container-toolkit)"
+        warn "未检测到 nvidia runtime, ai 容器将无法启动 (先装 nvidia-container-toolkit)"
     fi
 fi
 # frontend 前置检查
@@ -72,9 +89,9 @@ fi
 
 log "======== 2/3 拉起容器 (compose -p $PROJECT) ========"
 if [ "$START_FRONTEND" = "1" ]; then
-    docker compose -f "$COMPOSE_FILE" -p "$PROJECT" up -d
+    docker compose "${COMPOSE_FILES[@]}" -p "$PROJECT" up -d
 else
-    docker compose -f "$COMPOSE_FILE" -p "$PROJECT" up -d ai backend redis
+    docker compose "${COMPOSE_FILES[@]}" -p "$PROJECT" up -d ai backend redis
 fi
 ok "容器已拉起"
 

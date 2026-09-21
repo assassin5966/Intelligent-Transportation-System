@@ -34,16 +34,23 @@ fi
 
 [ "$MODE" = "down" ] && ACTION="down" || ACTION="stop"
 
+# 与 start_offline.sh 一致的文件链: gpu 镜像存在则叠加 GPU 覆盖文件
+COMPOSE_FILES=(-f "$COMPOSE_FILE")
+if docker image inspect smart-city-platform:gpu >/dev/null 2>&1 \
+   && [ -f "$ROOT_DIR/docker-compose.offline.gpu.yml" ]; then
+    COMPOSE_FILES+=(-f "$ROOT_DIR/docker-compose.offline.gpu.yml")
+fi
+
 log "======== 停止离线部署 (compose -p $PROJECT) ========"
 if [ "$STOP_FRONTEND" = "1" ]; then
-    docker compose -f "$COMPOSE_FILE" -p "$PROJECT" "$ACTION" && ok "全部服务已 $ACTION (数据卷保留)"
+    docker compose "${COMPOSE_FILES[@]}" -p "$PROJECT" "$ACTION" && ok "全部服务已 $ACTION (数据卷保留)"
 else
-    docker compose -f "$COMPOSE_FILE" -p "$PROJECT" "$ACTION" ai backend redis && \
+    docker compose "${COMPOSE_FILES[@]}" -p "$PROJECT" "$ACTION" ai backend redis && \
         ok "业务套已 $ACTION, frontend 保持运行"
 fi
 
 log "======== 停止完成 ========"
 echo ""
-docker compose -f "$COMPOSE_FILE" -p "$PROJECT" ps --format '  {{.Name}}  {{.State}}' 2>/dev/null || true
+docker compose "${COMPOSE_FILES[@]}" -p "$PROJECT" ps --format '  {{.Name}}  {{.State}}' 2>/dev/null || true
 echo ""
 echo "  数据卷未删除, 重新启动: bash scripts/start_offline.sh"

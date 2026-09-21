@@ -17,8 +17,10 @@
 #
 # GPU 生产部署 (8x4090, CUDA 12.2):
 #   1) docker load -i smart-city-platform_gpu.tar   (镜像 tag: smart-city-platform:gpu)
-#   2) .env 写 PLATFORM_IMAGE=smart-city-platform:gpu
-#   3) 取消下方 ai 服务 deploy 段注释 (8 卡预留), 再 compose up
+#   2) bash scripts/start_offline.sh
+#      (脚本探测到 :gpu 镜像后自动叠加 docker-compose.offline.gpu.yml 声明 8 卡, 本文件无需改动)
+#      手动等价: docker compose -f docker-compose.offline.yml \
+#                        -f docker-compose.offline.gpu.yml -p smartcity up -d
 # ============================================================
 
 services:

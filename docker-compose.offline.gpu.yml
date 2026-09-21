@@ -1,0 +1,30 @@
+# ============================================================
+# GPU 离线编排覆盖文件 (start_offline.sh 探测到 :gpu 镜像后自动叠加, 无需手动引用)
+#
+# 作用: 在 docker-compose.offline.yml 基础上
+#   1) ai/backend 固定使用 GPU 镜像 smart-city-platform:gpu
+#   2) ai 服务声明 8x RTX 4090 GPU 预留 (宿主机需 nvidia-container-toolkit)
+#
+# 手动等价:
+#   docker compose -f docker-compose.offline.yml -f docker-compose.offline.gpu.yml \
+#                  -p smartcity up -d
+# ============================================================
+
+services:
+  ai:
+    image: smart-city-platform:gpu
+    # 8 卡 4090 全部预留给 ai 容器; 单进程默认 0 号卡,
+    # 多卡分片可按实例拆分并配 CUDA_VISIBLE_DEVICES
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 8          # 固定 8 卡; 弹性场景可改 all
+              capabilities: [gpu]
+    environment:
+      # CUDA 12.2 驱动向下兼容 cu121 轮子; 显存碎片化策略
+      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+  backend:
+    image: smart-city-platform:gpu
