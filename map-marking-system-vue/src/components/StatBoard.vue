@@ -29,7 +29,7 @@
       class="zoomable"
       @dblclick="openCardZoom({ title: '按天人数/车流统计', component: DailyTrendChart })" />
 
-    <!-- ③ 视频详情：点击大数据卡右上角「详情」后展示该门 4 路设备视频信息，置右栏底部 -->
+    <!-- ③ 视频详情：点击大数据卡右上角「视频」后展示该门 4 路设备视频信息，置右栏底部 -->
     <VideoDetailPanel
       class="zoomable"
       @dblclick="openCardZoom({ title: '视频详情', component: VideoDetailPanel })" />

@@ -2,14 +2,7 @@
   <div>
     <div id="container"></div>
 
-    <!-- 添加模式提示 -->
-    <div class="op-tip" v-if="addMode">📍 添加模式：点击地图选择设备位置（Esc 取消）</div>
-
-    <!-- 设备编辑 / 添加弹窗 -->
-    <DeviceEditor :open="editorOpen" :mode="editorMode" :device="editorDevice" :pos="editorPos"
-      @close="editorOpen = false" @save="onEditorSave" @remove="onEditorRemove" />
-
-    <!-- 单路摄像头 · 接口数据详情弹窗（点大卡内某张槽位小卡打开） -->
+    <!-- 单路摄像头 · 实时数据详情弹窗（点大卡内某张槽位小卡打开） -->
     <Teleport to="body">
       <div v-if="camDetail" class="cam-detail-mask" @click.self="closeCamDetail">
         <div class="cam-detail-modal">
@@ -31,7 +24,7 @@
               </div>
             </div>
           </div>
-          <div class="cdm-ft">数据来源：/api/devices（设备信息）· ws://…/ws stats.devices（实时计数，随推送刷新）</div>
+          <div class="cdm-ft">数据随实时推送自动刷新 · 详情口径：该路设备「进 + 出」合计</div>
         </div>
       </div>
     </Teleport>
@@ -48,12 +41,12 @@ import { useTheme } from '../composables/useTheme.js'
 import { useVideoDetail } from '../composables/useVideoDetail.js'
 import { sortPointsByPriority, sortPointsForZoneLayout, zoneOfPoint, ioKindOf, ioArrowDeg, IO_LABEL, roadInfoOf, anchorOutOfCross, metersPerPixelAt, CARD_BADGE_CLEAR_PX, WALL_OUT_SIDE, projectToWall } from '../data/cityWallPoints.js'
 import { TipLayer } from '../utils/tipLayer.js'
-import DeviceEditor from './DeviceEditor.vue'
 
-const { state: dev, load, create, remove, configure, setPosition, select } = useDevices()
+// 大屏为只读视图：设备的新增 / 配置 / 删除在运维页完成，此处只读设备与实时计数
+const { state: dev, load, findById } = useDevices()
 const { mapCtl } = useMapControl()
 const { push } = useToast()
-const { theme, mapStyle, overlayColors } = useTheme()
+const { theme, overlayColors } = useTheme()
 const { state: videoDetailState, open: openVideoDetail, close: closeVideoDetail } = useVideoDetail()
 
 // —— 坐标转换工具（Leaflet 使用 [lat, lng]，数据使用 [lng, lat]）——
@@ -120,8 +113,7 @@ let ioLayer = null          // 框线「进出标识」层（框线与点位交�
 let flowTipLayer = null     // 默认车流提示框层
 let clickTipLayer = null    // 点击交互提示框层
 let flowConnLayer = null    // 大数据卡 → 古城框线 的虚线连接层（cross→coord）
-let videoDetailClick = null // 大卡「详情」点击委托（挂 #container，卸载时移除）
-const markerMap = {}        // deviceId -> L.marker
+let videoDetailClick = null // 大卡「视频」点击委托（挂 #container，卸载时移除）
 
 /* --------------------------------------------------------------------------
  * 信息卡布局模式
@@ -161,20 +153,9 @@ const selectedRegion = ref(null)
 const pointMarkers = []
 const selectedPointId = ref(null)
 
-const addMode = ref(false)
-const editorOpen = ref(false)
-const editorMode = ref('add')
-const editorDevice = ref(null)
-const editorPos = ref(null)
-
 // —— 工具函数 ——
 function statusColor(s) {
   return s === 'online' ? 'g' : (s === 'offline' ? 'r' : 'y')
-}
-function congColorClass(score) {
-  if (score >= 0.66) return 'r'
-  if (score >= 0.33) return 'y'
-  return 'g'
 }
 function flowColorCls(c) {
   if (c === 'r') return 'red'
@@ -229,7 +210,6 @@ function backendWallPoints() {
   const list = []
   dev.devices.forEach((d) => {
     if (!d || !d.id) return
-    if (!dev.showOffline && d.status !== 'online') return
     const pos = dev.positions[d.id]
     if (!pos || !Number.isFinite(pos.lng) || !Number.isFinite(pos.lat)) return
     const isKakou = isVehDevice(d)
@@ -256,7 +236,6 @@ function backendWallPoints() {
  * cross / edge 由设备坐标投影到古城框线自动计算，硬编码城门点位表已退出主链路。
  */
 const wallPoints = computed(() => backendWallPoints())
-const WALL_IDS = computed(() => new Set(wallPoints.value.map((p) => p.id)))
 function findPoint(id) { return wallPoints.value.find((p) => p.id === id) }
 
 /* --------------------------------------------------------------------------
@@ -320,7 +299,6 @@ function backendGateCards() {
   const groups = new Map()
   dev.devices.forEach((d) => {
     if (!d || !d.id) return
-    if (!dev.showOffline && d.status !== 'online') return
     const pos = dev.positions[d.id]
     if (!pos || !Number.isFinite(pos.lng) || !Number.isFinite(pos.lat)) return
     const { key, gate } = gateKeyOf(d)
@@ -603,101 +581,9 @@ function resolvePointInfo(p) {
   }
 }
 
-// —— 设备标点渲染（Leaflet DivIcon）——
-function renderDevices() {
-  if (!map) return
-  Object.values(markerMap).forEach((m) => map.removeLayer(m))
-  for (const k in markerMap) delete markerMap[k]
-
-  dev.devices.forEach((d) => {
-    if (WALL_IDS.value.has(d.id)) return
-    // 落点严格以后端经纬度为准：后端未匹配到坐标（null）时不落点，不再回退到城市中心
-    const pos = dev.positions[d.id]
-    if (!pos ||
-      typeof pos.lng !== 'number' || typeof pos.lat !== 'number' ||
-      !Number.isFinite(pos.lng) || !Number.isFinite(pos.lat)) {
-      console.warn('[renderDevices] 设备无有效坐标（后端未匹配到经纬度），已跳过：', d.id)
-      return
-    }
-    const stat = dev.statsById[d.id]
-    const sel = dev.selectedId === d.id
-    const score = stat ? (stat.congestion_score || 0) : 0
-    const congCls = congColorClass(score)
-    const cnt = stat
-      ? (d.camera_type === 'person'
-        ? `👤${stat.current_persons}`
-        : `🚗${stat.current_vehicles}`)
-      : ''
-    const cat = d.category ? d.category : ''
-    const content =
-      `<div class="mk ${sel ? 'sel' : ''} cong-${congCls}">` +
-      `<div class="pin"><i>📷</i></div>` +
-      `<div class="lbl">${d.name} <span class="dot ${statusColor(d.status)}"></span> ${cnt}</div>` +
-      (cat ? `<div class="mk-cat" title="${cat}">${cat}</div>` : '') +
-      `</div>`
-    const mk = L.marker([pos.lat, pos.lng], {
-      icon: L.divIcon({ className: 'custom-device-icon', html: content, iconSize: [0, 0], iconAnchor: [0, 0] }),
-      zIndexOffset: sel ? 200 : 150, draggable: true
-    })
-    mk.on('click', () => openEdit(d))
-    mk.on('dragend', (e) => {
-      const ll = mk.getLatLng()
-      setPosition(d.id, ll.lng, ll.lat)
-      push(`已更新「${d.name}」地图位置`, 'info')
-    })
-    mk.addTo(map)
-    markerMap[d.id] = mk
-  })
-}
-
-// —— 编辑 / 添加 ——
-function openEdit(d) {
-  select(d.id)
-  editorMode.value = 'edit'
-  editorDevice.value = d
-  editorPos.value = dev.positions[d.id] || null
-  editorOpen.value = true
-}
-function startAdd() {
-  addMode.value = !addMode.value
-  if (addMode.value) {
-    document.body.classList.add('adding')
-    push('📍 添加模式：点击地图选择设备位置', 'info')
-  } else {
-    document.body.classList.remove('adding')
-  }
-}
-function onMapClick(e) {
-  if (addMode.value) {
-    const ll = e.latlng
-    editorMode.value = 'add'
-    editorDevice.value = null
-    editorPos.value = { lng: ll.lng, lat: ll.lat }
-    editorOpen.value = true
-    addMode.value = false
-    document.body.classList.remove('adding')
-    return
-  }
+// —— 地图空白处点击：收起已展开的信息卡 ——
+function onMapClick() {
   if (selectedPointId.value) selectPoint(null)
-}
-async function onEditorSave({ mode, id, payload, pos }) {
-  if (mode === 'add') {
-    if (!payload.id || !payload.name || !payload.stream_url) {
-      push('设备 ID / 名称 / 流地址 为必填', 'warn'); return
-    }
-    const ok = await create(payload, pos)
-    if (ok) editorOpen.value = false
-  } else {
-    const ok = await configure(id, {
-      line_coords: payload.line_coords, anchor_coords: payload.anchor_coords,
-      count_only: payload.count_only, camera_type: payload.camera_type, roi_coords: payload.roi_coords
-    })
-    if (ok) editorOpen.value = false
-  }
-}
-async function onEditorRemove(id) {
-  const ok = await remove(id)
-  if (ok) editorOpen.value = false
 }
 
 const camIcon = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="7" width="13" height="8" rx="2"/><rect x="14" y="9" width="4" height="4" rx="1"/><circle cx="18" cy="11" r="1.8" fill="currentColor" stroke="none"/><path d="M9 15v3M7 18h5"/><circle cx="5.5" cy="10" r="0.7" fill="currentColor" stroke="none"/></svg>`
@@ -1072,7 +958,7 @@ function buildFlowTipHtml(p) {
       : `<span class="rp-kind rp-kind-per">便道</span>`
     return (
       // data-slot = 该槽位归属（per0 / vehA / vehB / per1）；点击时按此定位到唯一一路设备
-      `<div class="rp-mini ${cls}" data-slot="${slotKey}" title="点击查看该路设备接口数据详情"` +
+      `<div class="rp-mini ${cls}" data-slot="${slotKey}" title="点击查看该路设备实时数据"` +
       ` style="${x != null ? `--x:${x}%; ` : ''}--y:${y}%">` +
       `<div class="rp-mini-t"><span class="rp-dot"></span>${title}${tag}</div>` +
       `<div class="rp-rows">${rows}</div>` +
@@ -1109,7 +995,8 @@ function buildFlowTipHtml(p) {
     `</div>` +
     `<div class="rp-head-r">` +
     `<span class="rp-io" data-kind="${ri.kind}" title="${ri.kindLabel} · ${ri.dirLabel} · ${ri.intoCity ? '驶入城内' : '驶离城外'}">${ri.dirLabel}</span>` +
-    `<button type="button" class="rp-status" data-level="${level}" title="查看该门 4 路视频设备详情"><i></i>详情</button>` +
+    // 文案「视频」：与槽位小卡的「数据详情」区分 —— 此处展开的是该门 4 路视频设备
+    `<button type="button" class="rp-status" data-level="${level}" title="查看该门 4 路视频设备"><i></i>视频</button>` +
     `</div>` +
     `</div>` +
     // —— 主体：道路断面（整体旋转到真实行驶方向）——
@@ -1170,16 +1057,35 @@ function createPointMarker(p) {
   })
 }
 
+// 标点状态类名（与 buildPinContent 产出的一一对应）
+const PIN_STATUS_CLS = ['s-online', 's-offline', 's-abnormal', 's-syncing']
+const PIN_FLOW_CLS = ['flow-red', 'flow-yellow', 'flow-green']
+
+/**
+ * 同步单个标点的「状态 / 拥挤色 / 选中悬停」表现。
+ *
+ * 只改已有 DOM 的 class，不再 setIcon 重建图标：
+ *   - setIcon 会整体替换 icon 元素，导致 hover / active 高亮闪断（WS 每 2s 推一次就闪一次），
+ *     且每次 32 个标点全量重建，带来无谓的 DOM/GC 开销；
+ *   - 标点图标内部只有 class 会变（状态色点 + 拥挤色角标），改 class 即可。
+ */
 function setMarkerMode(mk, p, mode) {
   if (!mk) return
-  try {
-    mk.setIcon(L.divIcon({
-      className: 'custom-pin-icon',
-      html: buildPinContent(p, mode),
-      iconSize: [34, 34],
-      iconAnchor: [17, 17]
-    }))
-  } catch (e) { }
+  const root = mk.getElement && mk.getElement()
+  const pin = root && root.querySelector('.cam-pin')
+  if (!pin) return
+  const info = resolvePointInfo(p)
+  const stCls = info.status === 'online' ? 's-online'
+    : (info.status === 'offline' ? 's-offline'
+      : (info.status === 'abnormal' ? 's-abnormal' : 's-syncing'))
+  PIN_STATUS_CLS.forEach((c) => pin.classList.toggle(c, c === stCls))
+  pin.classList.toggle('active', mode === 'active')
+  pin.classList.toggle('hover', mode === 'hover')
+  const badge = pin.querySelector('.badge')
+  if (badge) {
+    const colorCls = info.congCls === 'r' ? 'flow-red' : (info.congCls === 'y' ? 'flow-yellow' : 'flow-green')
+    PIN_FLOW_CLS.forEach((c) => badge.classList.toggle(c, c === colorCls))
+  }
 }
 
 // —— 点击交互提示框 ——
@@ -1303,14 +1209,14 @@ function updateFlowTipContent() {
     setFld('veh-out-hourly', num(s('vehB').hourly))
     setFld('per-out-daily', num(s('per1').daily))
     setFld('per-out-hourly', num(s('per1').hourly))
-    // 「详情」按钮（点击展开左栏视频详情列表）：
-    // 仅同步 data-level 驱动指示灯圆点颜色，文案保持「详情」不变
+    // 「视频」按钮（点击展开右栏视频详情列表）：
+    // 仅同步 data-level 驱动指示灯圆点颜色，文案保持「视频」不变
     const btn = card.querySelector('.rp-status')
     if (btn) btn.setAttribute('data-level', level)
   })
 }
 
-// —— 大卡「详情」→ 左栏视频详情列表数据 ——
+// —— 大卡「视频」→ 右栏视频详情列表数据 ——
 // 4 路设备与大卡断面上的 4 张小数据卡一一对应（左便道 / 摄像头A / 摄像头B / 右便道），
 // 名称按设备归属、数值口径与 mini 卡完全一致（该路设备「进 + 出」合计）
 function buildVideoDevices(p) {
@@ -1462,6 +1368,67 @@ function fitRange() {
   reprojectTips()
 }
 
+/**
+ * 定位到指定设备（顶栏搜索结果 / 告警条目点击 → 地图跳转并展开该设备信息卡）。
+ * 无地图坐标的设备给出明确提示，不做静默失败。
+ * @param {string} deviceId 设备编号（= 地图标点 id）
+ */
+function focusDevice(deviceId) {
+  if (!deviceId) return
+  closeCamDetail()
+  if (current !== 'datong') changeCity('datong')
+  const pos = dev.positions[deviceId]
+  if (!map || !pos || !Number.isFinite(pos.lng) || !Number.isFinite(pos.lat)) {
+    push('设备「' + deviceId + '」暂无地图坐标，无法定位', 'warn')
+    return
+  }
+  map.flyTo([pos.lat, pos.lng], Math.max(map.getZoom(), 17), { duration: 0.6 })
+  // 跳转后展开信息卡；投影随 moveend 由 updateClickTip 重新计算
+  if (findPoint(deviceId)) selectPoint(deviceId)
+}
+
+/**
+ * 定位到指定门（顶栏检索「门」→ 飞到该门大卡 + 闪烁一次）。
+ * 大卡由 TipLayer 注入 DOM，按 data-id 找到后加一次性动画 class；
+ * 飞行结束时再闪一次（大卡随 moveend 重投影，确保到位后仍能看见）。
+ * @param {string} gateId 门断面名（= 大卡 id，如「和阳北门」）
+ */
+function focusGate(gateId) {
+  if (!gateId) return
+  closeCamDetail()
+  if (current !== 'datong') changeCity('datong')
+  const p = findGateCard(gateId)
+  if (!map || !p || !p.coord || !Number.isFinite(p.coord[0]) || !Number.isFinite(p.coord[1])) {
+    push('门「' + gateId + '」暂无地图坐标，无法定位', 'warn')
+    return
+  }
+  map.flyTo(toLatLng(p.coord), Math.max(map.getZoom(), 17), { duration: 0.6 })
+  flashGateCard(gateId)
+  map.once('moveend', () => flashGateCard(gateId))
+}
+
+/** 门级大卡一次性闪烁（重放动画：先移除 class 再强制重排） */
+function flashGateCard(gateId) {
+  const el = document.getElementById('container')
+  const card = el && el.querySelector('.rp-card[data-id="' + gateId + '"]')
+  if (!card) return
+  card.classList.remove('rp-flash')
+  void card.offsetWidth
+  card.classList.add('rp-flash')
+  if (gateFlashTimer) clearTimeout(gateFlashTimer)
+  gateFlashTimer = setTimeout(() => {
+    card.classList.remove('rp-flash')
+    gateFlashTimer = null
+  }, 1800)
+}
+
+/** Esc：按「最上层先关」的顺序收起单路详情弹窗 → 视频详情面板 */
+function onKeyDown(e) {
+  if (e.key !== 'Escape') return
+  if (camDetailKey.value) { closeCamDetail(); return }
+  if (videoDetailState.gateId) closeVideoDetail()
+}
+
 // —— 渲染静态叠加层 ——
 /**
  * @param {boolean} [withFit] 是否顺带重新取景。默认 false：
@@ -1477,20 +1444,12 @@ function renderStaticLayers(withFit = false) {
   try { openFlowTips() } catch (e) { console.error('[openFlowTips] 失败：', e) }
 }
 
-// —— 定时刷新 ——
-let flowTimer = null
-function tickFlow() {
-  pointMarkers.forEach((it) => {
-    const p = findPoint(it.id)
-    if (!p) return
-    const mode = selectedPointId.value === p.id ? 'active' : (hoverPointId === p.id ? 'hover' : false)
-    setMarkerMode(it.marker, p, mode)
-  })
-  updateFlowTipContent()
-}
-function startFlowTicker() {
-  if (flowTimer) return
-  flowTimer = setInterval(tickFlow, 5000)
+// —— 待清理的定时器 / 监听（卸载时统一释放，避免 HMR 或路由切换后残留回调）——
+let fitTimer = null      // 容器尺寸稳定后的首次取景
+let staticTimer = null   // 首次静态图层渲染
+let gateFlashTimer = null // 门级大卡定位闪烁的复位定时器
+function onWindowResize() {
+  if (map) map.invalidateSize()
 }
 
 // —— 生命周期 ——
@@ -1539,13 +1498,14 @@ onMounted(async () => {
       try { updateFlowTips() } catch (e) { console.error('[updateFlowTips] 失败：', e) }
       try { renderFlowConnLines() } catch (e) { console.error('[renderFlowConnLines] 失败：', e) }
     }
-    setTimeout(fitAfterSized, 260)
-    window.addEventListener('resize', () => { if (map) map.invalidateSize() })
+    fitTimer = setTimeout(fitAfterSized, 260)
+    window.addEventListener('resize', onWindowResize)
 
     // 比例尺控件
     L.control.scale({ position: 'bottomleft', imperial: false }).addTo(map)
 
     map.on('click', onMapClick)
+    window.addEventListener('keydown', onKeyDown)
 
     // 注册到控制总线
     mapCtl.ready = true
@@ -1556,7 +1516,8 @@ onMounted(async () => {
     mapCtl.setOblique = setOblique
     mapCtl.fitRange = fitRange
     mapCtl.toggleFree3D = toggleFree3D
-    mapCtl.startAdd = startAdd
+    mapCtl.focusDevice = focusDevice
+    mapCtl.focusGate = focusGate
     mapCtl.setRegionSelectCallback = setRegionSelectCallback
 
     // 挂载 TipLayer
@@ -1585,8 +1546,9 @@ onMounted(async () => {
       clickTipLayer.mount(containerEl)
 
       // 大卡内点击（事件委托，卡片 HTML 由 TipLayer 注入无法逐卡绑定）：
-      //   ① 点槽位小数据卡（单个摄像头）→ 弹窗展示该路设备接口数据详情
-      //   ② 点「详情」按钮 → 展开/收起左栏「警力分配」下方该门 4 路视频设备详情列表
+      //   ① 点槽位小数据卡（单个摄像头）→ 弹窗展示该路设备实时数据
+      //   ② 点「视频」按钮 → 展开/收起右栏该门 4 路视频设备列表
+      //   ③ 点大卡其余区域 → 飞到该门并放大到合适比例（z17 ≈ 卡片 1.4 倍，门区占屏适中）
       videoDetailClick = (e) => {
         if (!e.target || !e.target.closest) return
         const miniEl = e.target.closest('.rp-card .rp-mini')
@@ -1598,12 +1560,16 @@ onMounted(async () => {
           return
         }
         const pill = e.target.closest('.rp-card .rp-status')
-        if (!pill) return
-        const card = pill.closest('.rp-card')
-        const p = card && findGateCard(card.dataset.id)
-        if (!p) return
-        if (videoDetailState.gateId === p.id) { closeVideoDetail(); return }
-        openVideoDetail(p.id, p.desc || p.id, buildVideoDevices(p))
+        if (pill) {
+          const card = pill.closest('.rp-card')
+          const p = card && findGateCard(card.dataset.id)
+          if (!p) return
+          if (videoDetailState.gateId === p.id) { closeVideoDetail(); return }
+          openVideoDetail(p.id, p.desc || p.id, buildVideoDevices(p))
+          return
+        }
+        const cardEl = e.target.closest('.rp-card')
+        if (cardEl && cardEl.dataset.id) focusGate(cardEl.dataset.id)
       }
       containerEl.addEventListener('click', videoDetailClick)
     }
@@ -1615,17 +1581,15 @@ onMounted(async () => {
       staticDone = true
       try { renderStaticLayers() } catch (e) { console.error('[renderStaticLayers] 失败：', e) }
     }
-    setTimeout(renderStaticOnce, 500)
+    staticTimer = setTimeout(renderStaticOnce, 500)
 
     // 容器尺寸修正
     requestAnimationFrame(() => {
       try { if (map) map.invalidateSize() } catch (e) { }
     })
 
-    // 加载设备
-    load()
-      .then(() => { try { renderDevices() } catch (e) { console.error('[renderDevices]', e) } })
-      .catch(() => { })
+    // 加载设备（标点由 wallPoints 变化驱动渲染）
+    load().catch(() => { })
 
     // 地图事件：重投影 TipLayer
     map.whenReady(() => { renderStaticOnce(); updateFlowTips(); updateClickTip() })
@@ -1635,9 +1599,6 @@ onMounted(async () => {
     // 注：缩放过程中不再实时改卡片尺寸/位置（冻结在旧屏幕位），缩放结束（zoomend/moveend）
     // 再一次性精确重投影 + 重算 scale。否则「位置仍锚旧坐标、scale 却提前变化」会导致
     // 卡片尺寸变小却没跟着框线移动、松手才突跳的错位乱跑（上一版 bug 根因）。
-
-    // 启动定时刷新
-    startFlowTicker()
   } catch (e) {
     console.error(e)
     push('⚠ 地图初始化失败：' + (e && e.message ? e.message : e), 'error')
@@ -1645,7 +1606,12 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
-  document.body.classList.remove('adding')
+  // 释放定时器与全局监听：否则卸载后仍会回调已销毁的地图实例（invalidateSize 报错）
+  if (fitTimer) { clearTimeout(fitTimer); fitTimer = null }
+  if (staticTimer) { clearTimeout(staticTimer); staticTimer = null }
+  if (gateFlashTimer) { clearTimeout(gateFlashTimer); gateFlashTimer = null }
+  window.removeEventListener('resize', onWindowResize)
+  window.removeEventListener('keydown', onKeyDown)
   clearPointMarkers()
   if (videoDetailClick) {
     const el = document.getElementById('container')
@@ -1668,12 +1634,13 @@ onBeforeUnmount(() => {
   }
 })
 
-// 设备列表 / 选中变化 → 重绘标点
-watch(
-  () => dev.devices.map((d) => d.id + ':' + d.status).join('|') + '#' + dev.selectedId,
-  () => renderDevices()
-)
-watch(() => dev.statsById, () => { renderDevices(); updateFlowTipContent(); refreshWallPointPins(); if (selectedPointId.value) updateClickTip() }, { deep: true })
+// 实时统计变化 → 只做「状态同步 + 文本改写」的增量更新（不重建标点 DOM）
+// statsRev 由 useDevices 在每次写入统计后自增，替代对 statsById 的 deep watch（省去全量深度遍历）
+watch(() => dev.statsRev, () => {
+  refreshWallPointPins()
+  updateFlowTipContent()
+  if (selectedPointId.value) updateClickTip()
+})
 
 // 标点源变化（32 路设备标点，一台一个）
 watch(
@@ -1686,7 +1653,14 @@ watch(
   () => gateCards.value.map((p) =>
     p.id + ':' + p.status + ':' + (p.coord ? p.coord.join(',') : '') + ':' + Object.values(p.slots || {}).join(',')
   ).join('|'),
-  () => { renderIoBadges(); openFlowTips() }
+  () => {
+    renderIoBadges(); openFlowTips()
+    // 顶栏「设备检索」按门检索需要门级列表（搜索门名 → 定位到该门大卡）
+    mapCtl.gates = gateCards.value.map((p) => ({
+      id: p.id, gate: p.gate, edge: p.edge, direction: p.direction,
+      status: p.status, coord: p.coord
+    }))
+  }
 )
 
 // 主题变化

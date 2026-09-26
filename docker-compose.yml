@@ -5,8 +5,8 @@
 # 启动 (离线一键拉起 前端 + 后端 + AI + Redis/MySQL):
 #   docker compose up -d                # 直接使用预构建镜像(dt-frontend:latest 等)启动, 离线下用这个
 #   前端为预构建镜像, 不在本机 build(需联网拉 npm 依赖, 离线会失败); 瓦片走宿主机挂载, 替换即可
-#   GPU 版 (NVIDIA CUDA 12.2, 如 8x4090): 用 Dockerfile.gpu + 覆盖文件启动
-#     docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
+#   GPU 版 (NVIDIA CUDA 12.2, 如 8x4090): 用独立的 docker-compose.gpu.yml (Dockerfile.gpu)
+#     docker compose -f docker-compose.gpu.yml up -d --build
 #     CPU 构建 (本文件默认) 仍可用: docker build -t smart-city-platform:latest .
 # ============================================================
 
@@ -28,14 +28,20 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - COUNT_STATS_INTERVAL=${COUNT_STATS_INTERVAL:-30}
       - COUNT_EVENT_LOG=${COUNT_EVENT_LOG:-false}
+      # Mock 数据模拟 (.env MOCK_ENABLED=true 时 AI 不拉流, 由模拟器生成事件)
+      - MOCK_ENABLED=${MOCK_ENABLED:-false}
     volumes:
       - ./app:/app/app:cached
       - ./models:/app/models:cached
       - ./configs:/app/configs:cached
       - ./logs:/app/logs
+      - ./data:/app/data:cached   # mock_simulator 读设备种子 (device_geo.json)
       - model-cache:/root/.cache
     depends_on:
-      - redis
+      redis:
+        condition: service_started
+      backend:
+        condition: service_healthy  # mock 模式下模拟器启动即注册设备, 必须等 backend 就绪
     # 挂共享网, 供 AI 按服务名访问外部 ZLM(zlmediakit) 拉 HTTP-FLV
     networks:
       - default
@@ -79,6 +85,8 @@ services:
       - MYSQL_USER=${MYSQL_USER:-root}
       - MYSQL_PASSWORD=${MYSQL_PASSWORD:-root123456}
       - MYSQL_DATABASE=${MYSQL_DATABASE:-dt_stats}
+      # Mock 互斥保护 (main.py lifespan: mock 开启时强制关闭 WVP 同步)
+      - MOCK_ENABLED=${MOCK_ENABLED:-false}
     volumes:
       - ./app:/app/app:cached
       - ./models:/app/models:cached
@@ -89,6 +97,13 @@ services:
     depends_on:
       - redis
       - mysql
+    healthcheck:
+      # mock 模式下 ai 的设备注册/事件/拥挤上报都依赖 backend, 必须等其就绪
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
     # 挂共享网, 供 backend 按服务名访问外部 WVP(wvp:18080)
     networks:
       - default

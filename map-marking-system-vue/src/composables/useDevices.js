@@ -1,33 +1,31 @@
 /**
- * 设备（地图标点）状态与 CRUD —— 对应 api(8).md §3 设备管理（v0.9.0）
+ * 设备（地图标点）只读状态 —— 对应 api(8).md §3.2 / §4.2（v0.9.0）
  * ---------------------------------------------------------------------------
- * 地图标点 = 摄像头设备。接口映射：
- *   增 POST /api/devices           查 GET /api/devices (+ /api/stats/devices 取实时计数)
- *   删 DELETE /api/devices/{id}    改 POST /api/devices/{id}/enable（文档无 PUT，以"启用/重配置"对应编辑）
+ * 大屏为只读视图：设备的新增 / 配置 / 删除统一在运维页（设备管理 · 计数启流）完成，
+ * 本组合式只负责「读」——拉取设备列表 + 订阅 WS 实时计数 + 维护地图落点。
+ *   查 GET /api/devices（基础信息）· GET /api/stats/devices（实时计数兜底）
+ *   实时 ws://…/ws stats.devices（主通道）
  *
- * v0.9.0 变更：
- *   - §3.2 设备列表响应新增 longitude / latitude（后端按设备名匹配 device_geo.json，
- *     未匹配为 null）。落点优先采用后端返回的经纬度，其次沿用前端已维护位置。
- *   - §4.2 设备统计新增 hour_*（当前小时累计）与 person_flow_per_min，随 statsById 透出。
- *   - 拥挤判断字段（congested / roi_vehicles / *_flow_per_min）仍来自 §4.2 响应。
+ * v0.9.0 字段：
+ *   - §3.2 设备列表响应含 longitude / latitude（后端按设备名匹配 device_geo.json，未匹配为 null）。
+ *   - §4.2 设备统计含 hour_*（当前小时累计）与 person_flow_per_min，随 statsById 透出。
+ *   - 拥挤判断字段（congested / roi_vehicles / *_flow_per_min）来自 §4.2 响应。
+ *
+ * statsRev：统计数据的「变更计数器」。WS 每 2s 覆盖式写入 statsById，
+ * 组件若对 statsById 做 deep watch 会带来全量深度遍历 + 全量重绘；
+ * 改为写一次自增一次，组件只 watch 这个数字即可。
  */
 import { reactive } from 'vue'
-import {
-  listDevices, getDeviceStats, registerDevice, deleteDevice, enableDevice
-} from '../api/endpoints.js'
+import { listDevices, getDeviceStats } from '../api/endpoints.js'
 import { useToast } from './useToast.js'
 
 const state = reactive({
   devices: [],        // Device[]（设备基础信息）
   statsById: {},      // { [deviceId]: 实时计数 }
-  positions: {},      // { [deviceId]: {lng,lat} } 前端地图落点（文档无此字段）
-  loading: false,
-  selectedId: null,
-  showOffline: true   // 是否在地图显示离线/异常设备（一键切换）
+  positions: {},      // { [deviceId]: {lng,lat} } 地图落点（§3.2 经纬度）
+  statsRev: 0,        // 统计变更计数器（见上方说明）
+  loading: false
 })
-
-// 用户手动拖拽过的设备：WS 经纬度落点不覆盖其手动位置（仅前端交互用）
-const manualPos = new Set()
 
 const { push } = useToast()
 
@@ -54,7 +52,7 @@ async function load() {
     applyStats(stats)
     // 落点：严格以后端返回的 longitude/latitude 为准（§3.2）。
     // 后端匹配不到 device_geo.json 时该值为 null，此时不落点（设备仍在列表/统计中，只是不上图），
-    // 前端不再伪造坐标；已由用户拖拽/新增写入的落点保持不变。
+    // 前端不伪造坐标；已由 WS 落点写入的坐标保持不变。
     devs.forEach((d) => {
       if (state.positions[d.id]) return
       const geo = normalizeGeo(d)
@@ -72,6 +70,7 @@ function applyStats(stats) {
   const map = {}
   ;(stats || []).forEach((s) => { if (s && s.device_id) map[s.device_id] = s })
   state.statsById = map
+  state.statsRev++
 }
 
 /**
@@ -79,7 +78,7 @@ function applyStats(stats) {
  * 同时维护：
  *   - state.devices：设备基础信息（name/camera_type/status/阈值/category/经纬度），保证列表始终最新；
  *   - state.statsById：实时计数 + 拥挤度等全部新字段（组件 charts/cards 读取）；
- *   - state.positions：经纬度落点（WS 提供且合法、且非用户手动拖拽时写入）。
+ *   - state.positions：经纬度落点（WS 提供且合法时写入）。
  * @param {Array} devicesArr  WS stats 消息的 devices 数组（WsDevice[]）
  */
 function applyWsDevices(devicesArr) {
@@ -132,15 +131,14 @@ function applyWsDevices(devicesArr) {
       congestion_score: d.congestion_score ?? 0,
       congested: !!d.congested
     }
-    // 3) 经纬度落点：WS 提供且数值合法、且非用户手动拖拽过 → 写入 positions
-    if (!manualPos.has(id)) {
-      const lng = Number(d.longitude)
-      const lat = Number(d.latitude)
-      if (Number.isFinite(lng) && Number.isFinite(lat) && lng !== 0 && lat !== 0) {
-        state.positions[id] = { lng, lat }
-      }
+    // 3) 经纬度落点：WS 提供且数值合法 → 写入 positions
+    const lng = Number(d.longitude)
+    const lat = Number(d.latitude)
+    if (Number.isFinite(lng) && Number.isFinite(lat) && lng !== 0 && lat !== 0) {
+      state.positions[id] = { lng, lat }
     }
   })
+  state.statsRev++
 }
 
 /** 静默刷新各设备实时计数（§4.2，含拥挤/小时数据；供 useRealtime 轮询兜底调用，失败不弹窗） */
@@ -149,85 +147,11 @@ async function refreshStats() {
   applyStats(stats)
 }
 
-/**
- * 注册设备（地图标点新增）
- * @param {object} payload 文档字段：id/name/stream_url/line_coords/anchor_coords/count_only/camera_type/roi_coords/max_vehicles
- * @param {{lng:number,lat:number}} [pos] 地图落点（仅前端）
- */
-async function create(payload, pos) {
-  try {
-    await registerDevice(payload)
-    // 仅为合法数值坐标写入落点；非法（含 NaN）时不设位置，设备不上图（不再伪造兜底坐标）
-    if (pos && typeof pos.lng === 'number' && typeof pos.lat === 'number' &&
-        Number.isFinite(pos.lng) && Number.isFinite(pos.lat)) {
-      state.positions[payload.id] = pos
-    }
-    push('设备「' + payload.name + '」注册成功', 'success')
-    await load()
-    return true
-  } catch (e) {
-    push('注册失败：' + (e.detail || e.message), 'error')
-    return false
-  }
-}
-
-/** 删除设备（地图标点删除） */
-async function remove(id) {
-  try {
-    await deleteDevice(id)
-    delete state.positions[id]
-    if (state.selectedId === id) state.selectedId = null
-    push('设备已删除', 'success')
-    await load()
-    return true
-  } catch (e) {
-    push('删除失败：' + (e.detail || e.message), 'error')
-    return false
-  }
-}
-
-/**
- * 重新配置设备（编辑/保存计数线等）—— 对应文档 §3.7
- * 文档设备无 PUT，故以 enable 接口承载"更新"语义。
- * v0.7.0 新增 max_vehicles 透传（拥挤判断阈值 §4.4）。
- */
-async function configure(id, cfg) {
-  try {
-    await enableDevice(id, cfg)
-    push('设备配置已更新', 'success')
-    await load()
-    return true
-  } catch (e) {
-    push('配置失败：' + (e.detail || e.message), 'error')
-    return false
-  }
-}
-
-/** 更新地图落点（拖拽）—— 仅前端位置同步，不触发后端（文档无地理字段） */
-function setPosition(id, lng, lat) {
-  // 只接受有限数值坐标，非法值不写入，避免后方渲染 NaN 像素
-  if (typeof lng !== 'number' || typeof lat !== 'number' ||
-      !Number.isFinite(lng) || !Number.isFinite(lat)) {
-    console.warn('[useDevices] 落点坐标无效，忽略更新：', id, lng, lat)
-    return
-  }
-  manualPos.add(id) // 标记手动拖拽，WS 经纬度不再覆盖
-  state.positions[id] = { lng, lat }
-}
-
-function select(id) { state.selectedId = id }
-
-/** 一键切换：地图是否显示离线/异常设备（只显示 online 设备时返回 false） */
-function toggleShowOffline() {
-  state.showOffline = !state.showOffline
-  return state.showOffline
-}
-
-/** 合并后的设备视图（含实时计数） */
-function merged() {
-  return state.devices.map((d) => ({ ...d, stat: state.statsById[d.id] || null }))
+/** 按 id 取设备基础信息（搜索定位 / 告警跳转用） */
+function findById(id) {
+  return state.devices.find((d) => d.id === id) || null
 }
 
 export function useDevices() {
-  return { state, load, refreshStats, applyWsDevices, create, remove, configure, setPosition, select, merged, toggleShowOffline }
+  return { state, load, refreshStats, applyWsDevices, findById }
 }

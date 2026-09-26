@@ -8,27 +8,48 @@
     </div>
 
     <div class="top-center">
-      <!-- <select id="citySelect" :value="city" @change="onCity" title="监控区域">
-        <option value="datong">大同 · 古城</option>
-      </select> -->
-      <!-- <select id="styleSelect" :value="style" @change="onStyle" title="底图配色">
-        <option v-for="o in styleOptions" :key="o.value" :value="o.value">{{ o.label }}</option>
-      </select> -->
-      <!-- <span class="spacer"></span> -->
-      <!-- <button class="tool-btn" @click="mapCtl.resetView()">⟲ 重置视角</button>
-      <button class="tool-btn" @click="mapCtl.setTopView()">🔝 俯视</button>
-      <button class="tool-btn" @click="mapCtl.setOblique()">🔜 斜视</button> -->
-      <!-- <button class="tool-btn" @click="mapCtl.fitRange()">📐 适配范围</button> -->
-      <!-- <button class="tool-btn" id="freeBtn" @click="mapCtl.toggleFree3D()">🧊 自由3D</button> -->
+      <!-- 设备检索：先按「门」再按设备匹配（门 = 地图上的门级大卡，设备 = 32 路标点） -->
+      <div ref="boxEl" class="dev-search" @focusout="onSearchBlur">
+        <span class="ds-ic">🔍</span>
+        <input v-model="kw" class="ds-input" type="search"
+          placeholder="搜索门 / 设备名称，回车定位"
+          @focus="open = true" @input="open = true"
+          @keydown.enter.prevent="pickFirst" @keydown.esc.stop="closeList" />
+        <button v-if="kw" class="ds-clear" type="button" title="清空" @mousedown.prevent @click="clearKw">✕</button>
+      </div>
+
+      <!-- 下拉挂到 body：顶栏 overflow:hidden 会裁掉、且层叠层级低于地图大卡(9700+)，
+           用 Teleport + position:fixed 才能稳定浮在卡片之上 -->
+      <Teleport to="body">
+        <div class="ds-list" v-if="open && kw" :style="listStyle">
+          <div v-if="!gateResults.length && !devResults.length" class="ds-empty">未找到匹配的门 / 设备</div>
+
+          <!-- 门：定位到该门大卡并闪烁一次 -->
+          <div v-for="g in gateResults" :key="'gate-' + g.id" class="ds-item"
+            title="点击定位到该门" @mousedown.prevent @click="pickGate(g)">
+            <span class="ds-kind">门</span>
+            <span class="ds-name">{{ g.id }}</span>
+            <span class="ds-id">{{ g.edge }}{{ g.direction !== '其他' ? ' · ' + g.direction : '' }}</span>
+            <span class="ds-st" :data-status="g.status">{{ statusText(g.status) }}</span>
+          </div>
+
+          <!-- 设备：定位到该路标点并展开信息卡 -->
+          <div v-for="d in devResults" :key="d.id" class="ds-item"
+            :class="{ 'no-geo': !hasGeo(d.id) }"
+            :title="hasGeo(d.id) ? '点击定位到该设备' : '该设备暂无地图坐标，无法定位'"
+            @mousedown.prevent @click="pick(d)">
+            <span class="ds-kind">设备</span>
+            <span class="ds-name">{{ d.name || d.id }}</span>
+            <span class="ds-id">{{ d.id }}</span>
+            <span class="ds-st" :data-status="d.status">{{ statusText(d.status) }}</span>
+          </div>
+        </div>
+      </Teleport>
     </div>
 
     <div class="top-right">
       <div class="top-actions">
         <button class="tool-btn" @click="mapCtl.fitRange()">📐 适配范围</button>
-        <!-- <button class="tool-btn" :class="{ active: dev.state.showOffline }"
-          @click="dev.toggleShowOffline()" title="一键切换：地图是否显示离线/异常设备">
-          {{ dev.state.showOffline ? '🗺 显示离线' : '🗺 隐藏离线' }}
-        </button> -->
         <button class="tool-btn primary" @click="goOps('device-info.html')">🛠 设备管理</button>
         <button class="tool-btn" @click="goOps('device-config.html')">📡 计数启流</button>
         <button class="tool-btn" @click="goOps('business-rules.html')">⚙ 业务规则</button>
@@ -53,7 +74,7 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useMapControl } from '../composables/useMapControl.js'
 import { useTheme } from '../composables/useTheme.js'
 import { useDevices } from '../composables/useDevices.js'
@@ -63,41 +84,76 @@ const { mapCtl } = useMapControl()
 const dev = useDevices()
 const { theme, toggleTheme } = useTheme()
 
-const city = ref('datong')
-const style = ref(theme.value === 'dark' ? 'amap://styles/blue' : 'amap://styles/normal')
 const cv = ref(null)
 const dateEl = ref(null)
 const timeEl = ref(null)
 const weekEl = ref(null)
-
-// 底图配色随主题提供不同预设（深色组 / 浅色组）
-const STYLE_OPTIONS = {
-  dark: [
-    { value: 'amap://styles/blue', label: '🔵 科技蓝' },
-    { value: 'amap://styles/dark', label: '🌑 深色标准' },
-    { value: 'amap://styles/grey', label: '🌒 暗夜灰' }
-  ],
-  light: [
-    { value: 'amap://styles/normal', label: '🎨 标准彩色' },
-    { value: 'amap://styles/fresh', label: '💧 清新蓝' },
-    { value: 'amap://styles/macaron', label: '🍬 马卡龙' },
-    { value: 'amap://styles/wonderland', label: '🌈 绿野仙踪' }
-  ]
-}
-const styleOptions = computed(() => STYLE_OPTIONS[theme.value] || STYLE_OPTIONS.dark)
-
-function onCity(e) { city.value = e.target.value; mapCtl.changeCity(e.target.value) }
-function onStyle(e) { style.value = e.target.value; mapCtl.changeStyle(e.target.value) }
 
 /** 打开后端运维页面 (设备管理 / 计数启流 / 业务规则), 新标签页以免丢失大屏 */
 function goOps(file) {
   window.open(`${API_BASE}/static/${file}`, '_blank')
 }
 
-// 主题切换时，底图配色选择器回到当前主题的默认样式（实际换瓦片由 MapPanel 的 theme watch 完成）
-watch(theme, (t) => {
-  style.value = t === 'dark' ? 'amap://styles/blue' : 'amap://styles/normal'
+// —— 门 / 设备检索（即时匹配 → 地图定位）——
+const kw = ref('')
+const open = ref(false)
+const boxEl = ref(null)     // 搜索框（下拉定位基准）
+const listStyle = ref({})   // 下拉为 body 上的 fixed 元素，需手动对齐搜索框
+/** 门级大卡列表（由 MapPanel 随设备数据发布到控制总线） */
+const gates = computed(() => mapCtl.gates || [])
+/** 门匹配：门断面名 / 大城门 / 所在城墙 / 进出处 */
+const gateResults = computed(() => {
+  const q = kw.value.trim().toLowerCase()
+  if (!q) return []
+  return gates.value
+    .filter((g) => `${g.id || ''} ${g.gate || ''} ${g.edge || ''} ${g.direction || ''}`.toLowerCase().includes(q))
+    .slice(0, 6)
 })
+/** 设备匹配：编号 / 名称 / 分类 */
+const devResults = computed(() => {
+  const q = kw.value.trim().toLowerCase()
+  if (!q) return []
+  return dev.state.devices
+    .filter((d) => `${d.id || ''} ${d.name || ''} ${d.category || ''}`.toLowerCase().includes(q))
+    .slice(0, 8)
+})
+/** 把下拉对齐到搜索框正下方（顶栏固定不滚动，仅需在打开与窗口变化时同步） */
+function syncListPos() {
+  const el = boxEl.value
+  if (!el) return
+  const r = el.getBoundingClientRect()
+  listStyle.value = { left: `${r.left}px`, top: `${r.bottom + 6}px`, width: `${r.width}px` }
+}
+watch(open, (v) => { if (v) nextTick(syncListPos) })
+function onWinResize() { if (open.value) syncListPos() }
+function hasGeo(id) {
+  const p = dev.state.positions[id]
+  return !!(p && Number.isFinite(p.lng) && Number.isFinite(p.lat))
+}
+function statusText(s) {
+  return { online: '在线', offline: '离线', abnormal: '异常', syncing: '同步中' }[s] || '—'
+}
+function pick(d) {
+  if (!d) return
+  open.value = false
+  kw.value = d.name || d.id
+  mapCtl.focusDevice(d.id)
+}
+function pickGate(g) {
+  if (!g) return
+  open.value = false
+  kw.value = g.id
+  mapCtl.focusGate(g.id)
+}
+// 回车定位：门优先（大屏以门级大卡为主视图），无门命中再取设备
+function pickFirst() {
+  if (gateResults.value.length) { pickGate(gateResults.value[0]); return }
+  if (devResults.value.length) pick(devResults.value[0])
+}
+function clearKw() { kw.value = ''; open.value = false }
+function closeList() { open.value = false }
+// 失焦收起下拉：条目用 mousedown.prevent 保持焦点，故此处可立即收起
+function onSearchBlur() { open.value = false }
 
 // —— 实时时钟 ——
 const wk = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
@@ -140,9 +196,11 @@ function initParticles() {
 onMounted(() => {
   tick(); timer = setInterval(tick, 1000)
   initParticles()
+  window.addEventListener('resize', onWinResize)
 })
 onBeforeUnmount(() => {
   if (timer) clearInterval(timer)
   if (raf) cancelAnimationFrame(raf)
+  window.removeEventListener('resize', onWinResize)
 })
 </script>

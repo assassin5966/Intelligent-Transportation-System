@@ -5,7 +5,9 @@
 
 # === AI 视觉分析层 ===
 # torch/torchvision 在 Dockerfile 中单独安装 (使用 PyTorch 官方 CPU 源)
-ultralytics>=8.3.0
+# 锁定 <9: GPU 引擎按官方跟踪器输出列序 [x1,y1,x2,y2,id,conf,cls,idx] 解析结果,
+# 大版本变更可能改列序/API (启动自检 app/ai/gpu_engine._selftest 会拦截)
+ultralytics>=8.3.0,<9.0.0
 lap>=0.5.12
 opencv-python-headless>=4.9.0
 numpy>=1.26.0

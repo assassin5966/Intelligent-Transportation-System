@@ -17,6 +17,11 @@ from .api import alerts, config_rules, device_info, devices, events, police, sta
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("业务后端启动")
+    # Mock/WVP 互斥保护: mock 模式下模拟器已生成全量数据, 若 WVP 同步同时运行
+    # 会拉入真实设备并启流推理, 与模拟数据叠加造成双重计数, 故强制关闭 WVP.
+    if settings.mock_enabled and settings.wvp_enabled:
+        settings.wvp_enabled = False
+        logger.warning("[Mock] MOCK_ENABLED=true: 已强制关闭 WVP 同步 (WVP_ENABLED 配置被忽略)")
     scheduler_started = False
     heartbeat_started = False
     try:

@@ -2,7 +2,11 @@
 
 并发模型:
   - 每路设备一个 DevicePipeline; supervisor 任务守护, 管道退出后自动重启 (退避);
-  - 推理 (CPU 密集) 走专用线程池 (inference_scheduler), 多路并发受限且池满丢帧;
+  - 两种推理模式 (由 app/ai/model_pool.py 在服务启动时决定):
+      gpu_batch: 帧提交给本路所属 GPU 引擎 (每卡 1 个模型实例, 批内多路),
+                 跟踪状态仍由本路 ByteTracker 持有 (track_from_raw);
+      legacy   : 推理走专用线程池 (inference_scheduler), 本地模型逐帧推理,
+                 即优化前的行为 (CPU 部署 / 引擎自检失败时自动回退);
   - 帧循环只做计算与入队, 所有 HTTP 上报 (事件/异常/拥挤/心跳) 由后台任务发送;
   - WS 广播非阻塞 (有界队列, 满时丢最旧), 慢客户端不影响帧循环.
 """
@@ -10,8 +14,9 @@ import asyncio
 import time
 from collections import deque
 from datetime import datetime
-from typing import List, Optional
+from typing import Callable, List, Optional
 
+import cv2
 import httpx
 
 from ..common.business_rules import get_rule
@@ -20,8 +25,10 @@ from ..common.logger import logger
 from ..schemas.events import EventIn, CrossingEvent
 from .anomaly import AnomalyEvent, AnomalyMonitor
 from .counter import LineCrossingCounter, Point
+from .gpu_engine import EngineBusy
 from .inference_scheduler import InferBusy, run_inference
-from .stream import stream_frames
+from .model_pool import Lease
+from .stream import FramePacket, stream_frames
 from .tracker import ByteTracker
 
 _ws_clients: set = set()
@@ -34,6 +41,44 @@ _STATS_INTERVAL = settings.count_stats_interval
 # 慢客户端防护: WS 客户端队列上限 (条). 每帧广播 tracks, 前端卡顿时无界队列会
 # 无限积压内存. 队列满时丢弃最旧消息 (丢的是实时画面轨迹, 不影响计数事件链路).
 _WS_QUEUE_MAX = 256
+
+# 热重载参数重读周期 (秒): imgsz 等改后由下一次重读生效, 不必每帧 stat 配置文件
+_RULE_REFRESH_S = 5.0
+
+
+def make_infer_preprocess() -> Callable:
+    """推理前预降采样钩子 (在 stream 的读帧线程内执行, 不占用推理/事件循环线程).
+
+    4K 流直接送进推理会带来三个浪费: 解码端颜色转换/拷贝开销按原始像素计、
+    letterbox 前的大图 CPU 缩放、以及大帧在单卡推理线程里串行处理. 这里先把
+    短边降到推理尺寸 (INTER_AREA, 质量优于 ultralytics 内部 letterbox 所用插值),
+    引擎侧再 letterbox 几乎是无损的等尺寸操作.
+
+    目标尺寸按热重载规则读取 (5s 缓存), 与引擎每批读取的 inference.imgsz 收敛;
+    即使短暂不一致也仅影响输入质量, 不影响坐标正确性 (引擎出口按实际帧尺寸还原).
+    """
+    state = {"size": 0, "at": 0.0}
+
+    def _preprocess(frame):
+        now = time.monotonic()
+        if now - state["at"] > _RULE_REFRESH_S:
+            state["size"] = int(
+                get_rule("inference", "imgsz", default=settings.infer_imgsz) or 0
+            )
+            state["at"] = now
+        target = state["size"]
+        if target <= 0:
+            return frame
+        h, w = frame.shape[:2]
+        short = min(w, h)
+        if short <= target:
+            return frame
+        f = target / float(short)
+        return cv2.resize(
+            frame, (int(round(w * f)), int(round(h * f))), interpolation=cv2.INTER_AREA
+        )
+
+    return _preprocess
 
 
 def register_ws_client(queue: asyncio.Queue):
@@ -72,10 +117,17 @@ class DevicePipeline:
         camera_type: Optional[str] = None,
         roi: Optional[List[Point]] = None,
         enable_url_refresh: bool = False,
+        lease: Optional[Lease] = None,
     ):
         self.device_id = device_id
         self.stream_url = stream_url
         self.tracker = ByteTracker(camera_type=camera_type)
+        # lease 非空 => 模型由该卡的 GPU 引擎共享 (gpu_batch); 为空 => legacy 独立实例
+        self.lease = lease
+        self.mode = "gpu_batch" if lease is not None else "legacy"
+        # 预降采样钩子只在 gpu_batch 提供: legacy 的坐标还原在跟踪器内部完成,
+        # 帧尺寸必须与计数器基准 (流原始分辨率) 一致
+        self.decoder = make_infer_preprocess() if lease is not None else None
         self.counter = LineCrossingCounter(line, anchor)
         if count_only is not None:
             self.counter.count_only = count_only
@@ -100,39 +152,73 @@ class DevicePipeline:
         # 运行时统计窗口 (每 _STATS_INTERVAL 秒汇总一行日志后清零)
         self._stats_window_start: Optional[float] = None
         self._stats_frames = 0  # 窗口内已处理帧数
-        self._stats_infer_seconds = 0.0  # 窗口内推理累计耗时 (含线程池排队)
+        self._stats_infer_seconds = 0.0  # 窗口内推理累计耗时 (legacy: 含线程池排队)
         self._stats_events = 0  # 窗口内产出事件数
-        self._stats_decoded_last = 0  # 上次汇总时的连接内累计解码帧数 (算窗口增量)
-        self._infer_busy_drops = 0  # 窗口内推理池饱和丢帧数 (并入运行统计)
+        self._stats_grabbed_last = 0  # 上次汇总时的连接内累计 grab 帧数 (算窗口增量)
+        self._stats_sampled_last = 0  # 上次汇总时的连接内累计采样帧数 (算窗口增量)
+        self._infer_busy_drops = 0  # 窗口内推理饱和丢帧数 (并入运行统计)
+        # gpu_batch 专属: 批次数/组批等待/单批推理耗时/预处理, 用于对齐性能目标
+        self._stats_batches = 0
+        self._stats_batch_infer_seconds = 0.0
+        self._stats_batch_size_total = 0
+        self._stats_wait_seconds = 0.0
+        self._stats_preprocess_seconds = 0.0
 
     # ---- 主处理循环 ----
 
-    async def _process_frame(self, frame, decoded: int) -> None:
-        """单帧处理: 尺寸自适应 -> 异常检测 -> 推理 -> 计数 -> 上报入队."""
-        if frame is not None:
-            h, w = frame.shape[:2]
-            if self._frame_size != (w, h):
-                # 首帧或流重连后分辨率变化 -> 更新计数器帧尺寸
-                self.counter.set_frame_size(w, h)
-                self._frame_size = (w, h)
-                logger.info(f"[{self.device_id}] 计数线帧尺寸: {w}x{h}")
-            # 视频异常检测 (周期采样 + 去抖, 仅状态转移时上报)
-            anomaly_ev = self._anomaly_monitor.check(frame)
-            if anomaly_ev is not None:
-                anomaly_ev.timestamp = datetime.now().isoformat()
-                self._enqueue_anomaly(anomaly_ev)
+    def _scale_to_stream(self, packet: FramePacket) -> tuple:
+        """推理帧 -> 流原始分辨率 的逐轴还原系数 (兼容解码端横向拉伸与预降采样)."""
+        h, w = packet.frame.shape[:2]
+        sw, sh = packet.stream_size
+        return (sw / float(w), sh / float(h))
 
-        infer_start = time.monotonic()
-        try:
-            track_result = await run_inference(self.tracker.track, frame)
-        except InferBusy:
-            # 推理池饱和 (多路并发超上限): 丢本帧取下一最新帧, 语义与处理慢
-            # 被读帧线程覆盖丢帧等价; 不计 _stats_frames, 丢帧对账
-            # (decoded - processed) 会自然体现本帧被丢
-            self._infer_busy_drops += 1
-            return
-        # 含线程池排队耗时: 多路并发时该值明显高于纯推理耗时, 即"排队"证据
-        self._stats_infer_seconds += time.monotonic() - infer_start
+    async def _process_frame(self, packet: FramePacket) -> None:
+        """单帧处理: 尺寸自适应 -> 异常检测 -> 推理 -> 计数 -> 上报入队."""
+        frame = packet.frame
+        sw, sh = packet.stream_size
+        if self._frame_size != (sw, sh):
+            # 首帧或流重连后分辨率变化 -> 更新计数器帧尺寸.
+            # 一律用"流原始分辨率"作为坐标基准, 与推理帧尺寸/解码端缩放解耦,
+            # 保证 min_motion/比值阈值等口径与优化前完全一致.
+            self.counter.set_frame_size(sw, sh)
+            self._frame_size = (sw, sh)
+            logger.info(f"[{self.device_id}] 计数线帧尺寸: {sw}x{sh}")
+        # 视频异常检测 (周期采样 + 去抖, 仅状态转移时上报)
+        anomaly_ev = self._anomaly_monitor.check(frame)
+        if anomaly_ev is not None:
+            anomaly_ev.timestamp = datetime.now().isoformat()
+            self._enqueue_anomaly(anomaly_ev)
+
+        self._stats_preprocess_seconds += packet.preprocess_ms / 1000.0
+
+        if self.lease is not None:
+            # gpu_batch: 提交给本卡引擎组批; 队列饱和同样丢本帧取下一最新帧
+            try:
+                outcome = await self.lease.engine.submit(
+                    self.device_id, frame, self._scale_to_stream(packet)
+                )
+            except EngineBusy:
+                self._infer_busy_drops += 1
+                return
+            track_result = self.tracker.track_from_raw(outcome.raw_tracks)
+            self._stats_batches += 1
+            self._stats_batch_size_total += outcome.batch_size
+            self._stats_batch_infer_seconds += outcome.infer_ms / 1000.0
+            self._stats_wait_seconds += outcome.wait_ms / 1000.0
+        else:
+            # legacy: 帧尺寸 == 流原始分辨率 (无解码端缩放/预降采样, 见 decode_tuning),
+            # 跟踪器内部历史/速度与计数器基准同一坐标系, 无需还原
+            infer_start = time.monotonic()
+            try:
+                track_result = await run_inference(self.tracker.track, frame)
+            except InferBusy:
+                # 推理池饱和 (多路并发超上限): 丢本帧取下一最新帧, 语义与处理慢
+                # 被读帧线程覆盖丢帧等价; 不计 _stats_frames, 丢帧对账
+                # (grab 帧数 - processed) 会自然体现本帧被丢
+                self._infer_busy_drops += 1
+                return
+            # 含线程池排队耗时: 多路并发时该值明显高于纯推理耗时, 即"排队"证据
+            self._stats_infer_seconds += time.monotonic() - infer_start
         self._stats_frames += 1
 
         # 单调时钟统一: 计数器内部冷却/去重/TTL 与本管道的车流统计
@@ -174,7 +260,7 @@ class DevicePipeline:
 
         await self._broadcast_tracks_ws(track_result)
 
-        self._report_stats(decoded)
+        self._report_stats(packet)
 
     async def _run_once(self) -> None:
         """单次管道生命周期: 拉流循环 + 心跳/上报子任务; 供 supervisor 反复拉起."""
@@ -183,10 +269,14 @@ class DevicePipeline:
         sender_task = asyncio.create_task(self._outbox_sender())
         try:
             url_provider = self._refresh_stream_url if self.enable_url_refresh else None
-            async for frame, _idx, decoded in stream_frames(
-                self.stream_url, self._stop, url_provider=url_provider
+            async for packet in stream_frames(
+                self.stream_url, self._stop,
+                url_provider=url_provider, preprocess=self.decoder,
+                # 解码侧采样/缩放只在 gpu_batch 生效: legacy (含 GPU 槽位耗尽回退、
+                # CPU 部署) 保持优化前的原始帧率与分辨率, 坐标基准与跟踪器内一致
+                decode_tuning=self.lease is not None,
             ):
-                await self._process_frame(frame, decoded)
+                await self._process_frame(packet)
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: BLE001
@@ -323,12 +413,17 @@ class DevicePipeline:
         except Exception as e:  # noqa: BLE001
             logger.error(f"[{self.device_id}] 推送失败: {e}")
 
-    def _report_stats(self, decoded: int) -> None:
+    def _report_stats(self, packet: FramePacket) -> None:
         """周期汇总运行统计 (每 _STATS_INTERVAL 秒一行 INFO).
 
-        丢帧率 = 1 - 处理帧数/解码帧数: 处理慢于上游帧率时读帧线程不断用新帧覆盖
-        旧帧, 未处理帧被丢弃, 目标跨线动作可能整段丢失 -> 漏计.
-        "推理饱和丢帧"单列: 推理池满主动丢弃的帧, 与读帧覆盖丢帧区分定位.
+        窗口内三类丢弃分开计数, 避免"设计内节流"与"真丢帧"混成一个数:
+          - 节流丢弃 = grab增量 - 采样增量: 解码侧按 decode_max_fps 主动不 retrieve
+            的帧, 属设计内行为 (省 CPU 正是优化目的); legacy 无节流时恒为 0;
+          - 丢帧     = 采样增量 - 处理帧: 处理慢于上游 -> 未处理帧被最新帧覆盖,
+            目标跨线动作可能整段丢失 -> 漏计。这才是验收项 (≤5%);
+          - 推理饱和丢帧 = 推理池满主动丢弃 (EngineBusy), 单列定位。
+        分母取采样帧数后, legacy 与 gpu_batch 口径一致 (legacy 节流丢弃=0, 旧口径
+        即本口径), 优化前后的数值可直接对比。
         推理耗时含线程池排队时间, 多路并发时是"排队"的直接证据.
         拒绝次数给出事件被哪一环节拦下 (ROI/夹角过滤/ID切换/防抖/滞留/去重/单向模式).
         """
@@ -341,32 +436,59 @@ class DevicePipeline:
             return
 
         processed = self._stats_frames
-        # decoded 是"当前连接内累计解码帧数", 需减去上次汇总时的基线得到窗口增量;
-        # 断流重连后 decoded 归零 (小于基线) 时退化为按已处理帧数计, 避免丢帧数为负
-        window_decoded = decoded - self._stats_decoded_last
-        if window_decoded < 0:
-            window_decoded = processed
-        dropped = max(window_decoded - processed, 0)
-        dropped_pct = dropped / window_decoded * 100.0 if window_decoded else 0.0
-        infer_ms = self._stats_infer_seconds / processed * 1000.0 if processed else 0.0
+        # grabbed / sampled 都是"当前连接内累计值", 需减去上次汇总基线得到窗口增量;
+        # 断流重连后两者归零 (小于基线) 时退化为按已处理帧数计, 避免窗口值为负
+        window_grabbed = packet.grabbed - self._stats_grabbed_last
+        if window_grabbed < 0:
+            window_grabbed = processed
+        window_sampled = packet.sampled - self._stats_sampled_last
+        if window_sampled < 0:
+            window_sampled = processed
+        throttled = max(window_grabbed - window_sampled, 0)   # 解码侧节流 (设计内)
+        dropped = max(window_sampled - processed, 0)          # 处理侧真丢帧 (验收项)
+        dropped_pct = dropped / window_sampled * 100.0 if window_sampled else 0.0
         reject = self.counter.pop_reject_stats()
         reject_str = " ".join(f"{k}={v}" for k, v in sorted(reject.items())) or "无"
+
+        if self.lease is not None:
+            # gpu_batch: 单批耗时/组批等待/均批大小才是对齐性能目标的口径
+            # (累计的是每批耗时, 不能按帧平均, 否则会按批大小放大)
+            batches = self._stats_batches
+            infer_str = (
+                f"推理={self._stats_batch_infer_seconds / batches * 1000.0:.0f}ms/批 "
+                f"均批={self._stats_batch_size_total / batches:.1f} "
+                f"组批等待={self._stats_wait_seconds / batches * 1000.0:.0f}ms "
+                f"预处理={self._stats_preprocess_seconds / (processed or 1) * 1000.0:.1f}ms/帧"
+                if batches else "推理=无批次"
+            )
+            mode_str = f"模式=gpu_batch 卡={self.lease.gpu_id}"
+        else:
+            infer_ms = self._stats_infer_seconds / processed * 1000.0 if processed else 0.0
+            infer_str = f"推理={infer_ms:.0f}ms/帧"
+            mode_str = "模式=legacy"
 
         logger.info(
             f"[{self.device_id}] 运行统计({elapsed:.0f}s): "
             f"处理fps={processed / elapsed:.2f} "
-            f"解码={window_decoded} 丢帧={dropped}({dropped_pct:.0f}%) "
+            f"grab帧={window_grabbed} 采样帧={window_sampled} 节流丢弃={throttled} "
+            f"丢帧={dropped}({dropped_pct:.0f}%) "
             f"推理饱和丢帧={self._infer_busy_drops} "
-            f"推理={infer_ms:.0f}ms/帧 "
+            f"{mode_str} {infer_str} "
             f"事件={self._stats_events} | 拒绝: {reject_str}"
         )
 
         self._stats_window_start = now
-        self._stats_decoded_last = decoded
+        self._stats_grabbed_last = packet.grabbed
+        self._stats_sampled_last = packet.sampled
         self._stats_frames = 0
         self._stats_infer_seconds = 0.0
         self._stats_events = 0
         self._infer_busy_drops = 0
+        self._stats_batches = 0
+        self._stats_batch_infer_seconds = 0.0
+        self._stats_batch_size_total = 0
+        self._stats_wait_seconds = 0.0
+        self._stats_preprocess_seconds = 0.0
 
     def _vehicle_flow_per_minute(self, now_mono: float) -> float:
         """最近 60 秒内车辆跨线次数折算为每分钟车流量 (辆/分钟).

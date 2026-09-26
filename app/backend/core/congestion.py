@@ -77,11 +77,15 @@ def evaluate_congestion(
     )
 
     vehicle_count = _clamped_factor(roi_vehicles, max_vehicles, vehicle_active)
-    # 维度未配置阈值时不参与拥挤度: 速度因子须为 0,
-    # 否则 1.0 - _clamped_factor(..., active=False)=1.0 会让该维度虚报 0.5 分
-    vehicle_flow = 1.0 - _clamped_factor(vehicle_flow_per_min, min_flow, vehicle_active) if vehicle_active else 0.0
+    # 维度未配置阈值时不参与拥挤度: 速度因子须为 0, 否则
+    # 1.0 - _clamped_factor(..., active=False)=1.0 会让该维度虚报 0.5 分;
+    # 同样地, 该维度数量为 0 (无车/无人) 时流量=0 是"无线索"而非"拥堵",
+    # 速度因子也必须为 0 —— 否则人车混合加权在 0 车 0 人时会虚报到 0.5 触发误告警
+    vehicle_flow = (1.0 - _clamped_factor(vehicle_flow_per_min, min_flow, vehicle_active)
+                    if vehicle_active and roi_vehicles > 0 else 0.0)
     person_count = _clamped_factor(roi_persons, max_persons, person_active)
-    person_flow = 1.0 - _clamped_factor(person_flow_per_min, person_min_flow, person_active) if person_active else 0.0
+    person_flow = (1.0 - _clamped_factor(person_flow_per_min, person_min_flow, person_active)
+                   if person_active and roi_persons > 0 else 0.0)
     vehicle_score = 0.5 * vehicle_count + 0.5 * vehicle_flow
     person_score = 0.5 * person_count + 0.5 * person_flow
 

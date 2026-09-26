@@ -31,6 +31,24 @@ class Settings(BaseSettings):
     # 但丢弃可让该路立即处理下一最新帧, 避免延迟累积与队列雪崩)
     infer_max_queued: int = 4
 
+    # ---- GPU 批量推理 (app/ai/gpu_engine.py + app/ai/model_pool.py) ----
+    # 背景: 32 路各自 new 一个 YOLO 实例 = 32 个 CUDA context 挤在 0 号卡, 单帧推理被
+    # 拖到 1.2s; 改为每卡一个模型实例 + 批内多路 track, context 降到卡数, 且每实例
+    # 由单一 OS 线程持有 (context 亲和性稳定).
+    infer_mode: str = "auto"           # auto|gpu_batch|legacy; auto=CUDA可用且自检通过则批量
+    infer_gpu_devices: str = ""        # 参与推理的卡号 "0,1,2,3,4,5,6,7"; 空=全部可见卡
+    infer_slots_per_gpu: int = 8       # 每卡槽位(设备数)上限; 超出该设备降级 legacy 独立实例
+    infer_imgsz: int = 960             # 推理输入尺寸(短边); 原图更小则用原图
+    infer_half: bool = True            # FP16 半精度 (仅 CUDA 生效)
+    infer_batch_timeout_ms: int = 40   # 组批等待窗口 (毫秒): 凑批上限时长, 单路时即纯延迟
+    infer_queue_max_batches: int = 2   # 每卡待处理批次数上限; 超限丢帧 (EngineBusy)
+
+    # ---- 解码侧采样 (app/ai/stream.py) ----
+    # 背景: 读帧线程按源帧率全速 read() 后 96% 被覆盖丢弃, 解码与颜色转换全是白做.
+    # 仅 gpu_batch 模式下发 (legacy 回退/CPU 部署不下发, 与优化前行为一致).
+    decode_max_fps: float = 8.0        # >0 按此帧率 grab/retrieve 节流; 0=不限速(旧行为)
+    decode_max_short_side: int = 0     # >0 请求解码端缩放到该短边; 0=不缩放(旧行为)
+
     # ---- 时序预测 ----
     chronos_model: str = "models"  # 本地 Chronos-2 模型目录
     prediction_interval_minutes: int = 15  # N 分钟预测间隔
@@ -98,6 +116,10 @@ class Settings(BaseSettings):
 
     # ---- 安全 ----
     cors_origins: str = "*"  # 允许的跨域来源, 逗号分隔; 生产环境应配置具体前端域名
+
+    # ---- Mock 数据模拟 (无真实视频流时验证前后端全链路) ----
+    # true: AI 服务不拉流不推理, 由 mock_simulator 按真实车流/人流规律生成事件
+    mock_enabled: bool = False
 
     # ---- WVP-GB28181 对接 ----
     wvp_enabled: bool = False  # 总开关; False 时跳过自动同步与流地址刷新

@@ -71,17 +71,17 @@ def main():
     # 帧 6-9: 漏检 4 帧, 无 Track 输出; tracker 侧 miss 累计
     for fid in range(6, 10):
         for tid in list(tracker.track_history):
-            tracker._miss_count[tid] = tracker._miss_count.get(tid, 0) + 1
+            tracker._state._miss_count[tid] = tracker._state._miss_count.get(tid, 0) + 1
         t += 0.04
     # 缝隙中车从 x=470 行至 x=630 (第 8-9 帧之间跨过线, 真实跨越发生在此)
 
     # 帧 11: 新 ID=2 重现于 x=630 (线内侧) -> 缝合
-    stitched = tracker._stitch_history(2, "car", [570.0, 510.0, 690.0, 570.0])
+    stitched = tracker._state._stitch_history(2, "car", [570.0, 510.0, 690.0, 570.0])
     assert stitched, "缝合失败: 旧轨迹未被接续"
     tracker.track_class[2] = "car"
-    tracker._stitched_from.add(1)
+    tracker._state._stitched_from.add(1)
     tracker.track_history.pop(1, None)
-    tracker._miss_count.pop(1, None)
+    tracker._state._miss_count.pop(1, None)
     # 拼接历史: 旧轨迹 5 点 (末点 x=470) + 新位置 -> ID=2 当前历史
     full_hist = stitched + [[630.0, 540.0]]
     tracker.track_history[2] = [list(p) for p in full_hist]

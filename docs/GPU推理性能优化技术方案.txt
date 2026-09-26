@@ -1,0 +1,393 @@
+# GPU 推理性能优化技术方案
+
+> 目标：系统性解决 CUDA context 频繁切换、异步实例化资源管理缺失、8 卡负载不均衡、4K 流推理前采样缺失、解码帧无意义丢弃五类问题，把计数从"实际严重不符"拉回可信区间。
+
+---
+
+## 一、问题定位（基于 2026-09-24 真实运行日志）
+
+| 编号 | 问题 | 现场证据 | 代码根因 |
+|---|---|---|---|
+| P1 | CUDA context 频繁切换 | `推理=1214ms/帧`（yolo11n@4090 应 <20ms） | `DevicePipeline.__init__` 每路 new 一个 `ByteTracker`（tracker.py#L167），32 路 = 32 份模型权重 + 32 个 CUDA context，全部落 0 号卡 |
+| P2 | 异步实例化资源管理缺失 | `_MODEL_LOAD_LOCK` 串行化仍卡死；设备删除后显存不回收 | `_ensure_loaded` 在推理线程池 worker 内懒加载（tracker.py#L153-L168），CUDA context 建在池线程上；无 `release()`，model 生命周期绑在 pipeline 上 |
+| P3 | GPU 负载不均衡 | `torch.cuda.device_count()=8`，但 8 卡只有 0 号卡有负载 | compose 预留 8 卡，代码无任何 `device=` 指定，ultralytics 默认 0 号卡 |
+| P4 | 4K 流推理前无高效采样 | `帧尺寸: 4096x2336`（14 路）、`2560x1440`（4 路） | 全分辨率帧直送推理，`letterbox`/resize 在推理路径上每次重做 |
+| P5 | 解码帧被无意义丢弃 | `解码=712 丢帧=687(96%)`，读帧线程按源帧率 25fps 全量解码后覆盖丢弃 | `_FrameReader._drain` 全速 `read()`，无帧率节流、无解码端降分辨率 |
+
+**导致的业务后果**：有效处理 fps 0.82 → 帧间隔 1.2s → BoT-SORT 关联失败、track 频繁断裂（`拒绝: 历史不足=652`）→ 跨线事件 37 分钟仅 120 条 → **计数与实际严重不符**。
+
+---
+
+## 二、性能目标（量化验收线）
+
+| 指标 | 现状 | 目标 | 测量方式 |
+|---|---|---|---|
+| 模型实例 / CUDA context 数 | 32 | 8（每卡 1） | `/health` 的 `infer.engines[].model_loaded` 计数 |
+| 单路有效处理 fps | 0.82 | ≥ 8 | `运行统计` 日志 `处理fps` |
+| 单批推理耗时（8 路） | — | ≤ 150ms | `运行统计` 新增 `推理ms/批` |
+| 单路帧间隔 | 1.2s | ≤ 130ms | 由 `处理fps` 反推 |
+| 处理侧丢帧率 | 96% | ≤ 5% | `运行统计` 日志 `丢帧(%)`（分母=采样帧，只计"采样到但没处理完"的帧）；同行 `节流丢弃` 是设计内节流 |
+| 8 卡负载均衡 | 仅 0 号卡 | 各卡设备数差 ≤ 1，显存偏差 ≤ 20% | `nvidia-smi --query-gpu=index,memory.used,utilization.gpu --format=csv` |
+| 计数准确率 | 严重偏低 | 与人工核对偏差 ≤ 5% | 人工计数 vs `COUNT_EVENT_LOG=true` 事件导出 |
+| **CPU 占用（ai 容器）** | **未测量** | **≤ 70% × 容器可见核数** | `docker stats --no-stream ai` 的 `CPU%` 与 `os.cpu_count()` 对照（`docker stats` 的 `CPU%` 以单核为 100%，故上限 = 核数 × 100%） |
+| 稳定性 | 出现过 CUDA 卡死 | 连续 2h 无挂起、显存无增长 | `torch.cuda.memory_allocated` 纳入 `/health`，压测观察 |
+
+**不变量（回归红线）**：同一段视频、同一 `imgsz` 下，`legacy` 模式与 `gpu_batch` 模式的越线事件数必须完全一致（±0）。这是"重构不改行为"的硬约束。
+
+> **丢帧口径（已在 `_report_stats` 中拆分为三项，不要混看）**：
+> - `节流丢弃` = Δgrab − Δ采样：解码侧按 `DECODE_MAX_FPS` 主动不 `retrieve` 的帧。属**设计内行为**（源 25fps + `DECODE_MAX_FPS=8` → ≈68%），它恰恰是"解码侧省下来了"的证据，不是故障；
+> - `丢帧` = Δ采样 − 处理帧：处理慢于上游，帧被最新帧覆盖丢弃 → 跨线动作可能整段落进帧缝里 → **漏计**。这才是验收项（≤5%）；优化前那 96% 属这一类；
+> - `推理饱和丢帧`：推理池满主动丢弃（`EngineBusy`），单列定位。
+>
+> 分母取采样帧数后，`legacy`（无节流 → `节流丢弃=0`）与 `gpu_batch` 口径一致，**优化前后的数值可直接对比**。`处理fps` 同理：它只应被 `DECODE_MAX_FPS` 限制，不应被推理能力限制。
+>
+> 现场判读与逐级排查步骤见 GPU服务器离线排查方案.md 的 §6.2。
+>
+> **CPU 口径（易误读，务必分清）**：解码侧节流 `decode_max_fps` **只省下颜色转换/拷贝/resize，不省解码**——`grab()` 仍按源帧率（如 25fps）完整解码。所以 32 路 4K 的**解码开销优化前后完全相同**，必须单列一条 CPU 验收线，不能假定"节流生效了 CPU 就没问题"。机理见 4.4 ①。
+
+---
+
+## 三、总体架构
+
+```
+                    ┌─────────────────────── ModelPool (app/ai/model_pool.py) ───────────────────────┐
+                    │  initialize() 探测 CUDA → 每卡起 1 个 GpuInferEngine → 自检 → 失败整体降级 legacy │
+                    │  acquire(device_id) 最少负载卡 + 槽位   /   release(device_id)   /  snapshot()    │
+                    └───────────────────────────────────────────┬─────────────────────────────────────┘
+                                                                │ Lease(gpu_id, slot)
+   DevicePipeline(32 路, asyncio 协程)                           ▼
+   ┌─────────────────────────────┐              ┌────────────────────────── GpuInferEngine ──────────────────┐
+   │ stream_frames                │              │  专用单线程 executor (max_workers=1)                       │
+   │  ├ grab/retrieve 帧率节流     │  submit()    │  ├ asyncio.Queue 待处理项 (device_id, frame, scale, fut)    │
+   │  ├ 解码端降分辨率(gpu_batch)  │ ───────────▶ │  ├ collector: 按 shape 分组, 凑满本卡设备数/超时派发       │
+   │  └ reader 线程内预 resize     │              │  └ model.predict(frames, imgsz, half, device=cuda:{id})   │
+   │     到 infer 尺寸 (gpu_batch) │              │     + 每路 tracker.update(det, frame)                       │
+   ├─────────────────────────────┤              └───────────────────────────┬────────────────────────────┘
+   │ TrajectoryState(每路独立)     │ ◀── RawTrack[] (已还原到流原始坐标) ───────┘
+   │  历史/速度/轨迹缝合/类别       │
+   ├─────────────────────────────┤
+   │ LineCrossingCounter (不改)    │
+   └─────────────────────────────┘
+```
+
+**核心决策**
+1. **每卡一模型实例 + 批量多路 track**：8 实例替代 32 实例，context 从 32 降到 8，且每实例固定由单一 OS 线程持有（context 亲和性稳定）。
+2. **Tracker 状态与模型解耦**：**不使用** `model.track()` / `predictor.trackers`（"batch 内第 i 路 ↔ `trackers[i]`"是隐式约定，设备增删还得重建数组）。改为：模型只跑 `predict()` 出检测，**每路设备各持一个官方 tracker 实例**（`_build_tracker` 按 `bytetrack.yaml` 构造），由引擎在推理线程内显式调用 `tracker.update(det, frame)`；轨迹历史/速度/缝合逻辑抽离为独立的 `TrajectoryState`（纯 Python，每路一份），模型只负责"检测"。
+3. **坐标体系统一**：全链路（counter / events / WS / 前端）统一使用**流原始分辨率**坐标；`infer → stream` 的缩放还原在引擎出口完成一次，下游零感知。
+4. **可一键回滚**：`infer_mode: auto | gpu_batch | legacy`，`legacy` 即当前行为，无需改代码即可回退。
+
+---
+
+## 四、核心模块设计
+
+### 4.1 模型池 `app/ai/model_pool.py`（新增）
+
+```python
+@dataclass(frozen=True)
+class Lease:
+    gpu_id: int
+    slot: int
+    engine: "GpuInferEngine"
+
+class ModelPool:
+    mode: Literal["gpu_batch", "legacy"]
+    async def initialize(self) -> None      # lifespan 内调用, 服务对外前完成
+    def acquire(self, device_id: str) -> Optional[Lease]   # legacy 返回 None
+    def release(self, device_id: str) -> None
+    async def shutdown(self) -> None
+    def snapshot(self) -> dict              # 供 /health
+```
+
+- **加载时机**：`lifespan` 启动阶段一次性完成（`await asyncio.to_thread(engine.start)`），不再在推理 worker 内懒加载 → 消除 P2 的"池线程内建 CUDA context"路径。
+- **设备选卡（负载均衡，解决 P3）**：`min(engines, key=lambda e: (len(e.slots), e.gpu_id))`，即最少负载优先、同负载取小卡号，保证 32 路在 8 卡上严格均摊（每卡 4 路）。
+- **槽位耗尽**：某卡满 `infer_slots_per_gpu`（默认 8）时退而选次少负载卡；全部耗尽则该设备**降级为 legacy 独立实例**并打 WARNING（8×8=64 ≥ 32 路，正常不触发）。
+- **降级条件**（任一命中即整体 `legacy`，并打醒目 WARNING）：
+  - `infer_mode=legacy`；
+  - `torch.cuda.is_available()==False`（CPU 部署，满足兼容要求）；
+  - 可见卡数为 0；
+  - 引擎自检失败（见 4.2）。
+- **释放**：`shutdown()` → 逐引擎 `model.to("cpu")` 后置空 → `torch.cuda.empty_cache()`；初始化中途失败的引擎也会被单独 `stop()` 回收（不留半成品显存）；`release(device_id)` 仅释放槽位并丢弃该路 tracker。
+
+### 4.2 批量推理引擎 `app/ai/gpu_engine.py`（新增）
+
+```python
+@dataclass
+class RawTrack:
+    track_id: int; class_id: int; class_name: str; bbox: list[float]; confidence: float
+
+class EngineBusy(Exception): ...          # 对应现有 InferBusy 语义
+
+class GpuInferEngine:
+    def __init__(self, gpu_id, *, model_path, imgsz, half, batch_timeout_s,
+                 queue_max_batches, slots, tracker_cfg) -> None: ...
+    async def start(self) -> None
+    def assign(self, device_id) -> int          # 返回稳定槽位号
+    def unassign(self, device_id) -> None       # 丢弃该路 tracker 并归还槽位
+    async def submit(self, device_id, frame, scale) -> list[RawTrack]   # 可能抛 EngineBusy
+    async def stop(self) -> None
+```
+
+**执行线程模型（解决 P1 的 context 亲和性）**
+- 每引擎持有 `ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"gpu{gpu_id}-infer")`。
+- 模型与各路 tracker 实例只在该线程内被触碰 → 单引擎内不存在跨线程 context 切换；
+- 引擎之间线程独立 → 8 卡真并行。
+
+**组批调度（collector 协程）**
+```
+loop:
+  req = await queue.get()                          # 无超时等待
+  group = pending[req.frame.shape]                 # 按形状分组 (同批 letterbox 后必须同形状)
+  group.append(req)
+  if len(group) >= dispatch_size: dispatch(group)  # dispatch_size = 本卡已分配设备数
+  elif now >= deadline: dispatch(group)            # 兜底: 等满 batch_timeout_ms 即派发
+```
+- batch 内元素 = `(device_id, frame, scale)`，**不含空槽位**（batch 大小按该卡实际在线设备数变化，无 padding 浪费）。
+- 每路同一时刻只允许 1 个在飞请求（pipeline 是 await 串行），批内每项直接对应自己的 `device_id → tracker`，无索引耦合。
+- 派发阈值取"本卡已分配设备数"而非槽位上限：32 路 / 8 卡时每卡 4 路，按槽位上限（8）判定会永远凑不满，退化为纯超时批（均批 ≈ 1~4）。
+- 分形状成组：同一次 `predict` 的多图 letterbox 后必须同形状；不同分辨率各自成组，不 padding 到统一画布（把 16:9 塞进正方形要多算约 76% 像素）。
+
+**admission control（保 P5 语义）**
+- `queue.qsize() >= slots * queue_max_batches` 时立即 `raise EngineBusy()`，pipeline 丢本帧取下一最新帧，与现有 `InferBusy` 完全同义，统计口径保留。
+
+**tracker 生命周期（关键正确性点）**
+- 检测与关联分两步：`model.predict(frames, imgsz, half, device, conf, iou, verbose=False)` 出检测 → 按路取第 i 个结果 → 喂该路自己的官方 tracker 实例 `tracker.update(det, frame)`；
+- 传入检测显式拼为 `(N, 6) float32` 的 `[x1, y1, x2, y2, conf, cls]`；某路无可检目标时**不调用** `update()`（与官方 `on_predict_postprocess_end` 的空结果分支一致，避免跟踪器收空数组进入异常状态）；
+- `update()` 返回 `[x1, y1, x2, y2, id, conf, cls, idx]`，取前 7 列；
+- **设备增删不影响其它路**：`assign` 给该路新建 tracker、`unassign` 丢弃；不存在"重建 tracker 数组"、也不会有整卡 ID 重置问题（因此无需重建防抖参数）。
+
+**自检 `_selftest()`（版本漂移安全阀）**
+启动时用 dummy 帧 + 注入一个稳定检测（`cls=2 / conf=0.9`）验证官方跟踪器的 API 表面：
+1. 跟踪器可按 `bytetrack.yaml` 构造；
+2. `update()` 返回列数 ≥ 7；
+3. **列语义正确**：`row[6] == 2`（类别）且 `0 < row[5] <= 1`（置信度）——列序一旦漂移会把置信度当类别喂给下游，静默污染计数；
+4. 第二帧轻微位移后仍为同一 `track_id`（关联稳定）。
+任一步失败 → 抛 `TrackerApiError` → ModelPool 整体降级 `legacy`，并在 `/health` 标注 `selftest_failed`。这样 ultralytics 升级破坏 API 时不会静默错计（`requirements.txt` 另锁 `ultralytics<9` 作为第一道防线）。
+
+**推理参数**
+- `imgsz=960`（默认；原图短边更小时取原图尺寸），`half=True`（仅 CUDA 生效），`device=f"cuda:{gpu_id}"`。
+- `conf`/`iou` 每批从 `business_rules.yaml` 的 `tracking.*`、`imgsz` 从 `inference.imgsz` 读取（均可热重载）。
+- 坐标还原：`_run_batch` 返回前对每个 `RawTrack.bbox` 乘该路的 `scale = stream_size / frame.shape`（逐轴计算，兼容解码端横向拉伸），`RawTrack` 一律为**流原始分辨率坐标**。
+
+### 4.3 轨迹状态抽离 `app/ai/traj_state.py`（新增）+ `tracker.py` 改造
+
+**迁移范围**（从 tracker.py 原样搬移，逻辑不变）：`track_history`、`track_class`、`_miss_count`、`_miss_grace`、`_stitched_from`、`_current_track_ids`、`frame_id`、`_stitch_*` 参数、`_stitch_history`、`_calculate_velocity`、`_cleanup_history`。
+
+```python
+class TrajectoryState:
+    def __init__(self, camera_type=None, max_history_length=30): ...
+    def apply(self, raw_tracks: list[RawTrack]) -> TrackResult: ...   # 缝合 + 历史 + 速度
+    def get_track_history(self, track_id) -> list: ...
+```
+
+**`ByteTracker` 保留职责**
+- `track(frame)`：`legacy` / CPU / 离线工具路径（本地模型 + `TrajectoryState`），行为与现状完全一致；
+- `track_from_raw(raw_tracks)`：`gpu_batch` 路径，只做 `TrajectoryState.apply`；
+- **兼容属性**：`track_history` / `track_class` 以 property 代理到内部 `TrajectoryState`，保证 `scripts/zbny-test-track-stitching.py`、`scripts/zbny-test-e2e-fast-car.py` 直接读写这两个字段的用法不被破坏。
+
+### 4.4 解码侧采样与缩放 `app/ai/stream.py` 改造（解决 P4、P5）
+
+**① 帧率节流（核心收益）**
+```
+while not stop:
+    ok = cap.grab()                    # 解封装 + 完整解码 (不产生 socket 积压; 不做 yuv→BGR 转换)
+    if not ok: failed = True; return
+    with lock: grabbed += 1            # 每个 grab 计数 (含被节流丢弃的帧, 用于算"节流丢弃")
+    if now - last_kept >= 1 / decode_max_fps:
+        ok, frame = cap.retrieve()     # 仅采样时刻做 sws_scale 转换 + preprocess
+        with lock: store(frame); seq += 1
+        last_kept = now
+```
+- 仍持续 `grab()` → 不产生 socket 积压（保持现有"不触发 ZLM send timeout"的设计意图）。**代价是解码 CPU 省不掉**（见下条）；
+- **CPU 语义（易误读，务必分清）**：`grab()` = 解封装 + **完整解码**（H.264/H.265 → YUV 帧缓冲），`retrieve()` = `sws_scale` YUV→BGR + 拷贝 + preprocess。所以节流**只省颜色转换/拷贝/resize，不省解码**——解码仍按源帧率全量进行，**32 路 4K 的解码开销优化前后完全相同**；
+- `retrieve` 次数从 ~23/s 降到 `decode_max_fps`（默认 8）→ 单路颜色转换与 preprocess 开销下降（`运行统计` 里的 `节流丢弃` 就是这一部分）；
+- **不能改成"只在采样时刻 `grab()`"**：不持续 grab 会让 FLV socket 积压，被 ZLM 判 send timeout 周期性断流；
+- `decode_max_fps=0` 时退化为当前行为（不限速）；
+- **仅 gpu_batch 下发**（`stream_frames(decode_tuning=...)`）：legacy 回退 / CPU 部署完全不碰解码端帧率与分辨率，`INFER_MODE=legacy` 一键回滚即等价于优化前行为。
+
+**② 解码端降分辨率（可选，默认 0=关闭）**
+- 首帧按原始分辨率解出 → 记录 `stream_size`（全链路坐标基准，**不因缩放而改变**）；
+- 若 `decode_max_short_side > 0` 且短边大于目标：按比例算 `f`，`cap.set(CAP_PROP_FRAME_WIDTH/HEIGHT, 原尺寸*f)`（**按比例同时设置两个维度**，避免变形）；
+- **CPU 语义**：`cap.set(WIDTH/HEIGHT)` 只改 `sws_scale` 的**目标**尺寸，**解码器仍出原始分辨率**。所以它省的是转换/拷贝/内存带宽，**不省解码**——要真正压低解码开销，只能换更小的源（1080p 子码流）或硬件解码（NVDEC），见第八节风险表；
+- 读下一帧校验实际尺寸：未生效则记 INFO 日志并**回退为原始分辨率**（不做 CPU 侧 resize，避免与"坐标基准"两套缩放叠加）；
+- 生效时处理侧按「实际帧尺寸 → `stream_size`」现算逐轴系数还原（4.2 已支持）；legacy 不下发缩放，帧尺寸即 `stream_size`，无需还原。
+
+**③ 帧包**
+```python
+@dataclass
+class FramePacket:
+    frame: np.ndarray          # 已完成推理前 resize（若配置了 preprocess）
+    idx: int                   # 已产出(被处理)帧序号
+    sampled: int               # 本连接内累计采样帧数（retrieve 成功后产出）
+    grabbed: int               # 本连接内累计 grab 帧数（含被节流丢弃、未 retrieve 的帧）
+    stream_size: tuple[int, int]
+```
+- 两个计数器都是**当前连接内累计值**，断流重连后归零，所以统计侧必须取窗口增量：
+
+  | 日志字段 | 算式 | 性质 |
+  |---|---|---|
+  | `节流丢弃` | Δgrab − Δ采样 | 设计内（`decode_max_fps` 主动不 `retrieve`）；`legacy` 无节流时恒为 0 |
+  | `丢帧` | Δ采样 − 处理帧数 | **验收项**（≤5%），分母为 Δ采样 |
+  | `推理饱和丢帧` | 推理池满主动丢（`EngineBusy`） | 单列定位 |
+
+  `idx` 是**跨连接**的产出计数，不能与 `grabbed`/`sampled` 直接相减。
+- `stream_frames(..., preprocess=callable)`：`preprocess` 在 **reader 线程内**执行（例如 resize 到 infer 尺寸），把 CPU 开销移出事件循环线程与单卡推理线程 —— 这是 P4 的关键，32 路各自并行、互不串行。
+
+### 4.5 pipeline / service 接入 `app/ai/pipeline.py`、`app/ai/service.py`
+
+**pipeline**
+- `__init__(..., lease: Optional[Lease], pool: Optional[ModelPool])`：`lease` 非空走 `gpu_batch`，否则走现有 `legacy`（本地 `ByteTracker` + `inference_scheduler`）。
+- `_process_frame`：
+  - `counter.set_frame_size(*packet.stream_size)`（保持流原始分辨率语义，`min_motion`/比值阈值口径不变）；
+  - 提交 `engine.submit(device_id, packet.frame, scale)`；`except EngineBusy` → `self._infer_busy_drops += 1; return`（现有语义）；
+  - `track_result = self.tracker.track_from_raw(raw_tracks)` → 后续计数/上报/WS 全部不变。
+  - legacy 分支（`lease=None`）帧尺寸即流原始分辨率（不下发解码端缩放、无预降采样），跟踪器内部历史/速度与计数器基准同一坐标系，无需坐标还原。
+- `_report_stats` 新增字段：`模式=gpu_batch/legacy`、`卡=gpu_id`、`批=N`、`组批等待=Xms`、`推理=Xms/批`、`预处理=Xms`；并把窗口丢弃拆成三项：`节流丢弃`（Δgrab−Δ采样，设计内）、`丢帧`（Δ采样−处理帧，验收项 ≤5%）、`推理饱和丢帧`（`EngineBusy`）。`grab帧`/`采样帧`/`丢帧` 统一为**窗口值**，便于现场直接对齐目标。
+
+**service**
+- `lifespan`：`await model_pool.initialize()` → 日志打印模式、每卡加载耗时与显存；关闭时 `await model_pool.shutdown()`。
+- `register`：`lease = model_pool.acquire(dev.device_id)`，传给 `DevicePipeline`；`stop_device` → `model_pool.release(...)`（修复 P2 的显存不回收）。
+- `/health` 扩展（对运维可见，不影响前端）：
+```json
+{"infer": {"mode": "gpu_batch", "selftest_failed": false,
+  "engines": [{"gpu_id": 0, "devices": 4, "slots": 8, "model_loaded": true,
+               "vram_mb": 812, "queue": 0, "drops_busy": 0, "batches": 1523}]}}
+```
+
+### 4.6 配置项（`app/common/config.py` + `configs/business_rules.yaml` + `.env.gpu`）
+
+`config.py` 新增（默认值即安全值，CPU 部署自动 legacy）：
+
+```python
+# ---- GPU 批量推理 ----
+infer_mode: str = "auto"              # auto|gpu_batch|legacy; auto=CUDA可用且自检通过则 gpu_batch
+infer_gpu_devices: str = ""           # 参与推理的卡号, 如 "0,1,2,3,4,5,6,7"; 空=全部可见卡
+infer_slots_per_gpu: int = 8          # 每卡槽位(设备数)上限, 超出该设备降级 legacy
+infer_imgsz: int = 960                # 推理输入尺寸(短边); 原图更小则用原图
+infer_half: bool = True               # FP16 (仅 CUDA)
+infer_batch_timeout_ms: int = 40      # 组批等待窗口
+infer_queue_max_batches: int = 2      # 每卡待处理批次数上限, 超限丢帧(EngineBusy)
+# ---- 解码侧采样 (仅 gpu_batch 下发; legacy/CPU 部署不下发, 即优化前行为) ----
+decode_max_fps: float = 8.0           # >0 按此帧率 grab/retrieve 节流; 0=不限(现行为)
+decode_max_short_side: int = 0        # >0 请求解码端缩放到该短边; 0=不缩放
+```
+
+`business_rules.yaml` 增加 `inference:` 段承载**可热重载**的部分：`imgsz`、`batch_timeout_ms`、`decode_max_fps`（改这些无需重启，下一批/下次重连生效；`infer_mode`/卡号等结构性参数仍需重启）。
+
+`.env.gpu` 显式写入（GPU 现场值）：
+```
+INFER_MODE=auto
+INFER_GPU_DEVICES=0,1,2,3,4,5,6,7
+INFER_SLOTS_PER_GPU=8
+INFER_IMGSZ=960
+INFER_HALF=true
+INFER_BATCH_TIMEOUT_MS=40
+DECODE_MAX_FPS=8
+DECODE_MAX_SHORT_SIDE=1280
+```
+
+`docker-compose.gpu.yml` 的 `ai.environment` 透传上述变量（沿用现有 `${VAR:-default}` 风格）；`Dockerfile.gpu` 头注释更新"多卡分片已由 model_pool 实现，无需多容器"。
+
+---
+
+## 五、改动清单
+
+| 文件 | 类型 | 内容 |
+|---|---|---|
+| `app/common/config.py` | 改 | 新增 4.6 全部配置项 |
+| `configs/business_rules.yaml` | 改 | 新增 `inference:` 热重载段 |
+| `app/ai/traj_state.py` | **新增** | `TrajectoryState`（从 tracker.py 抽离） |
+| `app/ai/gpu_engine.py` | **新增** | `GpuInferEngine` + `RawTrack` + `EngineBusy` + 自检 |
+| `app/ai/model_pool.py` | **新增** | `ModelPool` + `Lease` + 降级/释放/快照 |
+| `app/ai/tracker.py` | 改 | 抽离后瘦身；保留 `track()`、新增 `track_from_raw()`、`track_history`/`track_class` property 代理 |
+| `app/ai/pipeline.py` | 改 | 接入 lease/engine；`FramePacket`；统计字段扩展 |
+| `app/ai/stream.py` | 改 | grab/retrieve 节流、解码端缩放、`FramePacket`(sampled/grabbed)、`preprocess` 钩子、`decode_tuning` 门控 |
+| `app/ai/service.py` | 改 | lifespan 初始化/释放、`/health` 扩展、注册/删除联动 pool |
+| `app/ai/inference_scheduler.py` | 不改 | 保留给 legacy/CPU 路径 |
+| `app/ai/counter.py` 及以下 | 不改 | 计数逻辑零改动 |
+| `requirements.txt` | 改 | 锁 `ultralytics>=8.3.0,<9.0.0`（跟踪器输出列序被引擎与自检依赖） |
+| `docker-compose.gpu.yml`、`.env.gpu`、`Dockerfile.gpu` | 改 | 环境变量与注释 |
+| `scripts/start_all_gpu.sh` | 改 | 新增 stage5 批量推理与多卡可见性验证 |
+| `scripts/zbny-bench-gpu-infer.py` | **新增** | 基准脚本：逐级 1→8→32 路吞吐/延迟/均批/逐卡峰值显存 |
+| `scripts/zbny-test-track-stitching.py`、`zbny-test-e2e-fast-car.py` | 改 | 私有状态迁到 `TrajectoryState` 后同步访问路径（回归用例） |
+
+---
+
+## 六、实施步骤
+
+1. **配置与开关**（config.py / business_rules.yaml / .env.gpu / compose / Dockerfile 注释）——此时所有新开关默认走 legacy，行为不变。
+2. **抽离 `TrajectoryState`**（纯重构）。跑 `scripts/zbny-test-track-stitching.py`、`scripts/zbny-test-e2e-fast-car.py`、`tool/video_processor.py` 三段离线验证，确认事件数与改动前一致。
+3. **新增 `gpu_engine.py`**（引擎、组批调度、每路 tracker 实例、自检、坐标还原）。
+4. **新增 `model_pool.py`**（加载/释放/最负载分配/降级）。
+5. **接入 pipeline 与 service**（lease 路径 + legacy 回退 + `/health`）。
+6. **改造 `stream.py`**（节流 + 可选缩放 + 预 resize 钩子，且只在 gpu_batch 下发），把 resize 移出事件循环。
+7. **扩展 `start_all_gpu.sh`**：在现有 stage1~4 后追加 stage5/6 —— 批量引擎自检与多卡可见性、每卡设备数与显存；失败时按原有分层给出排查命令。
+8. **基准与调参**：用 `zbny-bench-gpu-infer.py` 逐级加载 1→8→32 路，按第二节目标调 `infer_imgsz`/`batch_timeout_ms`/`decode_max_fps`。
+
+---
+
+## 七、验证方法
+
+### 7.1 不变量回归（必须先过）
+同一段录制视频、同一 `imgsz`：
+- `legacy` 路径跑 `tool/video_processor.py`（离线工具固定用本地模型 + `TrajectoryState`，不读 `INFER_MODE`）→ 记录事件数与逐事件交点；
+- `gpu_batch`（单卡单路）跑同一段 → **事件数与交点须逐条一致**。
+任何差异都说明批量路径改变了语义，先修不允许上生产。
+说明：`tool/video_processor.py` 单进程串行解码，与在线 pipeline 的截帧口径不同（在线按固定时机取帧），因此本项用于校验"轨迹/计数语义"，不用于比对逐帧时间点。
+
+### 7.2 计数准确性
+`COUNT_EVENT_LOG=true` 导出 10 分钟真实流的逐事件明细，与人工计数核对，偏差 ≤ 5%；同时确认 `拒绝: 历史不足` 次数相对现状（652/窗口）显著下降——这是 track 断裂减少的直接证据。
+
+### 7.3 性能指标
+- 在线：`运行统计` 日志的 `处理fps` / `丢帧(%)` / `推理ms/批` / `批=N` 达标（第二节表格）；
+- 离线压测：`zbny-bench-gpu-infer.py` 输出 1/8/32 路的吞吐与 P50/P95 延迟，验证线性扩展与无排队雪崩。
+
+### 7.4 负载均衡
+```bash
+nvidia-smi --query-gpu=index,memory.used,utilization.gpu --format=csv -l 5
+```
+核对：8 卡设备数差 ≤1、显存偏差 ≤20%、无单卡 100% 而其余空闲。
+
+### 7.5 稳定性
+连续运行 ≥2h：无 CUDA 挂起（`start_all_gpu.sh` 分层检查可复跑）、无管道异常重启激增、`/health` 的 `torch.cuda.memory_allocated` 无单调增长、设备反复增删 20 次后显存回到基线。
+
+### 7.6 GPU 现场首验（沿用现有分层思路）
+`bash scripts/start_all_gpu.sh` 后检查 stage1~6 全通过，且日志出现 `推理模式=gpu_batch 引擎数=8`。
+
+### 7.7 CPU 与解码侧（本次优化的盲区，必须单独观察）
+7.1~7.6 只看 GPU 与计数，**解码侧 CPU 开销不在其中**——节流只省 `retrieve`，不省 `grab` 的解码（见 4.4 ①）。所以单列：
+
+```bash
+COMPOSE="docker compose --env-file .env.gpu -f docker-compose.gpu.yml"
+
+# 容器可见核数（CPU% 的上限 = 核数 × 100%）
+$COMPOSE exec -T ai python -c "import os;print('容器可见核数', os.cpu_count())"
+
+# 实时占用（CPU% 以单核为 100%：8 核打满 = 800%）
+docker stats --no-stream ai
+
+# preprocess（reader 线程内 CPU resize）耗时是否稳定
+$COMPOSE logs --since 5m ai | grep -o "预处理=[0-9.]*ms" | sort -u
+```
+
+判读：`CPU%` 超过 `100% × 核数` 的 **70%** → 解码/前处理已是瓶颈，`处理fps` 被 CPU 限制而非推理能力（第二节目标表最后一行）。两条处置路径，按性价比排序：
+
+1. **AI 改拉 1080p 子码流**（首选，不动代码）：摄像头通常主/子码流并存，AI 用子码流、主码流照旧录像。解码像素量降 ~4x（4096×2336 → 1920×1080），而推理输入本就是 960 短边 → 精度近乎无损。只改拉流地址；
+2. **NVDEC 硬解**（根治但受限）：`cv2.CAP_PROP_HW_ACCELERATION`，需 OpenCV 带 FFmpeg hwaccel（pip 版通常不带）→ 要重建镜像；8 卡 NVDEC 还需分卡使用，改动面大且须实测。
+
+---
+
+## 八、风险与回滚
+
+| 风险 | 影响 | 缓解 |
+|---|---|---|
+| ultralytics 升级改动官方跟踪器 API/输出列序 | 批量路径静默错计 | `requirements.txt` 锁 `<9`；`_selftest()` 启动校验列数与列语义 + 失败整体降级 legacy + `/health` 标注 + 7.1 不变量回归 |
+| 设备增删导致跟踪状态变化 | 该路 ID 重来，短暂漏计 | 每路独立 tracker，增删只影响本路；`unassign` 丢弃状态，不留给下一路 |
+| 组批等待引入额外延迟 | 单路延迟 +≤40ms | `batch_timeout_ms` 可热重载下调；单路场景自动只等窗口不凑批 |
+| 解码端 `cap.set` 不生效 | 降分辨率无效 | 读帧后校验实际尺寸，未生效则回退原始分辨率并记 INFO（legacy 直接不下发） |
+| 解码侧节流改变丢帧口径 | 现场误判"丢帧率" | 仅 gpu_batch 下发；统计拆出 `节流丢弃`（设计内）/`丢帧`（验收项 ≤5%），分母为采样帧；`legacy` 无节流时两者口径一致（见第二节口径说明） |
+| 解码侧节流被误读成"省了解码" | 误判 CPU 余量、低估现场负载 | 4.4 ① 明确 `grab()` 仍按源帧率全量解码；第二节单列 CPU 验收线；7.7 单独观察 |
+| **32 路 4K 解码吃满 CPU** | `处理fps` 被 CPU 卡住、丢帧升高（此时调 GPU 参数无效） | 盯 `CPU% ≤ 70% × 核数`；超标则 **AI 改拉 1080p 子码流**（解码像素量降 ~4x，推理输入本就 960 短边，精度近乎无损，只改拉流地址）；必要时评估 NVDEC 硬解（需重建镜像，改动面大） |
+| 32 路挤爆某张卡 | 该卡排队/丢帧 | 最少负载分配 + 槽位上限 + `EngineBusy` 丢帧语义 + `/health` queue 可观测 |
+| 新方案现场表现不及预期 | 计数中断 | **`INFER_MODE=legacy` 一键回退**（改 `.env.gpu` 后 `docker compose up -d ai`，无需改代码/重建镜像） |
+
+**回滚路径**：`INFER_MODE=legacy` → 完全回到当前实现（含 `inference_scheduler.py` 线程池路径），新旧代码同在，无需回退版本。

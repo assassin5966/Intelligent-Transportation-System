@@ -20,7 +20,7 @@
 </template>
 
 <script setup>
-import { onMounted, onBeforeUnmount } from 'vue'
+import { onMounted, onBeforeUnmount, watch } from 'vue'
 import { useCardZoom } from '../composables/useCardZoom.js'
 
 const { zoomState, closeCardZoom } = useCardZoom()
@@ -32,7 +32,16 @@ function onKey(e) {
   if (e.key === 'Escape') close()
 }
 onMounted(() => window.addEventListener('keydown', onKey))
-onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onKey)
+  document.body.classList.remove('card-zoom-open')
+})
+
+// 放大期间挂 body 标记：地图容器被 CSS 隐藏，浏览器跳过其重绘，
+// 弹窗动画与滚动不再被背后 Leaflet/TipLayer 的渲染拖累
+watch(zoomState, (v) => {
+  document.body.classList.toggle('card-zoom-open', !!v)
+})
 </script>
 
 <style scoped>
@@ -41,7 +50,6 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
   inset: 0;
   z-index: 9999;
   background: rgba(4, 10, 22, 0.82);
-  backdrop-filter: blur(2px);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -156,5 +164,11 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 }
 .zoomable:hover::after {
   opacity: 1;
+}
+
+/* 放大期间隐藏地图容器（visibility 不改布局，Leaflet 无需 invalidateSize）：
+   背后瓦片/大卡/TipLayer 全部停止绘制，放大弹窗独占渲染资源 */
+body.card-zoom-open #container {
+  visibility: hidden;
 }
 </style>

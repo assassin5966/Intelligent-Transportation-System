@@ -2659,6 +2659,24 @@ select#styleSelect {
     border-color: var(--c-flow-per-border);
 }
 
+/* 顶栏检索定位「门」后的一次性闪烁：只做外辉光脉冲，
+   不动 border-color（边框色由 data-kind 入口绿/出口蓝决定），1.7s 后回到常态阴影 */
+.tip-card .rp-card.rp-flash {
+    animation: rpFlash 1.7s ease-out 1;
+}
+
+@keyframes rpFlash {
+
+    0%,
+    55% {
+        box-shadow: 0 0 0 2px var(--c-accent-glow), 0 0 22px var(--c-accent-glow);
+    }
+
+    100% {
+        box-shadow: var(--c-rp-shadow);
+    }
+}
+
 /* —— 卡头：名称 + 状态 —— */
 .tip-card .rp-head {
     display: flex;
@@ -2688,7 +2706,7 @@ select#styleSelect {
     color: var(--c-rp-muted);
 }
 
-/* 「详情」入口：按钮样式（原状态胶囊），data-level 仅驱动指示灯圆点颜色 */
+/* 「视频」入口：按钮样式（原状态胶囊），data-level 仅驱动指示灯圆点颜色 */
 .tip-card .rp-status {
     appearance: none;
     display: inline-flex;
@@ -5125,8 +5143,9 @@ body,
 }
 
 /* ==================== 视频详情列表（右栏 · 按天统计下方/列底） ====================
- * 点击大数据卡右上角「详情」展开：4 路设备 = 大卡断面 4 张小数据卡，
- * 每路横排「截图占位(16:9) + 元信息」，数据口径与 mini 卡一致 */
+ * 点击大数据卡右上角「视频」展开：4 路设备 = 大卡断面 4 张小数据卡，
+ * 每路横排「截图占位(16:9) + 元信息」，数据口径与 mini 卡一致。
+ * 打开/切换门时的一次性闪烁动画在组件内（scoped）定义，深浅主题自适应。 */
 .video-detail {
     flex: 0 0 auto;
 }
@@ -5584,4 +5603,145 @@ body,
 .cdm-bd::-webkit-scrollbar-thumb {
     background: var(--c-rp-border);
     border-radius: 2px;
+}
+
+/* ==========================================================================
+ * 顶栏 · 设备检索（名称 / 编号即时匹配 → 地图定位）
+ * 颜色全部走主题令牌，深浅模式自动适配
+ * ========================================================================== */
+.dev-search {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 268px;
+    height: 34px;
+    padding: 0 10px;
+    border-radius: 8px;
+    background: var(--c-input-bg);
+    border: 1px solid var(--c-border);
+    transition: border-color .15s, box-shadow .15s;
+}
+
+.dev-search:focus-within {
+    border-color: var(--c-accent);
+    box-shadow: 0 0 0 2px var(--c-accent-soft);
+}
+
+.ds-ic {
+    flex: none;
+    font-size: 12px;
+    opacity: .8;
+}
+
+.ds-input {
+    flex: 1;
+    min-width: 0;
+    border: 0;
+    outline: 0;
+    background: transparent;
+    color: var(--c-text);
+    font-size: 13px;
+}
+
+.ds-input::placeholder {
+    color: var(--c-text-dim);
+    opacity: .75;
+}
+
+.ds-input::-webkit-search-cancel-button {
+    display: none;
+}
+
+.ds-clear {
+    flex: none;
+    border: 0;
+    background: transparent;
+    color: var(--c-text-dim);
+    cursor: pointer;
+    font-size: 12px;
+    line-height: 1;
+    padding: 2px 4px;
+}
+
+.ds-clear:hover {
+    color: var(--c-accent);
+}
+
+/* 下拉结果：由 TopBar Teleport 到 body，position:fixed + 内联 left/top/width 对齐搜索框。
+ * 不用 absolute —— 顶栏 overflow:hidden 会裁掉，且顶栏层叠(900)低于地图大卡(9700+) */
+.ds-list {
+    position: fixed;
+    z-index: 9998;
+    max-height: 300px;
+    overflow-y: auto;
+    padding: 4px;
+    border-radius: 8px;
+    background: var(--c-card-bg);
+    border: 1px solid var(--c-card-border);
+    box-shadow: var(--c-card-shadow);
+}
+
+.ds-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 8px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 12.5px;
+    color: var(--c-text);
+}
+
+.ds-item:hover {
+    background: var(--c-accent-soft);
+}
+
+.ds-item.no-geo {
+    opacity: .6;
+    cursor: not-allowed;
+}
+
+/* 结果类型标签：门（大卡）/ 设备（单路标点），避免两类结果混在一起分不清 */
+.ds-kind {
+    flex: none;
+    padding: 0 5px;
+    border-radius: 3px;
+    border: 1px solid var(--c-border);
+    background: var(--c-accent-soft);
+    color: var(--c-accent);
+    font-size: 10px;
+    line-height: 15px;
+}
+
+.ds-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.ds-id {
+    flex: none;
+    font-size: 11px;
+    color: var(--c-text-dim);
+    font-variant-numeric: tabular-nums;
+}
+
+.ds-st {
+    flex: none;
+    font-size: 11px;
+    color: var(--c-text-dim);
+}
+
+.ds-st[data-status="online"] { color: #3ddc84; }
+.ds-st[data-status="offline"] { color: #ff6b6b; }
+.ds-st[data-status="abnormal"] { color: #ffd23f; }
+
+.ds-empty {
+    padding: 8px;
+    font-size: 12px;
+    color: var(--c-text-dim);
+    text-align: center;
 }

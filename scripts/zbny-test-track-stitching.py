@@ -41,13 +41,13 @@ def inject_old_track(tracker: ByteTracker, tid=1, cls="car",
     ]
     tracker.track_history[tid] = [tuple(p) for p in hist]
     tracker.track_class[tid] = cls
-    tracker._miss_count[tid] = miss
+    tracker._state._miss_count[tid] = miss
     return tid
 
 
 def stitch(tracker, new_tid, cls="car", bbox=None):
     bbox = bbox or [900.0, 450.0, 980.0, 520.0]  # 对角线 ~106, 中心 (940, 485)
-    return tracker._stitch_history(new_tid, cls, bbox)
+    return tracker._state._stitch_history(new_tid, cls, bbox)
 
 
 def case(name, cond):
@@ -66,7 +66,7 @@ def main():
     # 外推: 910 + 30*5 = 1060, 新 bbox 中心应在 1060 附近
     r = stitch(t, new_tid=2, bbox=[1020, 470, 1100, 540])
     ok &= case("A 缝合成功: 继承旧轨迹历史", len(r) == 3)
-    ok &= case("B 缝合目标正确", t._stitched_from == {1})
+    ok &= case("B 缝合目标正确", t._state._stitched_from == {1})
 
     # ---- C. 反例: 类别不同 ----
     t = make_tracker()
@@ -91,7 +91,7 @@ def main():
     # ---- F. 反例: 在场轨迹不被接续 ----
     t = make_tracker()
     inject_old_track(t, tid=1, cls="car", miss=0)
-    t._current_track_ids = {1}
+    t._state._current_track_ids = {1}
     r = stitch(t, new_tid=2)
     ok &= case("F 在场轨迹不接续", r == [])
 
@@ -101,12 +101,12 @@ def main():
                      positions=[[850, 500], [880, 500], [910, 500]], miss=4)
     r1 = stitch(t, new_tid=2)
     # 人为再造一个新 ID 试图再次缝合同一旧轨迹 (旧轨迹已被 del, 不应命中)
-    t._miss_count[3] = 4  # 模拟另一条消失轨迹, 但类别不同
+    t._state._miss_count[3] = 4  # 模拟另一条消失轨迹, 但类别不同
     t.track_history[3] = [(100, 100), (110, 100), (120, 100)]
     t.track_class[3] = "car"
     r2 = stitch(t, new_tid=4, bbox=[990, 470, 1000, 540])
     ok &= case("G 首次缝合后旧轨迹已删除, 不会二次缝合",
-               t._stitched_from == {1} and len(t.track_history) == 1)
+               t._state._stitched_from == {1} and len(t.track_history) == 1)
 
     # ---- H. 反例: 位置跳变过大 ----
     t = make_tracker()

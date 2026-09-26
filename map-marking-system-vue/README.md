@@ -115,22 +115,25 @@ src/
 │  ├─ endpoints.js    # 全部接口函数，JSDoc 标注参数/返回结构（字段命名严格沿用文档）
 │  └─ mock.js         # 内存 Mock 后端（模拟全部端点，演示用）
 ├─ composables/
-│  ├─ useToast.js     # 全局提示栈
-│  ├─ useRealtime.js  # REST 轮询 + 双 WebSocket 订阅 + 指数退避重连
-│  ├─ useDevices.js   # 设备(标点)状态 + CRUD + 地图落点
-│  └─ useMapControl.js# 顶栏↔地图 控制总线（解耦）
+│  ├─ useToast.js     # 全局提示栈（去重 + 最多 3 条）
+│  ├─ useRealtime.js  # /ws 主通道 + REST 轮询兜底 + 指数退避重连
+│  ├─ useDevices.js   # 设备(标点)只读状态 + 实时计数 + 地图落点（增删改在运维页）
+│  ├─ useMapControl.js# 顶栏/卡片栏 ↔ 地图 控制总线（含 focusDevice / focusGate）
+│  ├─ useVideoDetail.js # 门级 4 路视频详情面板状态
+│  ├─ useCardZoom.js  # 卡片双击放大（全局单例）
+│  ├─ useTheme.js     # 深浅主题（驱动 CSS 令牌 + 瓦片层）
+│  └─ useEcharts.js   # ECharts 实例封装（ResizeObserver 自适应）
 ├─ components/
-│  ├─ TopBar.vue      # 标题 / 城市·配色·视角 / 时钟 / WS 状态 / 添加设备
-│  ├─ MapPanel.vue    # AMap 3D 地图 + 范围框 + 设备标点 + 拖拽 + 添加/编辑
-│  ├─ DeviceEditor.vue# 设备新增/编辑弹窗（文档字段）
-│  ├─ StatBoard.vue   # 左③ / 右③ 卡片 + 嵌入 Video/Police/Alert/Prediction
-│  ├─ VideoCard.vue   # 道路监控接入位（§3.5 流地址）
-│  ├─ PolicePanel.vue # 警力区域 CRUD + 优化（§7）
-│  ├─ AlertPanel.vue  # 告警列表 + 异常上报（§5）
-│  ├─ PredictionPanel.vue # 预测触发 + 健康（§6）
-│  ├─ ToastHost.vue   # 提示渲染
-│  └─ LoadingOverlay.vue  # 加载遮罩
-├─ styles/main.css    # 全局样式（严格沿用原大屏视觉/布局）
+│  ├─ TopBar.vue      # 标题 / 门·设备检索定位 / 运维页入口 / 主题 / 时钟 / 粒子
+│  ├─ MapPanel.vue    # Leaflet 地图 + 古城框线 + 32 路标点 + 8 张门级断面大卡（只读）
+│  ├─ StatBoard.vue   # 左③（通行指标/警力/断面图例）+ 右③（预测/按天统计/视频详情）
+│  ├─ TrafficMetricsCard.vue / PolicePanel.vue / FlowLegendPanel.vue
+│  ├─ PredictionPanel.vue + PredictionChart.vue / DailyTrendChart.vue
+│  ├─ VideoDetailPanel.vue # 门级 4 路视频设备详情（点大卡「视频」展开）
+│  └─ ToastHost.vue / LoadingOverlay.vue / CardZoomModal.vue
+├─ data/cityWallPoints.js # 城门几何 / 进出标识 / 分区布局等纯函数
+├─ utils/tipLayer.js  # 卡片投影层（门级大卡 + 信息卡 DOM 注入与定位）
+├─ styles/main.css    # 全局样式（主题令牌 + 大屏视觉/布局）
 └─ App.vue            # 组装 + 启动实时层
 ```
 

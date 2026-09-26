@@ -1,21 +1,78 @@
 # ============================================================
-# GPU 版覆盖文件 (NVIDIA CUDA 12.2 / amd64, 8x RTX 4090)
+# 智慧古城车辆人流监管平台 - GPU 版容器编排 (NVIDIA CUDA 12.2 / amd64, 8x RTX 4090)
 # 目标服务器: 23.45.1.115 (宿主机, 需先装 NVIDIA 驱动 + nvidia-container-toolkit)
 #
-# 只覆盖 ai 服务的镜像构建与 GPU 资源, 其余服务沿用 docker-compose.yml:
-#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
+# 本文件独立使用, 不与 docker-compose.yml 叠加:
+#   docker compose -f docker-compose.gpu.yml up -d
+#   bash scripts/start_all_gpu.sh
+# 与 CPU 版 (docker-compose.yml) 的唯一区别: ai/backend 使用 GPU 镜像 smart-city-platform:gpu,
+# 且 ai 预留 8 张 4090。
 #
 # 前提: 宿主机已装 NVIDIA 驱动 (R530+, 支持 CUDA 12.2) 与 nvidia-container-toolkit
-# 验证: docker compose -f docker-compose.yml -f docker-compose.gpu.yml exec ai \
+# 验证: docker compose -f docker-compose.gpu.yml exec ai \
 #         python -c "import torch; print(torch.cuda.device_count(), torch.cuda.get_device_name(0))"
 # ============================================================
 
 services:
+  # ---------- AI 分析服务 (YOLO11/ByteTrack/越线计数) ----------
   ai:
     build:
       context: .
       dockerfile: Dockerfile.gpu
     image: smart-city-platform:gpu
+    restart: unless-stopped
+    command: ["python", "-m", "app.ai.service"]
+    ports:
+      - "8001:8001"
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - BACKEND_URL=http://backend:8000
+      - PYTHONUNBUFFERED=1
+      # CUDA 12.2 驱动向下兼容 cu121 轮子
+      # 显存分配策略 expandable_segments 默认禁用: 与个别驱动/内核模块组合存在
+      # "首次 CUDA 调用挂起"先例 (正是本次现场故障嫌疑项). 确认 GPU 首推正常后,
+      # 如需降低显存碎片可恢复:
+      #   - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+      # - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+      # 计数可观测性 (排查漏计/误计): 控制台日志级别 / 运行统计周期 / 逐事件明细
+      # LOG_LEVEL=DEBUG 时 docker logs 可看到详细日志 (文件日志 logs/*.log 始终 DEBUG)
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - COUNT_STATS_INTERVAL=${COUNT_STATS_INTERVAL:-30}
+      - COUNT_EVENT_LOG=${COUNT_EVENT_LOG:-false}
+      # Mock 数据模拟 (.env.gpu MOCK_ENABLED=true 时 AI 不拉流, 由模拟器生成事件)
+      - MOCK_ENABLED=${MOCK_ENABLED:-false}
+      # GPU 批量推理: 每卡 1 个模型实例 + 批内多路 track (32 路 32 实例 -> 卡数实例).
+      # INFER_MODE=legacy 可一键回退为旧的"每路独立实例"路径
+      - INFER_MODE=${INFER_MODE:-auto}
+      - INFER_GPU_DEVICES=${INFER_GPU_DEVICES:-}
+      - INFER_SLOTS_PER_GPU=${INFER_SLOTS_PER_GPU:-8}
+      - INFER_IMGSZ=${INFER_IMGSZ:-960}
+      - INFER_HALF=${INFER_HALF:-true}
+      - INFER_BATCH_TIMEOUT_MS=${INFER_BATCH_TIMEOUT_MS:-40}
+      - INFER_QUEUE_MAX_BATCHES=${INFER_QUEUE_MAX_BATCHES:-2}
+      # 解码侧采样: 按帧率 grab/retrieve 节流 + 可选解码端降分辨率 (4K 流收益最大)
+      - DECODE_MAX_FPS=${DECODE_MAX_FPS:-8}
+      - DECODE_MAX_SHORT_SIDE=${DECODE_MAX_SHORT_SIDE:-0}
+    volumes:
+      - ./app:/app/app:cached
+      - ./models:/app/models:cached
+      - ./configs:/app/configs:cached
+      # scripts/ 挂进容器: 便于容器内跑离线工具 (如 GPU 推理基准 zbny-bench-gpu-infer.py,
+      # 依赖镜像内的 torch/CUDA). 注意会遮蔽镜像内的 /app/scripts, 宿主机目录须与此处一致
+      - ./scripts:/app/scripts:cached
+      - ./logs:/app/logs
+      - model-cache:/root/.cache
+    depends_on:
+      redis:
+        condition: service_started
+      # 等 backend 健康后再启 AI: outbox 上报不重试, backend 未就绪期间产生的
+      # 越线事件会被永久丢弃 (直接表现为"启动初期计数缺失")
+      backend:
+        condition: service_healthy
+    # 挂共享网, 供 AI 按服务名访问外部 ZLM(zlmediakit) 拉 HTTP-FLV
+    networks:
+      - default
+      - wvp-shared
     # 8 卡 4090: 全部预留给该容器; 单进程默认 0 号卡,
     # 多卡分片可按实例拆分并配 CUDA_VISIBLE_DEVICES (见 Dockerfile.gpu 头注释)
     deploy:
@@ -25,6 +82,120 @@ services:
             - driver: nvidia
               count: 8          # 固定 8 卡; 弹性场景可改 all
               capabilities: [gpu]
+
+  # ---------- 业务后端 (FastAPI: 实时统计/告警/REST API/预测) ----------
+  backend:
+    image: smart-city-platform:gpu
+    restart: unless-stopped
+    command: ["uvicorn", "app.backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8000:8000"
     environment:
-      # CUDA 12.2 驱动向下兼容 cu121 轮子; 显存策略按需调整
-      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+      - REDIS_URL=redis://redis:6379/0
+      - AI_SERVICE_URL=http://ai:8001
+      - PYTHONUNBUFFERED=1
+      # WVP-GB28181 对接 (WVP/ZLM 已外部部署; 启用需 WVP_ENABLED=true 且 WVP_API_URL 指向外部 WVP)
+      - WVP_ENABLED=${WVP_ENABLED:-false}
+      - WVP_API_URL=${WVP_API_URL:-http://wvp:18080}
+      - WVP_USERNAME=${WVP_USERNAME:-admin}
+      - WVP_PASSWORD=${WVP_PASSWORD:-admin}
+      - WVP_SYNC_INTERVAL=${WVP_SYNC_INTERVAL:-30}
+      - WVP_PLAY_PROTOCOL=${WVP_PLAY_PROTOCOL:-flv}
+      - WVP_STREAM_SUB=${WVP_STREAM_SUB:-true}
+      # 前端播放地址翻译 (/api/devices/glm-5.3_common/play); 空值走自动推导/原样返回
+      - ZLM_PUBLIC_BASE=${ZLM_PUBLIC_BASE:-}
+      # 内部取流(截帧/AI)走容器网内 ZLM 服务名: 服务器公网IP不在网卡上, 容器内访问 sdp-ip 不通
+      - ZLM_INTERNAL_BASE=${ZLM_INTERNAL_BASE:-http://zlmediakit}
+      - MEDIAMTX_PUBLIC_BASE=${MEDIAMTX_PUBLIC_BASE:-}
+      # MySQL 长期归档 (小时级车流/人流量落库, 长期报表); MYSQL_ENABLED=false 则跳过
+      - MYSQL_ENABLED=${MYSQL_ENABLED:-true}
+      - MYSQL_HOST=${MYSQL_HOST:-mysql}
+      - MYSQL_PORT=${MYSQL_PORT:-3306}
+      - MYSQL_USER=${MYSQL_USER:-root}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD:-root123456}
+      - MYSQL_DATABASE=${MYSQL_DATABASE:-dt_stats}
+      # Mock 互斥保护 (main.py lifespan: mock 开启时强制关闭 WVP 同步)
+      - MOCK_ENABLED=${MOCK_ENABLED:-false}
+    volumes:
+      - ./app:/app/app:cached
+      - ./models:/app/models:cached
+      - ./configs:/app/configs:cached
+      - ./static:/app/static:cached
+      - ./data:/app/data:cached
+      - ./logs:/app/logs
+    # 健康检查: 供 ai 的 depends_on condition=service_healthy 使用
+    # (镜像内无 curl, 用 python 标准库探测 /health)
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health', timeout=3).status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    depends_on:
+      - redis
+      - mysql
+    # 挂共享网, 供 backend 按服务名访问外部 WVP(wvp:18080)
+    networks:
+      - default
+      - wvp-shared
+
+  # ---------- MySQL: 长期归档 (小时级车流/人流量报表) ----------
+  mysql:
+    image: mysql:8.0
+    container_name: dt-mysql
+    restart: unless-stopped
+    environment:
+      - MYSQL_ROOT_PASSWORD=root123456
+      - MYSQL_DATABASE=dt_stats
+      - TZ=Asia/Shanghai
+    command: >
+      --character-set-server=utf8mb4
+      --collation-server=utf8mb4_unicode_ci
+    # 宿主机映射 3307 (宿主 3306 常被本机 MySQL 占用); 容器内仍 3306, 后端经容器内网 mysql:3306 连接
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+
+  # ---------- Redis: 实时状态 (当前车辆/人员数量、告警、设备配置) ----------
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "16379:6379"
+    volumes:
+      - redis-data:/data
+
+  # ---------- 大屏前端 (Vue3 + Vite, nginx 托管 + 反代后端 API/WS) ----------
+  # 离线部署用【官方 nginx 基础镜像】+ 宿主机挂载, 不 build、不打进镜像:
+  #   - 前端产物 dist  : 挂载宿主机 ./map-marking-system-vue/dist -> nginx 的 /usr/share/nginx/html
+  #   - 瓦片 tiles     : 挂载宿主机 ./map-marking-system-vue/public/tiles -> nginx 的 /var/www/tiles
+  # 替换 dist / 瓦片只需改宿主机目录, 无需重建镜像; 是本机先 npm run build 生成的 dist。
+  # 访问: http://localhost:5173  (nginx 内 80, 宿主机映射 5173 与 dev 端口一致)
+  # 仅改 nginx.conf / dist / 瓦片: 宿主机改后 docker exec dt-frontend nginx -s reload
+  frontend:
+    image: nginx:1.27-alpine
+    container_name: dt-frontend
+    restart: unless-stopped
+    ports:
+      - "5173:80"
+    volumes:
+      - ./map-marking-system-vue/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./map-marking-system-vue/dist:/usr/share/nginx/html:ro
+      - ./map-marking-system-vue/public/tiles:/var/www/tiles:ro
+    depends_on:
+      - backend
+
+volumes:
+  redis-data:
+  model-cache:
+  mysql-data:
+
+networks:
+  default:
+    name: dt_default
+  # 引用 setting/ 创建的共享网络(先启动 setting 再启动本项目)
+  wvp-shared:
+    external: true
+    name: wvp-shared

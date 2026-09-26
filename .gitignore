@@ -112,3 +112,12 @@ VissVideos.rar
 /docs/backend-deploy-test-guide.md
 /docs/backend-offline-deploy.md
 /docs/ops-guide.md
+
+# ---- GPU 现场配置/脚本/排查文档 (含明文密码与内网 IP/密钥, 本地保留不入库) ----
+setting-server-gpu/
+map-marking-system-vue-bak/
+scripts/start_all_gpu.sh
+docs/GPU服务器离线排查方案.txt
+docs/GPU环境排查方案.txt
+.trae/documents/GPU服务器离线排查方案.md
+.trae/documents/GPU环境排查方案.md

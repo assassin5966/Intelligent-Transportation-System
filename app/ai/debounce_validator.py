@@ -142,9 +142,14 @@ class DebounceValidator:
         return "confirmed"
 
     def reset_track(self, track_id: str):
-        """清除指定轨迹的滞留状态."""
+        """清除指定轨迹的滞留状态.
+
+        两个 dict 都必须 pop 而非置 0: reset_track 同时被轨迹淘汰路径调用
+        (LineCrossingCounter._cleanup_old_tracks), 置 0 会给每个历史轨迹
+        留下永久条目, 7x24 长期运行导致内存无限增长.
+        """
         self.track_confirm_side.pop(track_id, None)
-        self.track_hold_time[track_id] = 0.0
+        self.track_hold_time.pop(track_id, None)
 
     def reset(self):
         """重置所有滞留状态."""

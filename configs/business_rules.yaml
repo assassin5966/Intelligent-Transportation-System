@@ -59,3 +59,8 @@ tracking:                  # 目标跟踪参数
   yolo_conf: 0.3                 # YOLO 置信度阈值 (0.4 在黄昏场景漏检远处车辆, 导致轨迹出生即在计数线下方而漏计)
   yolo_iou: 0.5                  # NMS IoU 阈值
   track_buffer: 30               # 跟踪历史最大长度 (由 bytetrack.yaml 决定算法)
+
+inference:                 # GPU 批量推理/解码采样参数 (热重载: 下一批生效, 无需重启)
+  imgsz: 960                     # 推理输入尺寸(短边); 原图更小则用原图
+  batch_timeout_ms: 40           # 组批等待窗口(毫秒): 凑批上限时长, 单路时即纯延迟
+  decode_max_fps: 8.0            # 解码侧采样帧率: >0 按此帧率 grab/retrieve 节流; 0=不限速 (仅 gpu_batch 生效)

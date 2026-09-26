@@ -5,16 +5,17 @@
 # 构建:
 #   docker build -f Dockerfile.gpu -t smart-city-platform:gpu .
 #
-# 启动 (覆盖文件方式, 只覆盖 ai 服务的镜像构建与 GPU 资源):
-#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
+# 启动 (独立编排方式, ai/backend 均使用本镜像, ai 预留 8 卡):
+#   docker compose -f docker-compose.gpu.yml up -d --build
 #
 # 说明:
 #   - 基础镜像 CUDA 12.2.2 runtime; PyTorch 用 cu121 官方轮子,
 #     CUDA 12.x 小版本兼容 (驱动 R530+ 即可), 4090 (Ada, sm_89) 原生支持
 #   - torch 的 cudnn/cublas 等由 pip nvidia-*-cu12 子包自带, 基础镜像无需 cudnn
 #   - ultralytics YOLO 与 Chronos 均自动 torch.cuda.is_available() 选卡, 业务代码零改动
-#   - 8 卡并行: 单进程 YOLO 默认用 0 号卡; 多路视频由 app/ai/inference_scheduler.py
-#     做进程内并发治理, 如需多卡分片可给不同 AI 容器实例配 CUDA_VISIBLE_DEVICES
+#   - 8 卡分片由 app/ai/model_pool.py 实现: 每卡 1 个模型实例 + 批内多路 track,
+#     设备按"最少负载"均摊到各卡; 无需多容器/多 CUDA_VISIBLE_DEVICES 实例.
+#     CPU 环境或自检失败自动降级 legacy (每路独立实例) 路径
 # ============================================================
 
 FROM nvidia/cuda:12.2.2-runtime-ubuntu22.04
@@ -67,7 +68,7 @@ ENV TZ=Asia/Shanghai \
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
 # 校验权重可加载 + CUDA 可用 (交叉构建/QEMU 下传 --build-arg SKIP_VALIDATE=1 跳过,
-# torch 导入在模拟层极慢; 权重完整性由 start_offline.sh 首启健康检查兜底)
+# torch 导入在模拟层极慢; 权重完整性由 start_all_gpu.sh 首启健康检查兜底)
 ARG SKIP_VALIDATE=0
 RUN if [ "$SKIP_VALIDATE" = "1" ]; then \
         echo "SKIP_VALIDATE=1, 跳过 YOLO 权重校验 (交叉构建模式)"; \
