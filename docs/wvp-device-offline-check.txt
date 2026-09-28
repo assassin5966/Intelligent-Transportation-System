@@ -1,0 +1,16 @@
+WVP 设备前端显示离线排查命令（GPU 服务器 115 上执行）
+背景: 后台日志正常收注册/心跳, 前端心跳停在 2026-09-21 => 前端连的不是正在打日志的这套 WVP
+
+【1】查库里设备真实在线状态（判定数据源, 先跑这条）
+docker exec wvp-upper-mysql mysql -uwvp -p'Wvp@123456' wvp -e "SELECT deviceId, online, keepaliveTime, registerTime FROM device\G" 2>/dev/null
+# online=1 且时间是今天 => 后端正常, 前端连错实例, 看第 2 条
+# 心跳仍是 09-21 => 看第 3 条
+# 若报列不存在, 改用: docker exec wvp-upper-mysql mysql -uwvp -p'Wvp@123456' wvp -e "SELECT * FROM device\G"
+
+【2】确认没有两套栈在同一台机器同时跑（两套 compose 容器名/端口相同, 一台只能跑一套）
+docker ps --format '{{.Names}}\t{{.Status}}\t{{.Ports}}' | grep wvp-upper
+# 前端改访问 GPU 侧 http://23.45.1.115:18080 重新登录即可
+
+【3】查库里离线的设备行（确认前端显示离线的是不是另一条旧记录）
+docker exec wvp-upper-mysql mysql -uwvp -p'Wvp@123456' wvp -e "SELECT deviceId, online, keepaliveTime FROM device WHERE online='0'\G" 2>/dev/null
+# 若日志里的设备在线而离线的是另一条旧 ID => 在 WVP 前端删除该离线设备即可
