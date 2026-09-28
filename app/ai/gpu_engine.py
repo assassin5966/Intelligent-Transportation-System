@@ -499,9 +499,13 @@ class GpuInferEngine:
 
 
 def _load_tracker_args(tracker_cfg: str):
-    """读取跟踪器配置为 SimpleNamespace (与 ultralytics on_predict_start 同做法)."""
-    from ultralytics.utils import IterableSimpleNamespace, YAML, check_yaml
-    return IterableSimpleNamespace(**YAML.load(check_yaml(tracker_cfg)))
+    """读取跟踪器配置为 SimpleNamespace (与 ultralytics on_predict_start 同做法).
+
+    直接用 YAML.load 解析本地路径, 不依赖 check_yaml —— 新版 ultralytics 已移除该
+    工具, 而这里传入的始终是本地绝对路径 (configs/bytetrack.yaml), 无需其路径搜索.
+    """
+    from ultralytics.utils import IterableSimpleNamespace, YAML
+    return IterableSimpleNamespace(**YAML.load(tracker_cfg))
 
 
 def _build_tracker(args):
