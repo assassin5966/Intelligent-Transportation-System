@@ -13,6 +13,9 @@
 #         python -c "import torch; print(torch.cuda.device_count(), torch.cuda.get_device_name(0))"
 # ============================================================
 
+# 固定项目名: 容器/卷/网名不再随目录名或 -p 参数漂移 (与 CPU 版同名, 同机不可同时运行)
+name: dt
+
 services:
   # ---------- AI 分析服务 (YOLO11/ByteTrack/越线计数) ----------
   ai:
@@ -20,6 +23,7 @@ services:
       context: .
       dockerfile: Dockerfile.gpu
     image: smart-city-platform:gpu
+    container_name: dt-ai
     restart: unless-stopped
     command: ["python", "-m", "app.ai.service"]
     ports:
@@ -50,6 +54,9 @@ services:
       - INFER_HALF=${INFER_HALF:-true}
       - INFER_BATCH_TIMEOUT_MS=${INFER_BATCH_TIMEOUT_MS:-40}
       - INFER_QUEUE_MAX_BATCHES=${INFER_QUEUE_MAX_BATCHES:-2}
+      # CPU 批量推理: auto 模式下 GPU 不可用/自检失败时自动转 cpu_batch (不降 legacy)
+      - INFER_CPU_ENGINES=${INFER_CPU_ENGINES:-2}
+      - INFER_CPU_THREADS=${INFER_CPU_THREADS:-0}
       # 解码侧采样: 按帧率 grab/retrieve 节流 + 可选解码端降分辨率 (4K 流收益最大)
       - DECODE_MAX_FPS=${DECODE_MAX_FPS:-8}
       - DECODE_MAX_SHORT_SIDE=${DECODE_MAX_SHORT_SIDE:-0}
@@ -86,6 +93,7 @@ services:
   # ---------- 业务后端 (FastAPI: 实时统计/告警/REST API/预测) ----------
   backend:
     image: smart-city-platform:gpu
+    container_name: dt-backend
     restart: unless-stopped
     command: ["uvicorn", "app.backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
     ports:
@@ -160,6 +168,7 @@ services:
   # ---------- Redis: 实时状态 (当前车辆/人员数量、告警、设备配置) ----------
   redis:
     image: redis:7-alpine
+    container_name: dt-redis
     restart: unless-stopped
     command: ["redis-server", "--appendonly", "yes"]
     ports:

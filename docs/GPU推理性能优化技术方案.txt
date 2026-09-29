@@ -103,9 +103,8 @@ class ModelPool:
 - **槽位耗尽**：某卡满 `infer_slots_per_gpu`（默认 8）时退而选次少负载卡；全部耗尽则该设备**降级为 legacy 独立实例**并打 WARNING（8×8=64 ≥ 32 路，正常不触发）。
 - **降级条件**（任一命中即整体 `legacy`，并打醒目 WARNING）：
   - `infer_mode=legacy`；
-  - `torch.cuda.is_available()==False`（CPU 部署，满足兼容要求）；
-  - 可见卡数为 0；
-  - 引擎自检失败（见 4.2）。
+  - `infer_mode=gpu_batch` 且 CUDA 不可用 / 可见卡数为 0 / 引擎自检失败（显式指定不静默换挡）；
+  - `infer_mode=auto` 且 GPU 与 CPU 引擎**都**失败（auto 的降级链为 `gpu_batch → cpu_batch → legacy`，见第九节）。
 - **释放**：`shutdown()` → 逐引擎 `model.to("cpu")` 后置空 → `torch.cuda.empty_cache()`；初始化中途失败的引擎也会被单独 `stop()` 回收（不留半成品显存）；`release(device_id)` 仅释放槽位并丢弃该路 tracker。
 
 ### 4.2 批量推理引擎 `app/ai/gpu_engine.py`（新增）
@@ -391,3 +390,63 @@ $COMPOSE logs --since 5m ai | grep -o "预处理=[0-9.]*ms" | sort -u
 | 新方案现场表现不及预期 | 计数中断 | **`INFER_MODE=legacy` 一键回退**（改 `.env.gpu` 后 `docker compose up -d ai`，无需改代码/重建镜像） |
 
 **回滚路径**：`INFER_MODE=legacy` → 完全回到当前实现（含 `inference_scheduler.py` 线程池路径），新旧代码同在，无需回退版本。
+
+---
+
+## 九、CPU 部署方案（cpu_batch 模式）
+
+> 结论：可行，改造成本低——引擎的"检测/跟踪解耦、按形状组批、槽位、EngineBusy"设计与设备类型无关，
+> CUDA 只出现在 `device` 参数与显存统计三处。**要重估的是算力预期，不是代码结构。**
+
+### 9.1 模式定义与降级链
+
+```
+infer_mode = auto | gpu_batch | cpu_batch | legacy
+
+auto      : CUDA 可用且自检通过 → gpu_batch; 否则自动转 cpu_batch; CPU 引擎也失败 → legacy
+gpu_batch : 显式指定, 失败只回退 legacy (不静默换挡)
+cpu_batch : 显式指定, 直接起 CPU 引擎池; 失败回退 legacy
+legacy    : 每路独立模型实例 (优化前行为), 最终兜底
+```
+
+- CPU 引擎池：`INFER_CPU_ENGINES`（默认 2）个引擎，每个 = 1 个模型实例 + 1 条推理线程（FP32，CPU 强制关 half），
+  复用与 GPU 完全相同的槽位/组批/EngineBusy 语义；
+- `torch.set_num_threads(核数/引擎数)` 初始化时一次性设置（进程级）：多引擎并发时总算子线程 ≈ 核数，不超订；
+- 解码侧节流（`DECODE_MAX_FPS` 等）在 cpu_batch 下**同样生效**（与 gpu_batch 一致，legacy 才不下发）。
+
+### 9.2 配置（CPU 现场）
+
+```
+INFER_MODE=auto            # 或 cpu_batch 显式指定
+INFER_CPU_ENGINES=2        # 引擎数: 越多路间隔离越好, 但单引擎可用线程越少
+INFER_CPU_THREADS=0        # 0=自动取 核数/引擎数
+INFER_IMGSZ=640            # CPU 建议 640 (960 的单帧代价约 ×2.5~3)
+DECODE_MAX_FPS=4           # CPU 建议 2~4
+```
+
+**前置条件（不是优化项）**：
+1. **AI 必须拉 1080p/D1 子码流**——`grab()` 全量解码 CPU 省不掉（见 4.4①），32 路 4K 纯 CPU 解码不可行；
+2. `imgsz` 用 640；若 `configs/business_rules.yaml` 的 `inference.imgsz` 热重载段有值，它优先生效，需同步改。
+
+### 9.3 算力评估（须以 bench 实测校准）
+
+实测参考（本机 8 核，yolo11n，空白底帧）：`imgsz=960` 单帧 ≈200ms → `imgsz=640` 约 ×2.5~3 快。
+
+```
+聚合吞吐 ≈ 可用核数 ÷ 单帧核·秒
+16 核 @ imgsz=640 ≈ 50~100 fps 聚合 → 32 路均摊 2~3 fps/路 (够跨线计数)
+imgsz=960 时代价 ×2.5~3 → 32 路会跌破 1 fps/路 (计数开始不可信)
+```
+
+### 9.4 CPU 验收线（替换第二节 GPU 那套）
+
+| 指标 | 目标 | 测量方式 |
+|---|---|---|
+| 推理模式 | `/health` 的 `infer.mode=cpu_batch`，引擎数 = `INFER_CPU_ENGINES` | `curl :8001/health` |
+| 单路有效处理 fps | ≥ 2（受 `DECODE_MAX_FPS` 上限约束） | `运行统计` 日志 `处理fps` |
+| 处理侧丢帧率 | ≤ 5% | `运行统计` 日志 `丢帧(%)`（分母=采样帧） |
+| 计数准确率 | 与人工核对偏差 ≤ 5% | 7.2 同口径 |
+| 稳定性 | 连续 2h 无重启、内存无单调增长 | `docker stats` + 容器重启次数 |
+
+第二节"8fps / 150ms/批 / 8 卡均衡"等 GPU 线**不适用**于 CPU 部署。
+**二期可选**：导出 ONNX → OpenVINO/ONNXRuntime CPU EP，通常再快 2~4 倍（改动面：模型导出 + 引擎加载路径）。

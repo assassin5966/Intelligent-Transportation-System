@@ -214,8 +214,8 @@ async def stream_frames(
 
     preprocess: 在 reader 线程内对每帧执行 (例如 resize 到推理尺寸), 返回新帧。
 
-    decode_tuning: 是否启用解码侧采样/缩放 (gpu_batch 模式启用).
-      为 False 时 (legacy 回退/CPU 部署) 完全不下发解码端帧率与分辨率调整,
+    decode_tuning: 是否启用解码侧采样/缩放 (批量模式 gpu_batch/cpu_batch 启用).
+      为 False 时 (legacy 回退) 完全不下发解码端帧率与分辨率调整,
       行为与优化前一致 —— 一键回滚 INFER_MODE=legacy 即为旧行为.
 
     断流重连: 先重开同一 url (_open 内含 tenacity 5 次退避重试); 仍失败且提供了

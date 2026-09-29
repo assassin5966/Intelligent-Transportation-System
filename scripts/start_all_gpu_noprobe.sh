@@ -2,11 +2,9 @@
 # ============================================================
 # WVP + ZLMediaKit + 业务套 一键启动 (GPU 服务器部署版 / 无探针)
 #
-# 与 scripts/start_all_gpu.sh 的唯一区别: 去掉启动流程末尾的
-#   "GPU 首推验证" 探针 (stage1-stage6)。探针会在容器内做 CUDA 初始化
-#   和推理, 与刚拉起的服务抢占 GPU/CUDA 上下文, 有冲突导致启动卡顿,
-#   故本版本启动时完全不做 GPU 探测; 需要验证 GPU 时单独跑原脚本
-#   scripts/start_all_gpu.sh (服务已在跑时其探针逻辑同样适用)。
+# 与 scripts/start_all_gpu.sh 等价: 两者启动时都完全不做 GPU 探测/推理
+# (探针会与刚拉起的服务抢占 GPU/CUDA 上下文, 导致启动卡顿)。
+# 需要验证 GPU 时单独跑独立容器探针: bash scripts/check_gpu_env.sh --run
 #
 # 用途: 在 GPU 服务器 (23.45.1.115) 上一键拉起
 #   - setting-server-gpu/ 的 WVP 套 (mysql/redis/zlm/wvp)
@@ -162,11 +160,7 @@ if [ "$START_BACKEND" = "1" ]; then
     docker compose --env-file "$ENV_FILE" -f "$COMPOSE_ROOT" up -d --force-recreate backend ai frontend
 
     # 无探针版: 启动时不做任何 GPU 探测/推理 (与刚拉起的服务抢占 GPU 有冲突),
-    # GPU 健康验证需要时单独执行 scripts/start_all_gpu.sh 或容器内手动自检
-    if grep -Eq "^MOCK_ENABLED=true" "$ENV_FILE"; then
-        warn "MOCK_ENABLED=true: Mock 模拟模式 (不拉流不推理)"
-        warn "  WVP 同步已被后端自动禁用 (互斥保护); 正式部署前记得把 .env.gpu 的 MOCK_ENABLED 改回 false"
-    fi
+    # GPU 健康验证需要时单独执行: bash scripts/check_gpu_env.sh --run
 else
     log "======== 6/6 已跳过业务套与大屏前端 (--no-backend) ========"
 fi
@@ -185,4 +179,19 @@ if [ "$START_BACKEND" = "1" ]; then
     echo "  后端设备列表     http://$LAN_IP:8000/api/devices"
 fi
 echo "  停止             bash scripts/stop_all_gpu.sh"
+echo ""
+
+# ---------- 输出服务日志查看命令 ----------
+log "======== 服务日志查看命令 ========"
+echo "  # WVP 套 (容器名固定: wvp-upper-*)"
+echo "  WVP 平台日志     docker logs -f wvp-upper-wvp"
+echo "  ZLM 流媒体日志   docker logs -f wvp-upper-zlm"
+if [ "$START_BACKEND" = "1" ]; then
+    echo "  # 业务套 (容器名固定: dt-*)"
+    echo "  AI 推理日志      docker logs -f dt-ai          # 关注: 推理模式/引擎数/各路 fps"
+    echo "  后端日志         docker logs -f dt-backend     # 关注: WVP 设备同步/事件上报"
+    echo "  前端容器日志     docker logs -f dt-frontend"
+    echo "  # 组合跟踪 (Ctrl+C 退出)"
+    echo "  AI+后端          docker logs -f dt-ai dt-backend"
+fi
 echo ""

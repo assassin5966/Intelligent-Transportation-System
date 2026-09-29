@@ -3,11 +3,11 @@
 注: 类名保留 ByteTracker 为历史命名; 实际 tracker_type 由 configs/bytetrack.yaml
 决定 (当前为 botsort). 支持 car/truck/bus/person 四类细分跟踪, 含轨迹历史与速度.
 
-两种运行模式 (由 app/ai/model_pool.py 决定, 见 app/common/config.py 的 infer_mode):
-  - legacy: 本类自持一个 YOLO 模型实例 (CPU 部署 / 离线工具 / gpu_batch 降级时使用),
+两种运行形态 (由 app/ai/model_pool.py 决定, 见 app/common/config.py 的 infer_mode):
+  - legacy: 本类自持一个 YOLO 模型实例 (离线工具 / 批量模式降级兜底时使用),
     `track(frame)` 逐帧推理 -> 轨迹状态;
-  - gpu_batch: 模型由 GPU 引擎按卡共享, 本类只保留每路轨迹状态,
-    `track_from_raw(raw_tracks)` 直接把引擎结果转为 TrackResult.
+  - 批量 (gpu_batch/cpu_batch): 模型由共享推理引擎持有 (GPU 按卡 / CPU 按引擎池),
+    本类只保留每路轨迹状态, `track_from_raw(raw_tracks)` 直接把引擎结果转为 TrackResult.
 
 每路的轨迹历史/速度/轨迹缝合状态已抽离到 app/ai/traj_state.py (TrajectoryState),
 使"模型"与"每路状态"解耦; 本类的 track_history / track_class 以属性代理转发,

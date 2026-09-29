@@ -1,0 +1,57 @@
+# ============================================================
+# 单服务重启命令速查 (改配置后用)
+# 原则: 挂载文件改动 -> restart 重启进程即可;
+#       环境变量改动 -> 必须up -d --force-recreate 重建容器 (restart 读不到新值)
+# 容器名已固定: 业务套 dt-ai / dt-backend / dt-frontend;
+#               WVP 套 wvp-upper-wvp / wvp-upper-zlm / wvp-upper-mysql / wvp-upper-redis
+# ============================================================
+
+# ---------- 业务套 (在项目根目录执行) ----------
+
+# 1) 改了 app/ 下的代码 -> restart 即可
+docker compose restart ai
+docker compose restart backend
+
+# GPU 版用这条 (必须显式 --env-file, compose 不会自动读 .env.gpu):
+# docker compose --env-file .env.gpu -f docker-compose.gpu.yml restart ai
+
+# 2) 改了 .env 环境变量 (INFER_MODE / ZLM_PUBLIC_BASE / MOCK_ENABLED 等) -> 必须重建
+docker compose up -d --force-recreate ai backend
+# GPU 版:
+# docker compose --env-file .env.gpu -f docker-compose.gpu.yml up -d --force-recreate ai backend
+
+# 3) 改了 docker-compose*.yml 本身 (端口/挂载/容器名) -> 同样 force-recreate
+docker compose up -d --force-recreate ai backend frontend
+
+# ---------- WVP 套 (在 setting-server/ 或 setting-server-gpu/ 目录执行) ----------
+
+# 改了 application.yml -> restart 即可 (Java 启动时读取)
+docker compose restart wvp
+
+# 改了 conf/config.ini -> restart 即可
+docker compose restart zlmediakit
+
+# ---------- 前端 (无需重启容器) ----------
+
+# 替换了 dist / 瓦片 / nginx.conf 后重载 nginx:
+docker exec dt-frontend nginx -s reload
+
+# ---------- 热重载 (无需任何操作) ----------
+
+# configs/business_rules.yaml 的 inference 段 (imgsz 已改由 env 控制):
+# 改完保存即生效, 下一批推理自动应用, 不用重启
+
+# ---------- 验证是否生效 ----------
+
+# 看环境变量是否为新值:
+docker exec dt-ai env | grep INFER
+
+# 看 AI 推理模式/引擎/各路 fps:
+curl -s localhost:8001/health | python3 -m json.tool
+docker logs -f dt-ai
+
+# 看后端 WVP 同步/事件:
+docker logs -f dt-backend
+
+# 组合跟踪 (Ctrl+C 退出):
+docker logs -f dt-ai dt-backend

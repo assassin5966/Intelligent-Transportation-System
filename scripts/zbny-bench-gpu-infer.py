@@ -62,7 +62,8 @@ async def _build_engines(gpus: list, per_gpu: int) -> list:
     engines = []
     for gpu_id in gpus:
         engine = GpuInferEngine(
-            gpu_id,
+            f"gpu{gpu_id}",
+            device=f"cuda:{gpu_id}",
             model_path=settings.yolo_model,
             # 槽位必须 >= 每卡路数, 否则 assign 取不到空槽位
             slots=per_gpu,
@@ -124,7 +125,8 @@ async def run_level(level: int, gpus: list, rounds: int, warmup: int,
     try:
         import torch
         for engine in engines:
-            torch.cuda.reset_peak_memory_stats(engine.gpu_id)
+            if engine.cuda_index is not None:
+                torch.cuda.reset_peak_memory_stats(engine.cuda_index)
     except Exception:  # noqa: BLE001
         torch = None
 
@@ -137,7 +139,11 @@ async def run_level(level: int, gpus: list, rounds: int, warmup: int,
 
     if torch is not None:
         vram_peak = max(
-            (torch.cuda.max_memory_allocated(e.gpu_id) / 1024 / 1024 for e in engines),
+            (
+                torch.cuda.max_memory_allocated(e.cuda_index) / 1024 / 1024
+                for e in engines
+                if e.cuda_index is not None
+            ),
             default=0.0,
         )
 
@@ -174,7 +180,7 @@ def _print_level(r: dict) -> None:
     if r["busy_drops"]:
         print(f"  EngineBusy 丢帧: {r['busy_drops']} (队列饱和, 需下调路数或增大 queue_max_batches)")
     for e in r["engines"]:
-        print(f"  - GPU {e['gpu_id']}: 设备={e['devices']} 批次数={e['batches']} "
+        print(f"  - {e['engine_id']} ({e['device']}): 设备={e['devices']} 批次数={e['batches']} "
               f"末批推理={e['last_infer_ms']}ms 显存={e['vram_mb']}MB")
 
 

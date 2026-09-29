@@ -35,17 +35,27 @@ class Settings(BaseSettings):
     # 背景: 32 路各自 new 一个 YOLO 实例 = 32 个 CUDA context 挤在 0 号卡, 单帧推理被
     # 拖到 1.2s; 改为每卡一个模型实例 + 批内多路 track, context 降到卡数, 且每实例
     # 由单一 OS 线程持有 (context 亲和性稳定).
-    infer_mode: str = "auto"           # auto|gpu_batch|legacy; auto=CUDA可用且自检通过则批量
+    # auto=CUDA 可用且自检通过则 gpu_batch, 否则自动转 cpu_batch (无 GPU 机器一键批量);
+    # 显式指定 gpu_batch/cpu_batch 时引擎失败只回退 legacy, 不再静默换挡
+    infer_mode: str = "auto"           # auto|gpu_batch|cpu_batch|legacy
     infer_gpu_devices: str = ""        # 参与推理的卡号 "0,1,2,3,4,5,6,7"; 空=全部可见卡
     infer_slots_per_gpu: int = 8       # 每卡槽位(设备数)上限; 超出该设备降级 legacy 独立实例
-    infer_imgsz: int = 960             # 推理输入尺寸(短边); 原图更小则用原图
-    infer_half: bool = True            # FP16 半精度 (仅 CUDA 生效)
+    infer_imgsz: int = 960             # 推理输入尺寸(短边); 原图更小则用原图 (CPU 部署建议 640)
+    infer_half: bool = True            # FP16 半精度 (仅 CUDA 生效, CPU 引擎自动关闭)
     infer_batch_timeout_ms: int = 40   # 组批等待窗口 (毫秒): 凑批上限时长, 单路时即纯延迟
     infer_queue_max_batches: int = 2   # 每卡待处理批次数上限; 超限丢帧 (EngineBusy)
+    # ---- cpu_batch (无 GPU 部署) ----
+    # 每个 CPU 引擎 = 1 个模型实例 + 1 条推理线程, 多引擎共享全部设备槽位 (最少负载分配).
+    # CPU 批量近似线性扩展 (算力受限, 批大不省算力), 引擎数主要影响"路间隔离":
+    # 引擎越多, 单批越慢的互相拖累越小, 但每引擎可用线程也越少.
+    infer_cpu_engines: int = 2         # CPU 批量引擎数 (上限=可见核数)
+    infer_cpu_threads: int = 0         # 每引擎批内算子线程数 (torch 全局); 0=自动取 核数/引擎数
 
     # ---- 解码侧采样 (app/ai/stream.py) ----
     # 背景: 读帧线程按源帧率全速 read() 后 96% 被覆盖丢弃, 解码与颜色转换全是白做.
-    # 仅 gpu_batch 模式下发 (legacy 回退/CPU 部署不下发, 与优化前行为一致).
+    # 批量模式 (gpu_batch/cpu_batch) 下发; legacy 不下发, 与优化前行为一致.
+    # CPU 部署此项更关键: grab() 全量解码省不掉, 32 路 4K 纯 CPU 解码不可行,
+    # 必须配合拉子码流 + 降低 DECODE_MAX_FPS (2~4).
     decode_max_fps: float = 8.0        # >0 按此帧率 grab/retrieve 节流; 0=不限速(旧行为)
     decode_max_short_side: int = 0     # >0 请求解码端缩放到该短边; 0=不缩放(旧行为)
 

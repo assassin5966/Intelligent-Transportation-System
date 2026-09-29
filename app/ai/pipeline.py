@@ -2,11 +2,12 @@
 
 并发模型:
   - 每路设备一个 DevicePipeline; supervisor 任务守护, 管道退出后自动重启 (退避);
-  - 两种推理模式 (由 app/ai/model_pool.py 在服务启动时决定):
-      gpu_batch: 帧提交给本路所属 GPU 引擎 (每卡 1 个模型实例, 批内多路),
-                 跟踪状态仍由本路 ByteTracker 持有 (track_from_raw);
-      legacy   : 推理走专用线程池 (inference_scheduler), 本地模型逐帧推理,
-                 即优化前的行为 (CPU 部署 / 引擎自检失败时自动回退);
+  - 两种推理形态 (由 app/ai/model_pool.py 在服务启动时决定):
+      lease 路径 : 帧提交给本路所属批量引擎 (gpu_batch: 每卡 1 实例;
+                   cpu_batch: 共享 CPU 引擎池), 跟踪状态仍由本路
+                   ByteTracker 持有 (track_from_raw);
+      legacy     : 推理走专用线程池 (inference_scheduler), 本地模型逐帧推理,
+                   即优化前行为, 仅作最终兜底 (INFER_MODE=legacy 或槽位耗尽);
   - 帧循环只做计算与入队, 所有 HTTP 上报 (事件/异常/拥挤/心跳) 由后台任务发送;
   - WS 广播非阻塞 (有界队列, 满时丢最旧), 慢客户端不影响帧循环.
 """
@@ -122,10 +123,10 @@ class DevicePipeline:
         self.device_id = device_id
         self.stream_url = stream_url
         self.tracker = ByteTracker(camera_type=camera_type)
-        # lease 非空 => 模型由该卡的 GPU 引擎共享 (gpu_batch); 为空 => legacy 独立实例
+        # lease 非空 => 模型由共享批量引擎持有 (gpu_batch/cpu_batch); 为空 => legacy 独立实例
         self.lease = lease
-        self.mode = "gpu_batch" if lease is not None else "legacy"
-        # 预降采样钩子只在 gpu_batch 提供: legacy 的坐标还原在跟踪器内部完成,
+        self.mode = lease.mode if lease is not None else "legacy"
+        # 预降采样钩子只在批量模式提供: legacy 的坐标还原在跟踪器内部完成,
         # 帧尺寸必须与计数器基准 (流原始分辨率) 一致
         self.decoder = make_infer_preprocess() if lease is not None else None
         self.counter = LineCrossingCounter(line, anchor)
@@ -461,7 +462,7 @@ class DevicePipeline:
                 f"预处理={self._stats_preprocess_seconds / (processed or 1) * 1000.0:.1f}ms/帧"
                 if batches else "推理=无批次"
             )
-            mode_str = f"模式=gpu_batch 卡={self.lease.gpu_id}"
+            mode_str = f"模式={self.mode} 引擎={self.lease.engine_id}"
         else:
             infer_ms = self._stats_infer_seconds / processed * 1000.0 if processed else 0.0
             infer_str = f"推理={infer_ms:.0f}ms/帧"

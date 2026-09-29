@@ -1,6 +1,7 @@
-"""GPU 批量推理引擎: 每卡 1 个模型实例 + 批内多路检测, 每路独立官方 tracker.
+"""批量推理引擎: 每设备卡/CPU 池 1 个模型实例 + 批内多路检测, 每路独立官方 tracker.
 
-解决的现场问题:
+device 可为 "cuda:N" (GPU) 或 "cpu" (无 GPU 部署的 cpu_batch 模式), 检测/跟踪/组批
+逻辑与设备类型无关. 以下以 GPU 场景说明动机:
   1. CUDA context 频繁切换: 原先 32 路各自 new 一个 YOLO = 32 个 context 全挤
      0 号卡, 单帧推理被拖到 1.2s. 现在每卡 1 个实例, 且模型只被该引擎自己的
      单线程 executor 触碰 -> 单卡内无跨线程 context 切换, 8 卡各一实例真并行.
@@ -75,12 +76,17 @@ class InferOutcome:
 
 
 class GpuInferEngine:
-    """单张 GPU 上的批量推理引擎 (一个模型实例 + 若干设备槽位)."""
+    """单个批量推理引擎 (一个模型实例 + 若干设备槽位).
+
+    device 既可指向 GPU ("cuda:0"...) 也可为 "cpu" (无 GPU 部署的批量模式):
+    检测/跟踪/组批逻辑与设备类型无关, 差异仅在 half (CPU 强制 FP32) 与显存统计.
+    """
 
     def __init__(
         self,
-        gpu_id: int,
+        engine_id: str,
         *,
+        device: str,
         model_path: str,
         slots: int,
         batch_timeout_s: float,
@@ -89,19 +95,28 @@ class GpuInferEngine:
         imgsz: int,
         half: bool,
     ) -> None:
-        self.gpu_id = gpu_id
-        self.device = f"cuda:{gpu_id}"
+        self.engine_id = engine_id
+        self.device = device
+        # cuda:N 的卡号 (供显存统计); CPU 引擎为 None
+        self._cuda_index: Optional[int] = (
+            int(device.split(":", 1)[1]) if device.startswith("cuda:") else None
+        )
         self._model_path = model_path
         self._slots_total = slots
         self._batch_timeout = batch_timeout_s
         self._max_pending = max(1, slots * queue_max_batches)
         self._tracker_cfg = tracker_cfg
         self._imgsz = imgsz
-        self._half = half
+        # ultralytics CPU 推理不支持 FP16, 强制关闭
+        self._half = bool(half) and self._cuda_index is not None
 
         self._model = None
         self._tracker_args = None
         self._trackers: dict = {}          # device_id -> 官方跟踪器实例 (每路独立)
+        # tracker.update() 检测输入契约 (启动自检时探测并锁定):
+        #   False -> 8.3.x: 裸 (N,6) 数组 [x1,y1,x2,y2,conf,cls]
+        #   True  -> 8.4.x: Boxes 包装 (update 内部访问 .conf/.cls/.xywh)
+        self._det_boxed: bool = False
         self._devices: dict = {}           # device_id -> slot
         self._free_slots: list = []        # 可用槽位 (小号优先)
 
@@ -134,14 +149,14 @@ class GpuInferEngine:
         move_s = time.monotonic() - t0
         self._model = model
         logger.info(
-            f"[GPU {self.gpu_id}] 模型加载完成: 权重 {load_s:.1f}s / 搬卡 {move_s:.1f}s "
+            f"[{self.engine_id}] 模型加载完成: 权重 {load_s:.1f}s / 搬设备 {move_s:.1f}s "
             f"(device={self.device}, imgsz={self._imgsz}, half={self._half})"
         )
         self._warmup()
         self._selftest()
         self._free_slots = list(range(self._slots_total))
         logger.info(
-            f"[GPU {self.gpu_id}] 引擎就绪: 槽位 {self._slots_total}, 显存 {self.vram_mb()}MB, "
+            f"[{self.engine_id}] 引擎就绪: 槽位 {self._slots_total}, 显存 {self.vram_mb()}MB, "
             f"预热耗时 {self.last_infer_ms:.0f}ms"
         )
 
@@ -150,7 +165,7 @@ class GpuInferEngine:
         self._loop = asyncio.get_running_loop()
         self._queue = asyncio.Queue()
         self._executor = ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix=f"gpu{self.gpu_id}-infer"
+            max_workers=1, thread_name_prefix=f"{self.engine_id}-infer"
         )
         self._collector_task = self._loop.create_task(self._collector())
 
@@ -188,7 +203,12 @@ class GpuInferEngine:
                 torch.cuda.empty_cache()
         except Exception:  # noqa: BLE001
             pass
-        logger.info(f"[GPU {self.gpu_id}] 引擎已停止 (累计批次 {self.batches})")
+        logger.info(f"[{self.engine_id}] 引擎已停止 (累计批次 {self.batches})")
+
+    @property
+    def cuda_index(self) -> Optional[int]:
+        """cuda:N 的卡号; CPU 引擎为 None (供压测脚本读逐卡峰值显存)."""
+        return self._cuda_index
 
     # ---- 槽位分配 ----
 
@@ -220,8 +240,8 @@ class GpuInferEngine:
         self._devices[device_id] = slot
         self._trackers[device_id] = _build_tracker(self._tracker_args)
         logger.info(
-            f"[GPU {self.gpu_id}] 槽位分配: {device_id} -> slot{slot} "
-            f"(本卡设备 {len(self._devices)}/{self._slots_total})"
+            f"[{self.engine_id}] 槽位分配: {device_id} -> slot{slot} "
+            f"(本引擎设备 {len(self._devices)}/{self._slots_total})"
         )
         return slot
 
@@ -232,7 +252,7 @@ class GpuInferEngine:
         self._trackers.pop(device_id, None)  # 跟踪状态随设备消失, 不留给下一路
         self._free_slots.append(slot)
         self._free_slots.sort()
-        logger.info(f"[GPU {self.gpu_id}] 槽位释放: {device_id} slot{slot}")
+        logger.info(f"[{self.engine_id}] 槽位释放: {device_id} slot{slot}")
 
     # ---- 推理提交 ----
 
@@ -245,7 +265,7 @@ class GpuInferEngine:
         if self._queue.qsize() >= self._max_pending:
             self.drops_busy += 1
             raise EngineBusy(
-                f"gpu{self.gpu_id} queue full ({self._queue.qsize()}/{self._max_pending})"
+                f"{self.engine_id} queue full ({self._queue.qsize()}/{self._max_pending})"
             )
         fut = self._loop.create_future()
         self._queue.put_nowait(
@@ -396,7 +416,7 @@ class GpuInferEngine:
             ],
             axis=1,
         ).astype(np.float32)
-        tracks = tracker.update(det, req.frame)
+        tracks = tracker.update(self._wrap_det(det, req.frame), req.frame)
         if tracks is None or len(tracks) == 0:
             return []
         sx, sy = req.scale
@@ -419,6 +439,13 @@ class GpuInferEngine:
             ))
         return out
 
+    def _wrap_det(self, det: np.ndarray, frame: np.ndarray):
+        """按自检锁定的契约包装检测输入 (8.3 裸数组 / 8.4 Boxes)."""
+        if self._det_boxed:
+            from ultralytics.engine.results import Boxes
+            return Boxes(det, orig_shape=frame.shape[:2])
+        return det
+
     # ---- 预热与自检 ----
 
     def _warmup(self) -> None:
@@ -431,7 +458,7 @@ class GpuInferEngine:
                 device=self.device, verbose=False,
             )
         except Exception as e:  # noqa: BLE001
-            raise RuntimeError(f"GPU {self.gpu_id} 预热失败: {e}") from e
+            raise RuntimeError(f"{self.engine_id} 预热失败: {e}") from e
         self.last_infer_ms = (time.monotonic() - t0) * 1000.0
 
     def _selftest(self) -> None:
@@ -439,15 +466,34 @@ class GpuInferEngine:
 
         验证: 跟踪器可从配置构造、update() 返回 [x1,y1,x2,y2,id,conf,cls,idx] 形状、
         列语义正确 (第 6 列置信度/第 7 列类别)、且跨帧保持同一目标 ID.
+        同时探测 update() 的检测输入契约: 8.3.x 收裸 (N,6) 数组; 8.4.x 起改为
+        Boxes 包装 (内部访问 .conf/.cls/.xywh), 探测结果锁定到 _det_boxed.
         列序一旦漂移会把置信度当类别喂给下游 (静默污染计数), 故必须显式校验.
         任一不符 -> TrackerApiError -> ModelPool 降级 legacy.
         """
         try:
-            tracker = _build_tracker(self._tracker_args)
             dummy = np.zeros((self._imgsz, self._imgsz, 3), np.uint8)
             # 构造一个位于画面中部的稳定检测 (类 car=2, 置信度 0.9)
             det = np.array([[0.4, 0.4, 0.6, 0.6, 0.9, 2]], dtype=np.float32)
-            first = tracker.update(det, dummy)
+
+            # 输入契约探测: 8.3.x 收裸 (N,6) 数组; 8.4.x 起要求 Boxes 包装
+            # (内部访问 .conf/.cls/.xywh, 裸数组会 AttributeError).
+            # 用临时 tracker 探测: 失败尝试会推进 frame_id, 污染正式自检的
+            # 首帧激活 (8.4 activate() 仅在 frame_id==1 时立即确认轨迹).
+            self._det_boxed = False
+            probe = _build_tracker(self._tracker_args)
+            try:
+                probe.update(self._wrap_det(det, dummy), dummy)
+            except (AttributeError, TypeError, IndexError, KeyError):
+                self._det_boxed = True
+
+            # 正式自检: 全新 tracker + 锁定契约 (首帧即激活, 与在线路径一致)
+            tracker = _build_tracker(self._tracker_args)
+
+            def _update(det_arr):
+                return tracker.update(self._wrap_det(det_arr, dummy), dummy)
+
+            first = _update(det)
             if first is None or (len(first) and np.asarray(first).shape[1] < 7):
                 raise TrackerApiError(f"update() 返回形状异常: {None if first is None else np.asarray(first).shape}")
             if len(first) == 0:
@@ -465,7 +511,7 @@ class GpuInferEngine:
             tid1 = int(row[4])
             det2 = det.copy()
             det2[0, :4] += 0.01  # 轻微位移, 应关联为同一目标
-            second = tracker.update(det2, dummy)
+            second = _update(det2)
             if len(second) == 0 or int(np.asarray(second)[0][4]) != tid1:
                 raise TrackerApiError("跨帧未保持同一 track_id")
         except TrackerApiError:
@@ -476,17 +522,21 @@ class GpuInferEngine:
     # ---- 可观测性 ----
 
     def vram_mb(self) -> float:
+        """显存占用 (MB); CPU 引擎恒为 0."""
+        if self._cuda_index is None:
+            return 0.0
         try:
             import torch
             if not torch.cuda.is_available():
                 return 0.0
-            return torch.cuda.memory_allocated(self.gpu_id) / 1024 / 1024
+            return torch.cuda.memory_allocated(self._cuda_index) / 1024 / 1024
         except Exception:  # noqa: BLE001
             return 0.0
 
     def snapshot(self) -> dict:
         return {
-            "gpu_id": self.gpu_id,
+            "engine_id": self.engine_id,
+            "device": self.device,
             "devices": len(self._devices),
             "slots": self._slots_total,
             "model_loaded": self._model is not None,
@@ -511,14 +561,17 @@ def _load_tracker_args(tracker_cfg: str):
 def _build_tracker(args):
     """按配置构造一路官方跟踪器实例 (botsort/bytetrack).
 
-    frame_rate 与 ultralytics 在 numpy 列表输入下的取值一致 (dataset.fps 默认 30),
-    保证与旧 `Model.track()` 路径的行为一致.
+    8.3.x 签名为 (args, frame_rate), frame_rate=30 时 max_time_lost == track_buffer;
+    8.4.x 起移除 frame_rate 参数, 直接用 args.track_buffer (语义等价), 故先按旧签名
+    构造、TypeError 时回退新签名, 兼容两个版本系列 (requirements 锁 <9 为第一道防线).
     """
     from ultralytics.trackers import BOTSORT, BYTETracker
 
     tracker_type = getattr(args, "tracker_type", "botsort")
-    if tracker_type == "bytetrack":
-        return BYTETracker(args=args, frame_rate=30)
-    if tracker_type == "botsort":
-        return BOTSORT(args=args, frame_rate=30)
-    raise TrackerApiError(f"未知 tracker_type: {tracker_type}")
+    cls = {"bytetrack": BYTETracker, "botsort": BOTSORT}.get(tracker_type)
+    if cls is None:
+        raise TrackerApiError(f"未知 tracker_type: {tracker_type}")
+    try:
+        return cls(args=args, frame_rate=30)
+    except TypeError:
+        return cls(args=args)

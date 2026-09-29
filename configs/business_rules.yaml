@@ -60,7 +60,10 @@ tracking:                  # 目标跟踪参数
   yolo_iou: 0.5                  # NMS IoU 阈值
   track_buffer: 30               # 跟踪历史最大长度 (由 bytetrack.yaml 决定算法)
 
-inference:                 # GPU 批量推理/解码采样参数 (热重载: 下一批生效, 无需重启)
-  imgsz: 960                     # 推理输入尺寸(短边); 原图更小则用原图
+inference:                 # 批量推理/解码采样参数 (热重载: 下一批生效, 无需重启)
+  # imgsz / decode_max_fps 改由各部署的 env 控制 (INFER_IMGSZ / DECODE_MAX_FPS):
+  # 此处一旦配置会覆盖 env, 而 CPU/GPU 两台机器合理值不同 (640 vs 960, 4 vs 8),
+  # 故留空按 env 走; 临时压测可解开注释覆盖.
+  # imgsz: 960                   # 推理输入尺寸(短边); 原图更小则用原图
   batch_timeout_ms: 40           # 组批等待窗口(毫秒): 凑批上限时长, 单路时即纯延迟
-  decode_max_fps: 8.0            # 解码侧采样帧率: >0 按此帧率 grab/retrieve 节流; 0=不限速 (仅 gpu_batch 生效)
+  # decode_max_fps: 8.0          # 解码侧采样帧率: >0 按此帧率 grab/retrieve 节流; 0=不限速

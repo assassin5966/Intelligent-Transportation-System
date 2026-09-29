@@ -38,9 +38,8 @@ async def lifespan(app: FastAPI):
         await model_pool.initialize()
         snap = model_pool.snapshot()
         logger.info(
-            f"推理模式={snap['mode']} ({snap['reason']}) "
-            f"引擎={len(snap['engines'])} 卡 显存="
-            + (", ".join(f"gpu{e['gpu_id']}:{e['vram_mb']}MB" for e in snap['engines']) or "无")
+            f"推理模式={snap['mode']} ({snap['reason']}) 引擎={len(snap['engines'])} 显存="
+            + (", ".join(f"{e['engine_id']}:{e['vram_mb']}MB" for e in snap['engines']) or "无")
         )
     yield
     if _simulator is not None:
@@ -100,7 +99,7 @@ async def list_devices():
             "stream_url": p.stream_url,
             "running": p.running,
             "infer_mode": p.mode,
-            "gpu_id": p.lease.gpu_id if p.lease is not None else None,
+            "engine_id": p.lease.engine_id if p.lease is not None else None,
         }
         for d, p in _pipelines.items()
     ]
@@ -150,7 +149,7 @@ async def register(dev: DeviceRegister):
         "device_id": dev.device_id,
         "status": "started",
         "infer_mode": p.mode,
-        "gpu_id": lease.gpu_id if lease is not None else None,
+        "engine_id": lease.engine_id if lease is not None else None,
     }
 
 
