@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>硬件监控 - 智慧古城监管平台</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: "Segoe UI", "Microsoft YaHei", sans-serif; background: #1a1a2e; color: #e0e0e0; font-size: 14px; padding: 20px; }
+  .nav { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 18px; }
+  .nav a {
+    display: inline-block; padding: 8px 16px; background: #2a2a4e; border: 1px solid #3a3a5e;
+    border-radius: 6px; color: #e0e0e0; text-decoration: none; font-size: 14px; transition: all .2s;
+  }
+  .nav a:hover { background: #34345c; border-color: #0d7377; color: #8be9fd; transform: translateY(-1px); }
+  .nav a.active { background: #0d7377; border-color: #14a085; color: #fff; font-weight: 600; }
+  .topline { display: flex; align-items: center; gap: 14px; margin-bottom: 16px; flex-wrap: wrap; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: #666; display: inline-block; }
+  .dot.on { background: #2ecc71; box-shadow: 0 0 8px #2ecc71; }
+  .dot.off { background: #ff5e5e; box-shadow: 0 0 8px #ff5e5e; }
+  #updateTime { color: #888; font-size: 12px; }
+  h2 { font-size: 14px; color: #8be9fd; margin-bottom: 12px; }
+  .panel { background: #232344; border: 1px solid #333; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); gap: 16px; }
+  /* GPU 指标大块 */
+  .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
+  .metric { background: #1c1c38; border: 1px solid #333; border-radius: 8px; padding: 12px 14px; }
+  .metric .label { font-size: 12px; color: #8fa8cf; margin-bottom: 6px; }
+  .metric .value { font-size: 24px; font-weight: 700; color: #fff; line-height: 1.2; }
+  .metric .value small { font-size: 12px; color: #8fa8cf; font-weight: 400; }
+  .bar { height: 7px; background: #12122a; border-radius: 4px; margin-top: 8px; overflow: hidden; }
+  .bar > div { height: 100%; border-radius: 4px; background: #0d7377; transition: width .4s, background .4s; }
+  /* 温度色阶 */
+  .t-cool { color: #2ecc71; } .t-warm { color: #f1c40f; } .t-hot { color: #ff5e5e; }
+  .bg-cool { background: #2ecc71; } .bg-warm { background: #f1c40f; } .bg-hot { background: #ff5e5e; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { border: 1px solid #333; padding: 6px 10px; text-align: left; }
+  th { background: #2a2a4e; color: #8be9fd; white-space: nowrap; }
+  .warn { color: #ff5e5e; font-weight: 600; }
+  .ok { color: #2ecc71; }
+  .dim { color: #888; }
+  .hint { font-size: 12px; color: #888; margin-top: 8px; line-height: 1.6; }
+  .flagchip { display: inline-block; border: 1px solid currentColor; border-radius: 4px; padding: 1px 8px; font-size: 11px; margin: 2px 4px 2px 0; }
+  canvas { width: 100%; height: 46px; display: block; }
+  .empty { text-align: center; color: #888; padding: 20px; }
+  .offline { text-align: center; color: #ff5e5e; padding: 40px 20px; font-size: 15px; }
+</style>
+</head>
+<body>
+  <div class="nav">
+    <a href="/static/device-config.html">设备计数配置</a>
+    <a href="/static/device-info.html">设备信息管理</a>
+    <a href="/static/business-rules.html">业务规则配置</a>
+    <a href="/static/intersection-config.html">路口数据卡配置</a>
+    <a href="/static/hardware-monitor.html" class="active">硬件监控</a>
+  </div>
+
+  <div class="topline">
+    <span><span class="dot" id="dot"></span> <strong id="aiState">连接中…</strong></span>
+    <span id="updateTime"></span>
+    <span class="dim">每 3 秒自动刷新</span>
+  </div>
+
+  <div id="offlineBox" class="panel offline" style="display:none">AI 分析服务离线，无法采集硬件指标（检查 dt-ai 容器状态）</div>
+
+  <!-- GPU 总览 -->
+  <div class="panel" id="gpuPanel">
+    <h2>显卡 (GPU) — AI 推理</h2>
+    <div id="gpuBody"></div>
+    <div class="hint">温度阈值：&lt;70°C 正常 / 70~85°C 偏热 / &ge;85°C 高温（T4 降速阈值 93°C，最高工作温度 85°C）。
+    「硬件降频标志」非 Active 才正常；此前 T4 曾出现散热失效（97°C 锁 300MHz），如再亮红请立即检查风道。</div>
+  </div>
+
+  <div class="grid">
+    <!-- 推理引擎 -->
+    <div class="panel">
+      <h2>推理引擎状态</h2>
+      <div id="inferBody"></div>
+    </div>
+    <!-- 趋势图 -->
+    <div class="panel">
+      <h2>趋势（最近 100 次采样）</h2>
+      <div class="metric" style="margin-bottom:10px"><div class="label">GPU 温度 °C</div><canvas id="cvTemp"></canvas></div>
+      <div class="metric" style="margin-bottom:10px"><div class="label">GPU 利用率 %</div><canvas id="cvUtil"></canvas></div>
+      <div class="metric"><div class="label">显存占用 %</div><canvas id="cvMem"></canvas></div>
+    </div>
+  </div>
+
+  <div class="grid">
+    <!-- 主机 -->
+    <div class="panel">
+      <h2>主机 (CPU / 内存 / 磁盘)</h2>
+      <div id="hostBody"></div>
+    </div>
+    <!-- GPU 进程 -->
+    <div class="panel">
+      <h2>GPU 进程</h2>
+      <div id="procBody"></div>
+    </div>
+  </div>
+
+<script>
+const HIST = { temp: [], util: [], mem: [] };
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? '—').replace(/[<>&"]/g, (c) => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
+const num = (v) => (v === undefined || v === null || v === '' || isNaN(Number(v))) ? null : Number(v);
+const f1 = (v) => v === null ? '—' : v.toFixed(1);
+
+function tempClass(t) { return t === null ? '' : t >= 85 ? 't-hot' : t >= 70 ? 't-warm' : 't-cool'; }
+function tempBg(t) { return t === null ? '' : t >= 85 ? 'bg-hot' : t >= 70 ? 'bg-warm' : 'bg-cool'; }
+function barColor(p) { return p >= 90 ? 'bg-hot' : p >= 75 ? 'bg-warm' : ''; }
+
+function metricHtml(label, value, unit, pct) {
+  const bar = pct === null ? '' : `<div class="bar"><div class="${barColor(pct)}" style="width:${Math.min(100, pct)}%"></div></div>`;
+  return `<div class="metric"><div class="label">${label}</div><div class="value">${value}<small> ${unit}</small></div>${bar}</div>`;
+}
+
+function render(d) {
+  const online = !!d.ai_online;
+  $('dot').className = 'dot ' + (online ? 'on' : 'off');
+  $('aiState').textContent = online ? 'AI 服务在线' : 'AI 服务离线';
+  $('updateTime').textContent = '更新于 ' + new Date().toLocaleTimeString('zh-CN', { hour12: false });
+  $('offlineBox').style.display = online ? 'none' : '';
+
+  if (!online || !d.gpu) { $('gpuBody').innerHTML = ''; $('inferBody').innerHTML = ''; $('hostBody').innerHTML = ''; $('procBody').innerHTML = ''; return; }
+
+  // ---- GPU ----
+  const g = (d.gpu.gpus || [])[0];
+  if (!g) {
+    $('gpuBody').innerHTML = `<div class="empty">未采集到 GPU 数据${d.gpu.error ? '：' + esc(d.gpu.error) : ''}</div>`;
+  } else {
+    const t = num(g['temperature.gpu']), util = num(g['utilization.gpu']);
+    const mu = num(g['memory.used']), mt = num(g['memory.total']);
+    const pw = num(g['power.draw']), pl = num(g['power.limit']);
+    const sm = num(g['clocks.current.sm']), smMax = num(g['clocks.max.sm']), cm = num(g['clocks.current.memory']);
+    const memPct = (mu !== null && mt) ? Math.round(100 * mu / mt) : null;
+    const powPct = (pw !== null && pl) ? Math.round(100 * pw / pl) : null;
+    const flags = d.gpu.flags || {};
+    const flagChips = Object.entries(flags).map(([k, v]) =>
+      v === 'Active' || v === 'Yes'
+        ? `<span class="flagchip warn">⚠ ${esc(k)}: Active</span>`
+        : `<span class="flagchip ok">${esc(k)}: ${esc(v ?? '—')}</span>`).join('');
+    $('gpuBody').innerHTML = `
+      <div class="metrics">
+        ${metricHtml('温度', t === null ? '—' : `<span class="${tempClass(t)}">${t}</span>`, '°C', t)}
+        ${metricHtml('利用率', util === null ? '—' : util, '%', util)}
+        ${metricHtml('显存', `${mu ?? '—'}<small>/${mt ?? '—'} MiB</small>`, '', memPct)}
+        ${metricHtml('功耗', pw === null ? '—' : pw, pl ? `/ ${pl} W` : 'W', powPct)}
+        ${metricHtml('SM 频率', sm === null ? '—' : sm, smMax ? `/ ${smMax} MHz` : 'MHz', null)}
+        ${metricHtml('显存频率', cm === null ? '—' : cm, 'MHz', null)}
+        ${metricHtml('性能状态', esc(g['pstate'] || '—'), '', null)}
+        ${metricHtml('风扇', esc(g['fan.speed'] === 'N/A' ? 'N/A (被动)' : g['fan.speed']), '', null)}
+      </div>
+      <div style="margin-top:10px">${flagChips || '<span class="dim">无降频标志数据</span>'}</div>`;
+    HIST.temp.push(t); HIST.util.push(util); HIST.mem.push(memPct);
+    Object.values(HIST).forEach((a) => { while (a.length > 100) a.shift(); });
+    const tempColor = t === null ? '#2ecc71' : t >= 85 ? '#ff5e5e' : t >= 70 ? '#f1c40f' : '#2ecc71';
+    drawSpark('cvTemp', HIST.temp, 100, tempColor);
+    drawSpark('cvUtil', HIST.util, 100, '#0d7377');
+    drawSpark('cvMem', HIST.mem, 100, '#2f9dd8');
+  }
+
+  // ---- GPU 进程 ----
+  const procs = d.gpu.processes || [];
+  $('procBody').innerHTML = procs.length
+    ? `<table><tr><th>PID</th><th>进程</th><th>显存 (MiB)</th></tr>${procs.map((p) =>
+        `<tr><td>${p.pid}</td><td>${p.name === '[Not Found]' ? 'python <span class="dim">(AI 推理, 容器内不可见名)</span>' : esc(p.name)}</td><td>${p.mem_mb}</td></tr>`).join('')}</table>`
+    : '<div class="empty">当前无 GPU 计算进程</div>';
+
+  // ---- 推理引擎 ----
+  const inf = d.infer || {};
+  const eng = inf.engines || [];
+  const cfg = inf.config || {};
+  $('inferBody').innerHTML = `
+    <table>
+      <tr><th>推理模式</th><td class="${inf.mode === 'gpu_batch' ? 'ok' : 'warn'}">${esc(inf.mode || '—')}${inf.reason ? ` <span class="dim">(${esc(inf.reason)})</span>` : ''}</td></tr>
+      <tr><th>在管设备 / 槽位上限</th><td>${d.active_devices ?? '—'} 路${cfg.slots_max ? ` / 槽位上限 ${cfg.slots_max}` : ''}${cfg.capacity ? ` (预期 ${cfg.capacity} 路)` : ''}</td></tr>
+      <tr><th>检测模型</th><td>${esc(cfg.model || '—')}</td></tr>
+      <tr><th>解码节流</th><td>${cfg.decode_max_fps ? cfg.decode_max_fps + ' fps' : '—'}</td></tr>
+      <tr><th>引擎实例</th><td>${eng.length ? eng.map((e) =>
+        `${esc(e.engine_id || e.engine || '?')}${e.vram_mb != null ? ` · ${e.vram_mb}MB` : ''}${e.devices != null ? ` · ${e.devices} 路` : ''}`).join('<br>') : '<span class="dim">无</span>'}</td></tr>
+    </table>`;
+
+  // ---- 主机 ----
+  const h = d.host || {};
+  const up = h.uptime_s ? `${Math.floor(h.uptime_s / 86400)} 天 ${Math.floor(h.uptime_s % 86400 / 3600)} 时` : '—';
+  const dk = h.disks && (h.disks.data || h.disks['/']);
+  const ap = d.ai_process;
+  $('hostBody').innerHTML = `
+    <table>
+      <tr><th>CPU</th><td>${esc(h.cpu_model || '—')} <span class="dim">(${h.cpu_logical || '—'} 线程)</span></td></tr>
+      <tr><th>CPU 使用率</th><td class="${(h.cpu_percent || 0) > 85 ? 'warn' : ''}">${h.cpu_percent === null || h.cpu_percent === undefined ? '—' : h.cpu_percent + ' %'}</td></tr>
+      <tr><th>负载 (1/5/15 分)</th><td>${(h.load || []).join(' / ')}</td></tr>
+      <tr><th>内存</th><td>${h.mem_used_gb ?? '—'} / ${h.mem_total_gb ?? '—'} GB <span class="dim">(${h.mem_percent ?? '—'}%)</span></td></tr>
+      <tr><th>Swap</th><td>${h.swap_percent ?? '—'} %</td></tr>
+      <tr><th>磁盘 (/home)</th><td>${dk ? `${dk.used_gb} / ${dk.total_gb} GB (${dk.percent}%)` : '—'}</td></tr>
+      <tr><th>开机时长</th><td>${up}</td></tr>
+      <tr><th>AI 进程</th><td>${ap ? `内存 ${ap.rss_mb} MB · ${ap.threads} 线程 · 已运行 ${Math.floor(ap.uptime_s / 3600)} 时` : '—'}</td></tr>
+    </table>`;
+}
+
+// ---- 迷你趋势图 ----
+function drawSpark(id, arr, max, color) {
+  const cv = $(id); if (!cv) return;
+  const w = cv.width = cv.offsetWidth * 2, h = cv.height = 92;
+  const ctx = cv.getContext('2d');
+  ctx.clearRect(0, 0, w, h);
+  if (arr.length < 2) return;
+  ctx.strokeStyle = color; ctx.lineWidth = 4; ctx.beginPath();
+  arr.forEach((v, i) => {
+    const x = i / (arr.length - 1) * (w - 8) + 4;
+    const y = h - 6 - Math.min(1, Math.max(0, v / max)) * (h - 12);
+    i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+  });
+  ctx.stroke();
+  // 最新值圆点
+  const lx = w - 4, ly = h - 6 - Math.min(1, Math.max(0, arr[arr.length - 1] / max)) * (h - 12);
+  ctx.fillStyle = color; ctx.beginPath(); ctx.arc(lx, ly, 5, 0, Math.PI * 2); ctx.fill();
+}
+
+async function refresh() {
+  try {
+    const r = await fetch('/api/hardware', { cache: 'no-store' });
+    render(await r.json());
+  } catch (e) {
+    render({ ai_online: false, error: String(e) });
+  }
+}
+refresh();
+setInterval(refresh, 3000);
+</script>
+</body>
+</html>

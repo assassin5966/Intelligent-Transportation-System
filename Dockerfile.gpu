@@ -1,0 +1,95 @@
+# ============================================================
+# 智慧古城车辆人流监管平台 - GPU 版统一镜像 (NVIDIA CUDA 12.2 / amd64)
+# 适用: x86_64 + NVIDIA GPU 服务器 (8x RTX 4090 等, 需预装 nvidia 驱动 + nvidia-container-toolkit)
+#
+# 构建:
+#   docker build -f Dockerfile.gpu -t smart-city-platform:gpu .
+#
+# 启动 (独立编排方式, ai/backend 均使用本镜像, ai 预留 8 卡):
+#   docker compose -f docker-compose.gpu.yml up -d --build
+#
+# 说明:
+#   - 基础镜像 CUDA 12.2.2 runtime; PyTorch 用 cu121 官方轮子,
+#     CUDA 12.x 小版本兼容 (驱动 R530+ 即可), 4090 (Ada, sm_89) 原生支持
+#   - torch 的 cudnn/cublas 等由 pip nvidia-*-cu12 子包自带, 基础镜像无需 cudnn
+#   - ultralytics YOLO 与 Chronos 均自动 torch.cuda.is_available() 选卡, 业务代码零改动
+#   - 8 卡分片由 app/ai/model_pool.py 实现: 每卡 1 个模型实例 + 批内多路 track,
+#     设备按"最少负载"均摊到各卡; 无需多容器/多 CUDA_VISIBLE_DEVICES 实例.
+#     CPU 环境或自检失败自动降级 legacy (每路独立实例) 路径
+# ============================================================
+
+FROM nvidia/cuda:12.2.2-runtime-ubuntu22.04
+
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+    DEBIAN_FRONTEND=noninteractive
+
+# ---------- 1. 系统依赖 + Python 3.11 (deadsnakes) ----------
+# libgl1/libglib2.0-0: OpenCV 运行库; libgomp1: OpenMP; ffmpeg: RTSP 解码
+RUN sed -i 's|archive.ubuntu.com|mirrors.tuna.tsinghua.edu.cn|g; s|security.ubuntu.com|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list && \
+    apt-get update && apt-get install -y --no-install-recommends \
+        software-properties-common gnupg ca-certificates && \
+    add-apt-repository -y ppa:deadsnakes/ppa && \
+    apt-get update && apt-get install -y --no-install-recommends \
+        python3.11 python3.11-venv python3.11-distutils \
+        libgl1 libglib2.0-0 libgomp1 ffmpeg gcc g++ tzdata && \
+    rm -rf /var/lib/apt/lists/* && \
+    ln -sf /usr/bin/python3.11 /usr/local/bin/python && \
+    python -m ensurepip --upgrade && \
+    ln -sf /usr/local/bin/pip3 /usr/local/bin/pip
+
+WORKDIR /app
+
+# 国内 PyPI 镜像加速 (torch 仍走 pytorch 官方 cu121 源, 见下方 --index-url)
+ENV PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# ---------- 2. GPU 版 PyTorch + 业务依赖 ----------
+# torch cu121: 与 CUDA 12.2 驱动小版本兼容, 自带 cudnn (nvidia-cudnn-cu12 子包)
+# 依赖安装 (默认): 区间约束的 requirements.txt。
+# 离线可复现 (推荐): 在联网构建机执行 scripts/gen_requirements_lock.sh 生成 requirements.lock.txt (精确 == 锁),
+#   构建时将其拷入镜像并改用 `pip install -r /app/requirements.lock.txt` (见 docs/OFFLINE_BUILD.md 的"离线锁依赖"一节)。
+COPY requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cu121 && \
+    pip install --no-cache-dir -r /app/requirements.txt
+
+# ---------- 3. 应用代码 (与 CPU 版 Dockerfile 保持一致) ----------
+COPY app /app/app
+COPY configs /app/configs
+COPY scripts /app/scripts
+COPY tool /app/tool
+COPY static /app/static
+# models/ 构建前必须本地准备 models/yolo11n.pt
+COPY models /app/models
+# 构建前校验: 权重必须随离线 tar 预置, 不联网下载。缺失/为空时清晰报错, 而非含糊失败。
+RUN if [ -z "$(ls /app/models/*.pt 2>/dev/null)" ]; then \
+      echo "============================================================="; \
+      echo "错误: /app/models 下未找到任何 *.pt 权重文件。"; \
+      echo "本项目离线构建, 权重不联网下载。请先将 yolo11n.pt 放入 ./models/"; \
+      echo "(随离线 tar 一起预置) 再执行 docker build。"; \
+      echo "============================================================="; \
+      exit 1; \
+    fi
+# data/ 设备播种文件 (device_geo.json/device_category.json, 生产离线无宿主机挂载, 烘进镜像)
+COPY data /app/data
+
+# ---------- 4. 环境配置 ----------
+ENV TZ=Asia/Shanghai \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    LANG=C.UTF-8
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+
+# 校验权重可加载 + CUDA 可用 (交叉构建/QEMU 下传 --build-arg SKIP_VALIDATE=1 跳过,
+# torch 导入在模拟层极慢; 权重完整性由 start_all_gpu.sh 首启健康检查兜底)
+ARG SKIP_VALIDATE=0
+RUN if [ "$SKIP_VALIDATE" = "1" ]; then \
+        echo "SKIP_VALIDATE=1, 跳过 YOLO 权重校验 (交叉构建模式)"; \
+    else \
+        python -c "from ultralytics import YOLO; YOLO('models/yolo11n.pt'); import torch; print('torch', torch.__version__, 'cuda_built:', torch.backends.cuda.is_built())"; \
+    fi
+
+# ---------- 5. 端口 ----------
+EXPOSE 8000 8001
+
+# ---------- 6. 启动命令 (与 CPU 版一致, compose 按 service 覆盖) ----------
+CMD ["uvicorn", "app.backend.main:app", "--host", "0.0.0.0", "--port", "8000"]

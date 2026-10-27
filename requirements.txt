@@ -1,0 +1,42 @@
+# ============================================================
+# 智慧古城车辆人流监管平台 - AI 分析 + 业务后端 统一依赖
+# 技术栈: YOLO11 / BoT-SORT / FastAPI / Redis / Chronos-2
+# ============================================================
+
+# === AI 视觉分析层 ===
+# torch/torchvision 在 Dockerfile 中单独安装 (使用 PyTorch 官方 CPU 源)
+# 锁定 <9: GPU 引擎按官方跟踪器输出列序 [x1,y1,x2,y2,id,conf,cls,idx] 解析结果,
+# 大版本变更可能改列序/API (启动自检 app/ai/gpu_engine._selftest 会拦截)
+ultralytics>=8.3.0,<9.0.0
+lap>=0.5.12
+opencv-python-headless>=4.9.0
+numpy>=1.26.0
+
+# === 时序预测层 ===
+chronos-forecasting>=1.4.0
+transformers>=4.40.0
+accelerate>=0.30.0
+
+# === 业务后端层 ===
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+python-multipart>=0.0.9
+pydantic>=2.7.0
+pydantic-settings>=2.2.0
+
+# === 数据存储 ===
+redis>=5.0.0
+aiomysql>=0.2.0
+cryptography>=41.0.0
+
+# === 通信与工具 ===
+httpx>=0.27.0
+websockets>=12.0
+python-dotenv>=1.0.0
+loguru>=0.7.2
+tenacity>=8.3.0
+pyyaml>=6.0
+
+# === 实时位置接入 (Apache Pulsar, 对接《实时位置数据接入规范V1.0》) ===
+# Pulsar Python 客户端(封装 C++ client); 离线部署需随镜像预装(见 docs/GPS_LOCATION_INTEGRATION.md)
+pulsar-client>=3.0.0

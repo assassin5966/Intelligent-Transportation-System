@@ -1,0 +1,449 @@
+# GPU 环境排查方案（零计数 / 推理挂起）
+
+> 适用：`23.45.1.115` · CentOS 9 (amd64) · RTX 4090 × 8（驱动 535.230.02）· Docker + nvidia-container-toolkit
+>
+> **本方案是排查起点。** 环境层没过，不要看另外两份。
+> 配套：离线排查方案（验优化与计数）· 技术方案（看设计）
+
+```bash
+cd /path/to/DT
+COMPOSE="docker compose --env-file .env.gpu -f docker-compose.gpu.yml"
+
+# 容器名随 compose 项目名变化，本文一律用 $COMPOSE 定位（等价于 docker exec <项目>-ai-1）
+```
+
+---
+
+## 0. 从哪开始
+
+**先跑这一条**：
+
+```bash
+bash scripts/start_all_gpu.sh
+```
+
+看第 6/6 步「GPU 首推验证」。它内部已完成：语法自检 → WVP 套 → 建表 → ZLM API → `up -d --force-recreate backend ai frontend` → 六阶段首推。
+
+| 第 6/6 步结果 | 去哪 |
+|---|---|
+| 打印「✔ GPU 首推验证通过」 | 环境层过关 → 转 离线排查方案 L0 |
+| 卡在 `stage1~stage6` 某一行 | §2.L3 卡点表 → §4 处置 |
+| 提示「MOCK_ENABLED=true，跳过首推验证」 | 改 `.env.gpu` 的 `MOCK_ENABLED=false` → `$COMPOSE up -d backend ai` 后重跑 |
+
+### 按现象分流
+
+| 现象 | 去 |
+|---|---|
+| 容器起不来 / AI 反复重启 | §2.L2 → §4.R2 / R3 |
+| 容器都在、设备在线，**零计数** | §2.L3（六阶段首推） |
+| 心跳正常、日志停在「加载 YOLO 模型」后无输出 | §2.L3 + §2.L5 |
+| 日志有「视频流已释放 (共 1 帧)」 | §2.L3（环境卡死的典型特征） |
+| 有计数但数不准 | 不属本方案 → 离线排查方案 L3/L5 |
+
+### 30 秒三角定位（跑起来之后日常用）
+
+```bash
+curl -s http://23.45.1.115:8001/health | python3 -c "import json,sys;d=json.load(sys.stdin);print(d.get('infer'))"
+$COMPOSE logs --tail 20 ai | grep -E "运行统计|推理模式"
+curl -s "http://23.45.1.115:8000/api/events?limit=3" | python3 -m json.tool
+```
+
+---
+
+## 1. 关卡速查表
+
+| 关 | 目的 | 一条命令 | 通过判据 | 不过去哪 |
+|---|---|---|---|---|
+| L1 | 基础服务 WVP/ZLM | `docker ps \| grep wvp-upper` | 三容器 Up、ZLM `code=0` | §2.L1 |
+| L2 | 容器与健康检查 | `$COMPOSE ps` | backend `healthy`、AI `/health` 有响应 | §2.L2 |
+| L3 | **六阶段首推** | `bash scripts/start_all_gpu.sh` | 「✔ GPU 首推验证通过」 | §2.L3 |
+| L4 | 模型/ultralytics 层 | `$COMPOSE exec -T ai ls -la /app/models/yolo11n.pt` | 文件在位且 md5 一致 | §2.L4 |
+| L5 | 链路分段定位 | `$COMPOSE logs --tail 50 ai \| grep -E "管道启动\|已释放\|心跳"` | 每路持续产出 `运行统计` | §2.L5 |
+| L6 | 重启后链路自检 | §2.L6 的 a~d 四条 | 事件 `occurred_at` 为当前时间 | §2.L6 |
+
+---
+
+## 2. 逐关命令
+
+### L1 基础服务（WVP / ZLM）
+
+**① 命令**
+
+```bash
+# 1) WVP 套容器状态（三容器应全 Up）
+docker ps --format "table {{.Names}}\t{{.Status}}" | grep wvp-upper
+
+# 2) WVP 管理后台可达
+curl -s -o /dev/null -w "%{http_code}\n" -m 5 http://23.45.1.115:18080/
+
+# 3) ZLM 流媒体 API（secret 与 start_all_gpu.sh 三处一致）
+curl -s -m 5 "http://23.45.1.115:12081/index/api/getServerConfig?secret=zlm_secret_7890" | head -c 120
+
+# 4) 在线流数量（手动点播一路后应 >0）
+curl -s -m 5 "http://23.45.1.115:12081/index/api/getMediaList?secret=zlm_secret_7890" \
+  | python3 -c "import json,sys; d=json.load(sys.stdin); print('在线流数:', len(d.get('data') or []))"
+
+# 5) 国标设备是否持续注册
+docker logs --since 10m wvp-upper-wvp 2>&1 | grep -ciE "注册|register|keepalive"
+
+# 6) 业务侧 WVP 开关
+grep -E "^WVP_ENABLED|^MOCK_ENABLED|^WVP_API_URL" .env.gpu
+```
+
+**② 通过判据**：三容器 Up；后台 `200`；ZLM 返回 `{"code":0`；`WVP_ENABLED=true`。
+
+**③ 不通过 → 处置**
+
+| 现象 | 处置 |
+|---|---|
+| 容器 Exited / Restarting | `cd setting-server-gpu && docker compose up -d`；起不来先看容器日志（最常见：MySQL 未就绪导致 WVP 反复重启） |
+| 后台非 200 / 超时 | `docker logs wvp-upper-wvp`；确认 18080 已映射 |
+| ZLM 超时或 `code≠0` | `docker logs wvp-upper-zlm`；核对 secret 三处一致 |
+| `getMediaList` 长期 0 流 | WVP 后台确认通道在线，手动点播看报错（设备离线／未注册／出口不通） |
+| `WVP_ENABLED=false` | 改 `true` 后 `$COMPOSE up -d backend ai` |
+| 注册数为 0 | 查摄像头侧 SIP 指向 `23.45.1.115:5060` 与网络可达 |
+
+### L2 容器与健康检查
+
+**① 命令**
+
+```bash
+# 1) 业务容器状态（backend 应带 healthy）
+$COMPOSE ps
+
+# 2) 两个健康检查接口
+curl -s -m 5 http://23.45.1.115:8000/health | python3 -m json.tool    # 业务后端
+curl -s -m 5 http://23.45.1.115:8001/health | python3 -m json.tool    # AI 服务
+
+# 3) 基础环境三项快查（宿主机 + 容器）
+nvidia-smi --query-gpu=name,driver_version --format=csv,noheader | head -2
+modinfo nvidia | grep ^version                                        # 应与上面完全一致
+$COMPOSE exec -T ai ls -la /dev/nvidia* | head -5                     # 应有 nvidia0/uvm 等
+$COMPOSE exec -T ai env | grep -E "NVIDIA|PYTORCH"                    # PYTORCH_CUDA_ALLOC_CONF 应为空
+
+# 4) AI 启动日志
+$COMPOSE logs --tail 200 ai
+```
+
+**② 通过判据**：backend `(healthy)`；AI `/health` 返回 JSON；容器内可见 8 卡；`/dev/nvidia*` 齐全；无 `PYTORCH_CUDA_ALLOC_CONF`。
+
+**③ 不通过 → 处置**
+
+| 现象 | 处置 |
+|---|---|
+| backend 非 healthy | `$COMPOSE logs --tail 100 backend`；确认 dt-redis / dt-mysql 先行就绪 |
+| AI `/health` 无响应 | `$COMPOSE logs --tail 200 ai`，看是否卡在首推 → 进 L3 |
+| `/health` 返回 `mock:true` | 模拟模式，不拉流不推理（属预期）；正式跑需 `MOCK_ENABLED=false` |
+| 容器内无 `/dev/nvidia*` | §4.R2 |
+| 容器内 `nvidia-smi` 报错 | §4.R2 / §4.R3 |
+| 两处驱动版本不一致 | §4.R3 |
+
+### L3 六阶段首推验证（第一判据）
+
+**① 命令**
+
+```bash
+# 主命令（scripts/start_all_gpu.sh 第 6/6 步内置，90s 超时，不会卡死脚本）
+bash scripts/start_all_gpu.sh
+
+# 只看这一段
+bash scripts/start_all_gpu.sh 2>&1 | grep -A8 "GPU 首推验证"
+```
+
+手工复现（前 4 阶段，按需）：
+
+```bash
+$COMPOSE exec -T ai bash -c '
+echo "=== 1. 容器内 GPU 设备 ==="; ls /dev/nvidia* 2>&1 | head -3
+echo "=== 2. 容器内 nvidia-smi ==="; nvidia-smi --query-gpu=name,driver_version --format=csv,noheader 2>&1 | head -2
+echo "=== 3. torch 导入/CUDA 初始化 ==="; python -c "
+import time; t0=time.time(); import torch
+print(f\"torch {torch.__version__} import={time.time()-t0:.1f}s\")
+print(\"cuda可用:\", torch.cuda.is_available())
+t0=time.time(); x=torch.zeros(8, device=\"cuda\"); torch.cuda.synchronize()
+print(f\"首次CUDA初始化={time.time()-t0:.1f}s, 设备:\", torch.cuda.get_device_name(0))
+" 2>&1
+echo "=== 4. YOLO 构造 + 首次推理 ==="; python -c "
+import time, numpy as np
+from ultralytics import YOLO
+t0=time.time(); m=YOLO(\"models/yolo11n.pt\"); print(f\"YOLO构造={time.time()-t0:.1f}s\")
+t0=time.time(); m.predict(np.zeros((1080,1920,3), np.uint8), imgsz=960, half=True, device=0, verbose=False)
+print(f\"首次推理={time.time()-t0:.1f}s\")
+" 2>&1
+'
+```
+
+**② 通过判据**（六行全出且末行是 `✔ GPU 首推验证通过`）
+
+```
+stage1 torch导入=X.Xs cuda可用=True 卡数=8              <- 容器注入层
+stage2 首次CUDA初始化=X.Xs 设备=NVIDIA GeForce RTX 4090  <- 驱动上下文层
+stage3 YOLO构造=X.Xs                                    <- 权重/配置层
+stage4 首次track=X.Xs                                   <- 端到端推理层
+stage5 跟踪器API自检=X.Xs 列数=8 id=...                  <- 官方 tracker API 层
+stage6 批量推理(批4@960/half)=X.Xs                       <- 批量路径 + FP16 层
+```
+
+**③ 不通过 → 处置**
+
+| 卡住点 | 根因 | 去哪 |
+|---|---|---|
+| stage1（无 `/dev/nvidia*`） | 容器 GPU 设备未注入 | §4.R2 |
+| stage2 报错 | 驱动库注入不完整 | §4.R2 |
+| stage3（`cuda可用: False`） | torch 看不到 GPU | §4.R2 / §4.R3 |
+| **stage2/3「首次CUDA初始化」一直不出**（Ctrl+C 无输出、进程 D 状态） | **驱动上下文／显存分配器挂起（现场故障特征）** | §4.R1 + §4.R3 |
+| stage3「YOLO构造」卡住 | 权重／权限／ultralytics 配置 | §4.R4 |
+| stage4「首次推理」卡住 | cudnn／并发竞争 | §4.R5 + §4.R1 |
+| stage5 卡住 | ultralytics 版本不符预期 | 离线排查方案 R2 |
+| stage6 卡住 | 显存不足或该卡不支持半精度 | 降 `INFER_HALF=false` / `INFER_IMGSZ` |
+| 六阶段全部秒回（合计 <10s） | 静态环境正常 | 执行 §4.R6 完整重启，用新日志观察 |
+
+> `nvidia-smi` 只走驱动查询、**不经过 `nvidia_uvm`**；stage2 的首次显存分配才走 uvm。所以「宿主机 nvidia-smi 正常」不能替代 stage2。
+
+### L4 模型与 ultralytics 层
+
+**① 命令**
+
+```bash
+# 1) 两端权重在位（yolo11n.pt 约 5.6MB）
+ls -la models/yolo11n.pt
+$COMPOSE exec -T ai ls -la /app/models/yolo11n.pt
+
+# 2) 完整性（两边对比；Linux 用 md5sum）
+md5sum models/yolo11n.pt
+
+# 3) ultralytics 配置目录可写
+$COMPOSE exec -T ai python -c \
+  "from ultralytics import YOLO; import os; print(os.path.expanduser('~')); YOLO('models/yolo11n.pt')"
+
+# 4) 版本
+$COMPOSE exec -T ai python -c "import ultralytics;print(ultralytics.__version__)"
+```
+
+**② 通过判据**：两处文件在位、md5 一致、YOLO 构造不报错、版本为 `8.x`。
+
+**③ 不通过 → 处置**：**§4.R4**（重传权重／`/root/.config` 只读／版本重建镜像）。
+
+### L5 链路分段定位
+
+**① 命令**
+
+```bash
+$COMPOSE logs --tail 50 ai | grep -E "管道启动|加载 YOLO|已释放|心跳|运行统计"
+```
+
+**② 判据**：每个已 enable 设备都有 `管道启动`，且**持续**产出 `运行统计`（30s 一行）。
+
+**③ 定位表**
+
+| 日志证据 | 结论 |
+|---|---|
+| 只有 `管道启动` → `加载 YOLO 模型` → 心跳反复 → `视频流已释放 (共 1 帧)` | **环境层卡死**：首次推理从未返回，一帧都没处理完，永远不产生事件 → 回 L3 |
+| 心跳消失 | 进程死亡 → `$COMPOSE ps` + `docker logs` |
+| 拉流就失败 | 流源问题（假设 A 不成立）→ 回 L1 |
+| `运行统计` 有但 `事件=0` | 推理正常，看跨线判定 → 离线排查方案 L5 |
+
+### L6 重启后链路自检（代码同步后必做）
+
+**① 命令**
+
+```bash
+# a. AI 推理正常：30s 一行，检出数 > 0
+$COMPOSE logs --tail 30 ai | grep -E "推理设备|运行统计"
+
+# b. 拥挤上报恢复（应周期性出现）
+$COMPOSE logs --since 2m backend 2>&1 | grep -i congestion
+
+# c. 事件产生（occurred_at 应为当前时间）
+curl -s "http://23.45.1.115:8000/api/events?limit=3" | python3 -m json.tool
+
+# d. 实时统计跳动
+curl -s http://23.45.1.115:8000/api/stats/realtime | python3 -m json.tool
+```
+
+**② 通过判据**：a 有检出数、b 有周期性上报、c 时间戳是当前、d 数值在跳。
+
+**③ 不通过 → 处置**：b 无输出 → 看 backend 日志与 outbox；c 无事件 → 回 L3/L5。
+
+---
+
+## 3. 故障速查（现象 → 一条命令 → 处置）
+
+| 现象 | 命令 | 处置 |
+|---|---|---|
+| 启动全绿但零计数 | `$COMPOSE logs --tail 50 ai \| grep -c "运行统计"` | 结果为 0 → 环境卡死 → §2.L3 |
+| 日志「共 1 帧」 | `$COMPOSE logs ai \| grep "已释放"` | §2.L3 + §4.R1 |
+| 容器内看不到 GPU | `$COMPOSE exec -T ai ls /dev/nvidia*` | §4.R2 |
+| 驱动版本两处不一致 | `modinfo nvidia \| grep ^version` | §4.R3 |
+| 容器内 `PYTORCH_CUDA_ALLOC_CONF` 非空 | `$COMPOSE exec -T ai env \| grep PYTORCH` | §4.R1 |
+| 权重缺失/不完整 | `$COMPOSE exec -T ai ls -la /app/models/` | §4.R4 |
+| 只有 1 路卡死，其余正常 | `$COMPOSE logs ai \| grep -B2 "已释放"` | §4.R5 |
+| 内存逐小时增长 | `docker stats --no-stream ai` | §4.R7 |
+| 无流可拉 | §2.L1 命令 4 | 回 L1 |
+
+---
+
+## 4. 处置方案
+
+### R1 禁用 `expandable_segments`（现场嫌疑 1，已默认禁用）
+
+```bash
+# 确认容器内已无该变量（应无输出）
+$COMPOSE exec -T ai env | grep PYTORCH
+
+# 若曾用旧配置启动过，重建容器
+$COMPOSE up -d --force-recreate ai
+
+# （可选，确认首推正常后再做）恢复显存碎片优化：docker-compose.gpu.yml 取消注释
+#   - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True   然后重建 ai
+```
+
+### R2 修复容器 GPU 注入不完整
+
+```bash
+sudo nvidia-ctk runtime configure --runtime=docker   # toolkit 装完后必须做一次
+sudo systemctl restart docker
+docker info 2>/dev/null | grep -i nvidia             # 预期: 含 nvidia
+docker run --rm --gpus all nvidia/cuda:12.2.2-base-ubuntu22.04 nvidia-smi   # 预期: 8 张 4090
+$COMPOSE up -d --force-recreate ai backend
+```
+
+### R3 修复驱动用户态/内核态不一致或版本过低
+
+```bash
+modinfo nvidia | grep ^version      # 内核模块版本
+cat /proc/driver/nvidia/version
+nvidia-smi | head -4                # 用户态版本
+# 不一致（多为升级驱动后未重启）
+sudo reboot
+```
+
+版本 < 525.60.13（torch cu121 最低要求）时：
+
+```bash
+# 方式 A - NVIDIA 官方 rpm 仓库（需外网）
+sudo dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel9/x86_64/cuda-rhel9.repo
+sudo dnf module reset -y nvidia-driver || true
+sudo dnf module enable -y nvidia-driver:latest-dkms
+sudo dnf install -y nvidia-driver-cuda
+sudo reboot
+
+# 方式 B - runfile（离线场景，先从 nvidia.cn 下载对应 .run 包）
+sudo systemctl isolate multi-user.target
+sudo bash NVIDIA-Linux-x86_64-535.230.02.run     # 版本按实际下载文件调整
+sudo reboot
+
+# 重启后验证
+nvidia-smi && modinfo nvidia | grep ^version     # 应一致且 >= 525.60
+```
+
+### R4 权重 / 配置问题（卡在 YOLO 构造）
+
+```bash
+md5sum models/yolo11n.pt                         # 与构建机对比
+scp models/yolo11n.pt user@23.45.1.115:/path/to/DT/models/    # 不一致则重传
+$COMPOSE exec -T ai ls -la /root/.config          # 只读会导致 settings.json 写入失败
+```
+
+### R5 多路并发首推竞争（`gpu_batch` 已从结构上消除）
+
+`app/ai/tracker.py` 的 `_MODEL_LOAD_LOCK` 串行化 **legacy 路径**的首次 YOLO 加载。
+
+> `gpu_batch` 不需要它：模型在服务启动阶段由 `ModelPool.initialize()` 预加载（不在推理 worker 内懒加载），且每卡模型只被该引擎自己的单线程 executor 触碰。此条只在 `INFER_MODE=legacy` 时相关。
+
+### R6 标准完整重启流程
+
+```bash
+cd /path/to/DT
+git pull origin bianwei-dev      # ① 同步代码（app/ 是 bind mount，重启容器即生效）
+bash scripts/start_all_gpu.sh    # ② 一键重启 + 六阶段首推验证
+
+# ②' 或只重建业务容器
+$COMPOSE up -d --force-recreate backend ai frontend
+```
+
+重启后跑 **§2.L6 的 a~d 四条**验证链路。
+
+### R7 防抖状态内存泄漏（已修）
+
+`DebounceValidator.reset_track()` 原对 `track_hold_time` 字典「置 0」而非删除，每个历史轨迹 ID 留下永久条目，7×24 运行内存无限增长。已改为 `pop` 删除（debounce_validator.py）。位于 `app/` bind mount 内，R6 重启即生效。
+
+---
+
+## 5. 部署/重启后检查清单
+
+| # | 检查项 | 命令 | 预期 |
+|---|---|---|---|
+| 1 | 驱动版本一致 | `nvidia-smi; modinfo nvidia \| grep ^version` | ≥ 525.60 且两处一致 |
+| 2 | runtime 就绪 | `docker info 2>/dev/null \| grep -i nvidia` | 有输出 |
+| 3 | 容器 GPU 可见 | `$COMPOSE exec -T ai nvidia-smi \| head -12` | 列出 8 张 4090 |
+| 4 | 分配器已禁用 | `$COMPOSE exec -T ai env \| grep PYTORCH` | **无输出** |
+| 5 | 六阶段首推 | `bash scripts/start_all_gpu.sh` | 「✔ 首推验证通过」 |
+| 6 | AI 推理统计 | `$COMPOSE logs --tail 30 ai` | 运行统计行，检出数 > 0 |
+| 7 | 拥挤上报 | `$COMPOSE logs --since 2m backend \| grep -i congestion` | 周期性上报 |
+| 8 | 事件入库 | `curl -s 'http://23.45.1.115:8000/api/events?limit=3'` | `occurred_at` 为当前时间 |
+| 9 | 前端展示 | 浏览器 `http://23.45.1.115:5173` | 今日累计／最近事件跳动 |
+
+1~6 属环境层（本方案）；7~9 跑通后，按 离线排查方案 L0~L6 做优化与业务验收。
+
+---
+
+## 6. 附录（排查时不看）
+
+### 6.1 三份文档的分工
+
+| 文档 | 回答什么问题 | 什么时候看 |
+|---|---|---|
+| **本文** | GPU 运行环境能不能跑通？零计数是不是环境卡死？ | 零计数、推理挂起、"启动全绿但不干活" |
+| 离线排查方案 | 优化是否生效、性能是否达标、计数是否准？ | 环境正常，要验收批量推理改造 |
+| 技术方案 | 为什么要这么改？ | 理解实现与取舍 |
+
+### 6.2 现场故障特征：三个"误导项"
+
+| 看起来正常的 | 实际含义 |
+|---|---|
+| 启动脚本 6/6 全绿、日志有「nvidia-container-runtime 已就绪」、容器内出现 CUDA 12.2 banner | **只代表 nvidia 工具包注入了驱动库**，不代表 PyTorch 能完成 GPU 初始化 |
+| 设备全部在线、心跳每 30s 正常 | **只代表进程活着**，推理线程可能已挂起 |
+| 视频流"连接正常" | 但日志收尾是「视频流已释放 (共 1 帧)」——整条管道只取走 1 帧 |
+
+典型日志（每路一样）：
+
+```
+[设备mock-pt1-gajk2648] 管道启动: http://.../live/mock-pt1.stream.flv
+[设备mock-pt1-gajk2648] 加载 YOLO 模型 (跟踪)
+[设备mock-pt1-gajk2648] 心跳 ok                        <- 30s 一次，持续
+[设备mock-pt1-gajk2648] 视频流已释放 (共 1 帧)          <- 首次推理从未返回
+```
+
+同时后端**完全没有** `POST /api/stats/congestion`，也没有任何越线事件。
+
+### 6.3 一句话判据（三层）
+
+| 现象组合 | 结论 | 去哪 |
+|---|---|---|
+| 心跳正常 + 零事件推送 | **环境层卡死**（推理从未完成） | 本方案 |
+| 心跳消失 | 进程死亡 / 容器退出 | `$COMPOSE ps` + `docker logs` |
+| 事件推送正常但计数不符 | 业务逻辑 / 标定问题 | 离线排查方案 L5 |
+
+### 6.4 逐项排除记录（2026-09-25 现场）
+
+| 排查项 | 结果 | 说明 |
+|---|---|---|
+| nvidia-container-toolkit 安装 | 已排除 | 4 个 RPM 齐全（1.13.5）；CUDA banner 证明注入成功 |
+| 显卡驱动版本 | 已排除 | 535.230.02 ≥ R530，满足 CUDA 12.2 / torch cu121 |
+| 模型权重文件 | 已排除 | 宿主机与容器内 `yolo11n.pt` 均在（bind mount 生效） |
+| 显存分配器配置 | **重点怀疑** | `expandable_segments:True` 有「首次 CUDA 调用挂起」先例 |
+| PyTorch 首次 CUDA 初始化 | 现场已定位 | 「看到 GPU」≠「真正初始化上下文」；驱动用户态/内核态不匹配时是**挂起而非报错** |
+
+### 6.5 完整链路
+
+`RTSP/WVP 拉流 → 解码 → YOLO+跟踪推理 → 跨线判定 → 事件 outbox → 后端 /api/events → Redis 实时统计 → 前端`
+
+现场结论：链路前段（注册／拉流／心跳）全部正常，所有管道卡死在「第一次 YOLO 推理」——一帧都没处理完，因此永远不产生计数事件。**是 GPU 运行环境问题，不是计数逻辑问题。**
+
+### 6.6 经验判据
+
+1. **CUDA banner ≠ GPU 可用**：容器打印 CUDA 横幅只代表注入了驱动库。
+2. **「看卡数」会漏报**：`torch.cuda.device_count()` 可能正常返回 8，但首次 CUDA 初始化照样挂起。必须用带**真实张量运算／推理**的检查（即六阶段首推）。
+3. **`nvidia-smi` 正常 ≠ uvm 正常**：`nvidia-smi` 不走 `nvidia_uvm`，stage2 的首次显存分配才走；uvm 挂起时进程是 D 状态、不报错。
+4. **改动生效方式**：`app/`、`scripts/`、`configs/`、`models/` 是 bind mount → `git pull` + 重启容器即可；改 `compose`／`Dockerfile`／`requirements.txt` → 必须 `up -d --force-recreate` 或重建镜像。

@@ -1,0 +1,13 @@
+# MediaMTX 配置 (rtsp-server 容器)
+# 默认配置 HLS 是关闭的, 此处开启供前端 (hls.js) 经 /play 接口播放
+hls: yes
+hlsAddress: :8888
+hlsVariant: lowLatency
+hlsSegmentCount: 7
+hlsSegmentDuration: 1s
+hlsPartDuration: 200ms
+hlsAllowOrigin: "*"
+
+# 允许任意路径推流/拉流 (mock 测试流 vehicle/person 等)
+paths:
+  all_others:

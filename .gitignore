@@ -1,0 +1,112 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+.trae/*
+!.trae/documents/
+# models/  (按需求纳入版本控制: 含 yolo11n.pt / model.safetensors 等权重, 体积较大, 按需 git add)
+
+# ---- 测试 / 类型 / 缓存 ----
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# ---- 环境与密钥 ----
+!.env.example
+*.key
+
+# ---- IDE ----
+.vscode/
+.idea/
+*.swp
+
+# ---- 运行时数据卷 (容器挂载, 不入库) ----
+# data/  (按需求纳入版本控制: 含设备信息汇总表.xlsx / device_*.json)
+logs/
+redis-data/
+*.log
+output/
+
+# ---- 模型权重 (体积大, 按需单独管理) ----
+*.pt
+!/models/**/*.pt
+*.onnx
+*.engine
+weights/
+
+# ---- 系统 ----
+.DS_Store
+Thumbs.db
+
+# ---- 文档 (开发方案等不入库) ----
+*.docx
+*.doc
+~$*
+
+# ---- 其他 ----
+CLAUDE.md
+*.mp4
+!/sim/media/**/*.mp4
+*.tar.gz
+# ---- 部署产物 (镜像包/挂载文件, 拷贝到内网用, 不入库) ----
+deploy/
+
+# ---- 地图瓦片 (可重新下载, 不入库) ----
+tile-server/tiles/
+
+# ---- WVP/ZLM 部署配置 (含明文密码与内网 IP, 不入库) ----
+peizhi/
+wvp_zlm.yml
+# 部署配置/教程 (含明文密码与内网 IP/国标编码, 不入库)
+setting/
+simulator/
+
+# ---- 打包产物 (zip 等, 不入库) ----
+*.zip
+
+# ---- 本地备份与抓包 (不入库) ----
+DT_bak/
+setting-server-bak/
+*.pcap
+*.pcapng
+
+# ---- 排查报告 (含真实 IP/国标编码/密码, 不入库) ----
+scripts/拉流故障分析报告.txt
+scripts/拉流超时排查流程.txt
+
+# ---- 现场调试产物 (备份包/录像/抓包/SSH 临时, 本地保留不入库) ----
+.ssh-temp/
+DT_bak.tar
+*.tar
+VissVideos/
+VissVideos.rar
+*.rar
+*.pcap
+*.pcapng
+
+# ---- 严格脱敏: 命中 IP/国标编码的文件一律不入库 (本地保留, 已 git rm --cached) ----
+# /README.md  (项目总览: 内网 IP 已用 <GPU_SERVER_IP>/<CPU_SERVER_IP> 占位, 解除忽略以纳入版本控制)
+/.env.example
+
+
+# ---- GPU 现场配置/脚本/排查文档 (含明文密码与内网 IP/密钥, 本地保留不入库) ----
+docs/GPU服务器离线排查方案.txt
+docs/GPU环境排查方案.txt
+.trae/documents/GPU服务器离线排查方案.md
+.trae/documents/GPU环境排查方案.md
+
+# ---- sim 本地调试产物 / 凭据 (不入库) ----
+sim/token.txt
+sim/*.err
+sim/media/_filter_test.txt

@@ -1,0 +1,170 @@
+"""全局配置 (pydantic-settings, 从环境变量 / .env 读取)."""
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8", extra="ignore"
+    )
+
+    # ---- 数据存储 ----
+    redis_url: str = "redis://redis:6379/0"
+
+    # ---- 服务间通信 ----
+    backend_url: str = "http://backend:8000"
+    ai_service_url: str = "http://ai:8001"
+
+    # ---- 服务端口 ----
+    backend_port: int = 8000
+    ai_port: int = 8001
+
+    # ---- AI 视觉分析 ----
+    yolo_model: str = "models/yolo11n.pt"
+    yolo_conf: float = 0.4
+    yolo_iou: float = 0.5
+    track_buffer: int = 30
+    # CPU 推理并发上限 (专用线程池 worker 数): 多路摄像头并发推理会互相争抢 CPU,
+    # 导致单路处理 fps 下降 -> 读帧线程覆盖丢帧 -> 跨线动作整段丢失 (漏计).
+    # 推理是 CPU 密集型, worker 数超过 CPU 核数只会增加切换开销; 0=自动取 CPU 核数.
+    infer_max_workers: int = 0
+    # 推理队列最大等待任务数: 超过时新帧直接丢弃 (计数语义上丢一帧与排队 10 帧等价,
+    # 但丢弃可让该路立即处理下一最新帧, 避免延迟累积与队列雪崩)
+    infer_max_queued: int = 4
+
+    # ---- GPU 批量推理 (app/ai/gpu_engine.py + app/ai/model_pool.py) ----
+    # 背景: 32 路各自 new 一个 YOLO 实例 = 32 个 CUDA context 挤在 0 号卡, 单帧推理被
+    # 拖到 1.2s; 改为每卡一个模型实例 + 批内多路 track, context 降到卡数, 且每实例
+    # 由单一 OS 线程持有 (context 亲和性稳定).
+    # auto=CUDA 可用且自检通过则 gpu_batch, 否则自动转 cpu_batch (无 GPU 机器一键批量);
+    # 显式指定 gpu_batch/cpu_batch 时引擎失败只回退 legacy, 不再静默换挡
+    infer_mode: str = "auto"           # auto|gpu_batch|cpu_batch|legacy
+    infer_gpu_devices: str = ""        # 参与推理的卡号 "0,1,2,3"; 空=全部可见卡 (换卡数不同的机器无需改)
+    infer_slots_per_gpu: int = 8       # 每卡槽位(设备数)上限; 0=按 infer_capacity 自适应 (ceil(capacity/引擎数))
+    infer_capacity: int = 32           # 预期接入路数 (slots_per_gpu=0 时自适应槽位的基准)
+    infer_slots_max: int = 32          # 自适应槽位上限 (批 VRAM 随槽位增长的保护, 防小显存卡打爆); 默认放满 32 路, 避免超出部分降级 legacy 各自建模型挤爆单卡
+    infer_imgsz: int = 960             # 推理输入尺寸(短边); 原图更小则用原图 (CPU 部署建议 640)
+    infer_half: bool = True            # FP16 半精度 (仅 CUDA 生效, CPU 引擎自动关闭)
+    infer_batch_timeout_ms: int = 40   # 组批等待窗口 (毫秒): 凑批上限时长, 单路时即纯延迟
+    infer_queue_max_batches: int = 2   # 每卡待处理批次数上限; 超限丢帧 (EngineBusy)
+    # ---- cpu_batch (无 GPU 部署) ----
+    # 每个 CPU 引擎 = 1 个模型实例 + 1 条推理线程, 多引擎共享全部设备槽位 (最少负载分配).
+    # CPU 批量近似线性扩展 (算力受限, 批大不省算力), 引擎数主要影响"路间隔离":
+    # 引擎越多, 单批越慢的互相拖累越小, 但每引擎可用线程也越少.
+    infer_cpu_engines: int = 2         # CPU 批量引擎数 (上限=可见核数)
+    infer_cpu_threads: int = 0         # 每引擎批内算子线程数 (torch 全局); 0=自动取 核数/引擎数
+
+    # ---- 解码侧采样 (app/ai/stream.py) ----
+    # 背景: 读帧线程按源帧率全速 read() 后 96% 被覆盖丢弃, 解码与颜色转换全是白做.
+    # 批量模式 (gpu_batch/cpu_batch) 下发; legacy 不下发, 与优化前行为一致.
+    # CPU 部署此项更关键: grab() 全量解码省不掉, 32 路 4K 纯 CPU 解码不可行,
+    # 必须配合拉子码流 + 降低 DECODE_MAX_FPS (2~4).
+    decode_backend: str = "ffmpeg"     # 解码后端: ffmpeg(解码/缩放/降帧率在子进程内完成) | opencv(旧行为)
+    decode_max_fps: float = 8.0        # >0 按此帧率 grab/retrieve 节流; 0=不限速(旧行为)
+    decode_max_short_side: int = 0     # >0 请求解码端缩放到该短边; 0=不缩放(旧行为)
+
+    # ---- 时序预测 ----
+    chronos_model: str = "models"  # 本地 Chronos-2 模型目录
+    prediction_interval_minutes: int = 15  # N 分钟预测间隔
+    prediction_series_length: int = 30  # 历史序列长度 (30 个 N 分钟区间)
+    vehicle_person_min: int = 2  # 每车最少人数 (车流转人流随机采样下界)
+    vehicle_person_max: int = 5  # 每车最多人数 (车流转人流随机采样上界)
+
+    # ---- 车流速度与拥挤判断 ----
+    congestion_min_flow: float = 5.0  # 拥挤判定: 每分钟跨线车辆数低于此值视为车流速度过低 (辆/分钟)
+    person_congestion_min_flow: float = 10.0  # 人流拥挤判定: 每分钟跨线人数低于此值视为人流速度过低 (人/分钟)
+    congestion_vehicle_weight: float = 0.5  # 人车混合区域: 车辆拥挤度权重
+    congestion_person_weight: float = 0.5  # 人车混合区域: 人流拥挤度权重
+    congestion_threshold: float = 0.5  # 人车混合区域: 加权拥挤度达到此值判定为拥挤 (0-1)
+    roi_report_interval: float = 2.0  # AI 每 N 秒上报一次 ROI 内车辆数 (供拥挤判断)
+
+    # ---- 小时级车流/人流量 (记录每天每小时) ----
+    hourly_retention_days: int = 30  # 小时级数据保留天数 (Redis 自动过期)
+
+    # ---- MySQL 长期归档 (小时级车流/人流量落库, 长期报表) ----
+    mysql_enabled: bool = False  # 总开关; False 时跳过归档调度与落库
+    mysql_host: str = "mysql"
+    mysql_port: int = 3306
+    mysql_user: str = "root"
+    mysql_password: str = "root123456"
+    mysql_database: str = "dt_stats"
+    archive_interval_seconds: int = 300  # 归档调度周期 (秒), 仅归档已完成小时
+    mysql_retention_days: int = 365  # MySQL 长期保留天数 (定期清理)
+
+    # ---- 告警 ----
+    rules_file: str = "configs/rules.yaml"
+
+    # ---- 业务规则集中配置 (热重载) ----
+    # 计数/告警/拥挤/警力/预测/异常/跟踪参数可集中在 configs/business_rules.yaml,
+    # 修改后基于 mtime 热重载 (无需重启). 未配置项回落下方各字段默认值.
+    business_rules_file: str = "configs/business_rules.yaml"
+
+    # ---- Redis 实时状态 key 前缀 ----
+    redis_prefix: str = "sc"
+
+    # ---- 警力分配 ----
+    police_demand_weight_current: float = 0.3  # 需求计算: 当前人数权重 α
+    police_demand_weight_predict: float = 0.7  # 需求计算: 预测人数权重 β
+    police_movement_ratio: float = 0.5  # 每轮最大移动比例 (占总警力)
+    police_min_per_region: int = 1  # 每区域最少警力
+    police_config_file: str = "configs/police.yaml"  # 警力初始配置 (区域+总警力), 启动时写入 Redis
+
+    # ---- 视频异常检测 ----
+    anomaly_check_interval: int = 30  # 每 N 帧检测一次 (≈1s@30fps)
+    anomaly_confirm_frames: int = 2  # 连续确认帧数 (去抖, 避免单帧误报)
+    anomaly_cooldown_seconds: int = 60  # 同设备同异常告警冷却 (后端去重, 秒)
+    anomaly_analysis_width: int = 480  # 分析帧宽度 (等比缩放, 阈值稳定)
+    black_screen_brightness: int = 20  # 灰度均值 < 此值 (黑屏条件1)
+    black_screen_ratio: float = 0.95  # 近黑像素占比 > 此值 (黑屏条件2)
+    black_pixel_value: int = 20  # 近黑像素亮度上限
+    flower_block_grid: int = 8  # 花屏分析块网格 (NxN)
+    flower_noise_std: float = 35.0  # 块均标准差 > 此值 (花屏: 高噪)
+    flower_uniformity: float = 0.6  # 噪声均匀度 1-CV > 此值 (花屏: 均匀)
+    flower_channel_corr: float = 0.5  # 通道相关性 < 此值 (花屏: 去相关)
+    flower_temporal_diff: float = 25.0  # 时域差分 > 此值 (花屏: 时域高噪, 有前帧时)
+
+    # ---- 运行诊断 (计数可观测性, 定位事件丢失/漏计) ----
+    log_level: str = "INFO"  # 控制台(stderr)日志级别; 文件日志固定 DEBUG, 排查时设 DEBUG
+    count_stats_interval: float = 30.0  # 计数运行统计输出周期 (秒): 有效帧率/丢帧/推理耗时/各环节拒绝
+    count_event_log: bool = False  # 每次越线事件输出一条明细日志 (排查漏计/误计时开启)
+
+    # ---- 安全 ----
+    cors_origins: str = "*"  # 允许的跨域来源, 逗号分隔; 生产环境应配置具体前端域名
+
+    # ---- Mock 数据模拟 (无真实视频流时验证前后端全链路) ----
+    # true: AI 服务不拉流不推理, 由 mock_simulator 按真实车流/人流规律生成事件
+    mock_enabled: bool = False
+
+    # ---- WVP-GB28181 对接 ----
+    wvp_enabled: bool = False  # 总开关; False 时跳过自动同步与流地址刷新
+    wvp_api_url: str = "http://wvp:18080"  # WVP 管理后台地址 (REST API)
+    wvp_username: str = "admin"
+    wvp_password: str = "admin"
+    wvp_sync_interval: int = 30  # 设备轮询同步间隔 (秒)
+    wvp_play_protocol: str = "flv"  # AI 拉流协议: flv | rtsp
+    wvp_stream_sub: bool = True  # 拉子码流降低推理压力 (False=主码流)
+
+    # ---- 前端播放地址翻译 (/api/devices/glm-5.3_common/play) ----
+    # ZLM 对外地址前缀 (如 http://172.16.168.9:80); 空则 WVP 返回的 flv 地址原样返回
+    # (WVP 返回地址的 host 取决于 ZLM stream-ip 配置, 配了容器名时浏览器不可达, 需此处重写)
+    zlm_public_base: str = ""
+    # ZLM 内部地址前缀 (如 http://zlmediakit): backend/AI 在容器网内拉流用.
+    # WVP 返回地址的 host 是 sdp-ip(公网/局域网 IP), 云服务器公网 IP 不在网卡上,
+    # 容器内访问不通 -> 截帧/AI拉流失败; 配置后内部取流统一重写为 docker 服务名直连.
+    # 空则内部取流也用 WVP 原始地址 (本机局域网部署可用)
+    zlm_internal_base: str = ""
+    # MediaMTX 对外地址 (如 http://172.16.168.9:8888); 空则按前端请求的 Host 自动推导 (:8888)
+    # 用于把 RTSP 测试流 (rtsp://...:8554/{path}) 翻译成浏览器可播的 HLS 地址
+    mediamtx_public_base: str = ""
+
+    # ---- 实时位置接入 (Apache Pulsar, 对接《实时位置数据接入规范 V1.0》) ----
+    # 接入方式: Pulsar 客户端消费 persistent://dtzhjg/device/location_realtime_v1
+    pulsar_enabled: bool = False  # 总开关; False 时跳过位置消费(默认关闭, 无 Pulsar 时不影响启动)
+    pulsar_service_url: str = "pulsar://23.45.1.99:6650"  # Pulsar 服务地址 (pulsar://)
+    pulsar_token: str = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJkdGpnemQifQ.eGuRXH9zM6gtFZFf1JFfjo7aXz13TCrpFJU2U5e0974"  # 接入 Token (规范 config.txt); 空字符串=不鉴权
+    pulsar_topic: str = "persistent://dtzhjg/device/location_realtime_v1"  # 订阅 Topic
+    pulsar_subscription: str = "client_sub_001"  # 订阅名称(接入方标识, 多家接入用不同名区分)
+    location_ttl_seconds: int = 3600  # 单设备最后位置在 Redis 的存活时间(秒)
+    location_online_timeout_seconds: int = 120  # 超过该秒数未更新视为离线
+
+
+settings = Settings()

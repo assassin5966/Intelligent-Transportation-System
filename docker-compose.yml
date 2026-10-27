@@ -1,0 +1,197 @@
+# ============================================================
+# 智慧古城车辆人流监管平台 - 容器编排
+# 架构: AI 分析服务 / 业务后端 (同一镜像) + Redis
+#
+# 启动 (离线一键拉起 前端 + 后端 + AI + Redis/MySQL):
+#   docker compose up -d                # 直接使用预构建镜像(dt-frontend:latest 等)启动, 离线下用这个
+#   前端为预构建镜像, 不在本机 build(需联网拉 npm 依赖, 离线会失败); 瓦片走宿主机挂载, 替换即可
+#   GPU 版 (NVIDIA CUDA 12.2, 如 8x4090): 用独立的 docker-compose.gpu.yml (Dockerfile.gpu)
+#     docker compose -f docker-compose.gpu.yml up -d --build
+#     CPU 构建 (本文件默认) 仍可用: docker build -t smart-city-platform:latest .
+# ============================================================
+
+# 固定项目名: 容器/卷/网名不再随目录名或 -p 参数漂移 (两套 compose 同名, 同机不可同时运行)
+name: dt
+
+services:
+  # ---------- AI 分析服务 (YOLO11/ByteTrack/越线计数) ----------
+  ai:
+    build: .
+    image: smart-city-platform:latest
+    container_name: dt-ai
+    restart: unless-stopped
+    command: ["python", "-m", "app.ai.service"]
+    ports:
+      - "8001:8001"
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - BACKEND_URL=http://backend:8000
+      - PYTHONUNBUFFERED=1
+      # 计数可观测性 (排查漏计/误计): 控制台日志级别 / 运行统计周期 / 逐事件明细
+      # LOG_LEVEL=DEBUG 时 docker logs 可看到详细日志 (文件日志 logs/*.log 始终 DEBUG)
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - COUNT_STATS_INTERVAL=${COUNT_STATS_INTERVAL:-30}
+      - COUNT_EVENT_LOG=${COUNT_EVENT_LOG:-false}
+      # Mock 数据模拟 (.env MOCK_ENABLED=true 时 AI 不拉流, 由模拟器生成事件)
+      - MOCK_ENABLED=${MOCK_ENABLED:-false}
+      # CPU 批量推理 (INFER_MODE=auto 时无 GPU 自动转 cpu_batch)
+      - INFER_MODE=${INFER_MODE:-auto}
+      - INFER_CPU_ENGINES=${INFER_CPU_ENGINES:-2}
+      - INFER_CPU_THREADS=${INFER_CPU_THREADS:-0}
+      - INFER_IMGSZ=${INFER_IMGSZ:-960}
+      - DECODE_MAX_FPS=${DECODE_MAX_FPS:-8}
+    volumes:
+      - ./app:/app/app:cached
+      - ./models:/app/models:cached
+      - ./configs:/app/configs:cached
+      - ./logs:/app/logs
+      - ./data:/app/data:cached   # mock_simulator 读设备种子 (device_geo.json)
+      - model-cache:/root/.cache
+    depends_on:
+      redis:
+        condition: service_started
+      backend:
+        condition: service_healthy  # mock 模式下模拟器启动即注册设备, 必须等 backend 就绪
+    # 挂共享网, 供 AI 按服务名访问外部 ZLM(zlmediakit) 拉 HTTP-FLV
+    networks:
+      - default
+      - wvp-shared
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+  # ---------- 业务后端 (FastAPI: 实时统计/告警/REST API/预测) ----------
+  backend:
+    image: smart-city-platform:latest
+    container_name: dt-backend
+    restart: unless-stopped
+    command: ["uvicorn", "app.backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8000:8000"
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - AI_SERVICE_URL=http://ai:8001
+      - PYTHONUNBUFFERED=1
+      # WVP-GB28181 对接 (WVP/ZLM 已外部部署; 启用需 WVP_ENABLED=true 且 WVP_API_URL 指向外部 WVP)
+      - WVP_ENABLED=${WVP_ENABLED:-false}
+      - WVP_API_URL=${WVP_API_URL:-http://wvp:18080}
+      - WVP_USERNAME=${WVP_USERNAME:-admin}
+      - WVP_PASSWORD=${WVP_PASSWORD:-admin}
+      - WVP_SYNC_INTERVAL=${WVP_SYNC_INTERVAL:-30}
+      - WVP_PLAY_PROTOCOL=${WVP_PLAY_PROTOCOL:-flv}
+      - WVP_STREAM_SUB=${WVP_STREAM_SUB:-true}
+      # 前端播放地址翻译 (/api/devices/glm-5.3_common/play); 空值走自动推导/原样返回
+      - ZLM_PUBLIC_BASE=${ZLM_PUBLIC_BASE:-}
+      # 内部取流(截帧/AI)走容器网内 ZLM 服务名: 服务器公网IP不在网卡上, 容器内访问 sdp-ip 不通
+      - ZLM_INTERNAL_BASE=${ZLM_INTERNAL_BASE:-http://zlmediakit}
+      - MEDIAMTX_PUBLIC_BASE=${MEDIAMTX_PUBLIC_BASE:-}
+      # MySQL 长期归档 (小时级车流/人流量落库, 长期报表); MYSQL_ENABLED=false 则跳过
+      - MYSQL_ENABLED=${MYSQL_ENABLED:-true}
+      - MYSQL_HOST=${MYSQL_HOST:-mysql}
+      - MYSQL_PORT=${MYSQL_PORT:-3306}
+      - MYSQL_USER=${MYSQL_USER:-root}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD:-root123456}
+      - MYSQL_DATABASE=${MYSQL_DATABASE:-dt_stats}
+      # Mock 互斥保护 (main.py lifespan: mock 开启时强制关闭 WVP 同步)
+      - MOCK_ENABLED=${MOCK_ENABLED:-false}
+    volumes:
+      - ./app:/app/app:cached
+      - ./models:/app/models:cached
+      - ./configs:/app/configs:cached
+      - ./static:/app/static:cached
+      - ./data:/app/data:cached
+      - ./logs:/app/logs
+    depends_on:
+      redis:
+        condition: service_started
+      mysql:
+        condition: service_healthy  # 等 MySQL 真正可连接, 否则启动建表失败
+    healthcheck:
+      # mock 模式下 ai 的设备注册/事件/拥挤上报都依赖 backend, 必须等其就绪
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    # 挂共享网, 供 backend 按服务名访问外部 WVP(wvp:18080)
+    networks:
+      - default
+      - wvp-shared
+
+  # ---------- MySQL: 长期归档 (小时级车流/人流量报表) ----------
+  mysql:
+    image: mysql:8.0
+    container_name: dt-mysql
+    restart: unless-stopped
+    environment:
+      - MYSQL_ROOT_PASSWORD=root123456
+      - MYSQL_DATABASE=dt_stats
+      - TZ=Asia/Shanghai
+    command: >
+      --character-set-server=utf8mb4
+      --collation-server=utf8mb4_unicode_ci
+    # 宿主机映射 3307 (宿主 3306 常被本机 MySQL 占用); 容器内仍 3306, 后端经容器内网 mysql:3306 连接
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    # 健康检查: 供 backend depends_on condition=service_healthy 使用
+    # (MySQL 首次初始化需 10~30s; 不等健康则后端启动时建表会失败 -> device_info 表缺失)
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p$$MYSQL_ROOT_PASSWORD"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  # ---------- Redis: 实时状态 (当前车辆/人员数量、告警、设备配置) ----------
+  redis:
+    image: redis:7-alpine
+    container_name: dt-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "16379:6379"
+    volumes:
+      - redis-data:/data
+
+  # ---------- WVP / ZLM / MySQL: 外部已部署 (上下级级联), 不在本项目编排 ----------
+  # 本项目仅作消费方: 后端调外部 WVP REST API 同步设备/取 FLV 地址; AI 拉外部 ZLM 的 HTTP-FLV
+  # 对接参数见 backend 环境变量: WVP_API_URL / WVP_USERNAME / WVP_PASSWORD
+
+  # ---------- 大屏前端 (Vue3 + Vite, nginx 托管 + 反代后端 API/WS) ----------
+  # 离线部署用【官方 nginx 基础镜像】+ 宿主机挂载, 不 build、不打进镜像:
+  #   - 前端产物 dist  : 挂载宿主机 ./map-marking-system-vue/dist -> nginx 的 /usr/share/nginx/html
+  #   - 瓦片 tiles     : 挂载宿主机 ./map-marking-system-vue/public/tiles -> nginx 的 /var/www/tiles
+  # 替换 dist / 瓦片只需改宿主机目录, 无需重建镜像; 是本机先 npm run build 生成的 dist。
+  # 访问: http://localhost:5173  (nginx 内 80, 宿主机映射 5173 与 dev 端口一致)
+  # 仅改 nginx.conf / dist / 瓦片: 宿主机改后 docker exec dt-frontend nginx -s reload
+  frontend:
+    image: nginx:1.27-alpine
+    container_name: dt-frontend
+    restart: unless-stopped
+    ports:
+      - "5173:80"
+    volumes:
+      - ./map-marking-system-vue/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./map-marking-system-vue/dist:/usr/share/nginx/html:ro
+      - ./map-marking-system-vue/public/tiles:/var/www/tiles:ro
+    depends_on:
+      - backend
+
+volumes:
+  redis-data:
+  model-cache:
+  mysql-data:
+
+networks:
+  default:
+    name: dt_default
+  # 引用 setting/ 创建的共享网络(先启动 setting 再启动本项目)
+  wvp-shared:
+    external: true
+    name: wvp-shared
