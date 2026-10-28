@@ -7,12 +7,12 @@
 #               police(警力分配) / prediction(预测) / anomaly(视频异常) / tracking(跟踪)
 
 counting:                  # 越线计数参数 (counter.py)
-  min_distance_ratio: 0.02       # 距线最小距离占帧短边比例 (防抖)
-  endpoint_sensitivity: 0.05     # 端点误判过滤敏感度
-  hold_frames: 3                 # 滞留确认帧数 (跨线后需在新侧连续保持)
-  min_motion: 1                  # 最小位移(像素), 小于此值视为抖动 (2会漏计慢速拥堵车流跨线, 如1.7px/帧的缓行车)
-  hysteresis_ratio: 0.04         # 滞回防抖: 侧别反转需超过此距离(占帧短边比例)
-  reverse_crossing_cooldown: 3.0 # 反向跨线冷却(秒), 同一轨迹反向事件间隔
+  min_distance_ratio: 0.005      # 距线最小距离占帧短边比例 (防抖; 放宽: 0.02→0.005, 更快确认远离)
+  endpoint_sensitivity: 0.02     # 端点误判过滤敏感度 (放宽: 0.05→0.02)
+  hold_frames: 1                 # 滞留确认帧数 (放宽: 3→1, 跨线后新侧保持1帧即确认)
+  min_motion: 0.5                # 最小位移(像素), 小于此值视为抖动 (放宽: 1→0.5, 慢速目标跨线不漏)
+  hysteresis_ratio: 0.01         # 滞回防抖: 侧别反转需超过此距离(放宽: 0.04→0.01)
+  reverse_crossing_cooldown: 1.0 # 反向跨线冷却(秒), 放宽: 3.0→1.0
   id_switch_speed_ratio: 3.0     # ID切换: 速度超过历史平均 N 倍视为切换
   id_switch_min_pixel: 30.0      # ID切换: 速度差距至少 N 像素
   id_switch_min_avg_speed: 5.0   # ID切换: 历史平均速度低于此值不判(静止误判)
@@ -56,7 +56,7 @@ anomaly:                   # 视频异常检测参数 (黑屏/花屏)
   confirm_frames: 2              # 连续确认帧数(去抖)
 
 tracking:                  # 目标跟踪参数
-  yolo_conf: 0.3                 # YOLO 置信度阈值 (0.4 在黄昏场景漏检远处车辆, 导致轨迹出生即在计数线下方而漏计)
+  yolo_conf: 0.25                 # YOLO 置信度阈值 (放宽: 0.3→0.25, 远处小目标更早检出)
   yolo_iou: 0.5                  # NMS IoU 阈值
   track_buffer: 30               # 跟踪历史最大长度 (由 bytetrack.yaml 决定算法)
 
