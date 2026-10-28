@@ -31,6 +31,7 @@ services:
     environment:
       - REDIS_URL=redis://redis:6379/0
       - BACKEND_URL=http://backend:8000
+      - EVENT_OUTBOX_PATH=/app/event-outbox/events.sqlite3
       - PYTHONUNBUFFERED=1
       # CUDA 12.2 驱动向下兼容 cu121 轮子
       # 显存分配策略 expandable_segments 默认禁用: 与个别驱动/内核模块组合存在
@@ -61,6 +62,7 @@ services:
       - INFER_HALF=${INFER_HALF:-true}
       - INFER_BATCH_TIMEOUT_MS=${INFER_BATCH_TIMEOUT_MS:-80}
       - INFER_QUEUE_MAX_BATCHES=${INFER_QUEUE_MAX_BATCHES:-2}
+      - INFER_MAX_QUEUE_AGE_S=${INFER_MAX_QUEUE_AGE_S:-2}
       # CPU 批量推理: auto 模式下 GPU 不可用/自检失败时自动转 cpu_batch (不降 legacy)
       - INFER_CPU_ENGINES=${INFER_CPU_ENGINES:-2}
       - INFER_CPU_THREADS=${INFER_CPU_THREADS:-0}
@@ -68,6 +70,7 @@ services:
       - DECODE_BACKEND=${DECODE_BACKEND:-ffmpeg}
       - DECODE_MAX_FPS=${DECODE_MAX_FPS:-8}
       - DECODE_MAX_SHORT_SIDE=${DECODE_MAX_SHORT_SIDE:-960}
+      - STREAM_STALL_TIMEOUT_S=${STREAM_STALL_TIMEOUT_S:-15}
     volumes:
       - ./app:/app/app:cached
       - ./models:/app/models:cached
@@ -76,12 +79,12 @@ services:
       # 依赖镜像内的 torch/CUDA). 注意会遮蔽镜像内的 /app/scripts, 宿主机目录须与此处一致
       - ./scripts:/app/scripts:cached
       - ./logs:/app/logs
+      - event-outbox:/app/event-outbox
       - model-cache:/root/.cache
     depends_on:
       redis:
         condition: service_started
-      # 等 backend 健康后再启 AI: outbox 上报不重试, backend 未就绪期间产生的
-      # 越线事件会被永久丢弃 (直接表现为"启动初期计数缺失")
+      # 等 backend 健康后再启 AI；越线事件持久化并在后端恢复后重试
       backend:
         condition: service_healthy
     # 挂共享网, 供 AI 按服务名访问外部 ZLM(zlmediakit) 拉 HTTP-FLV
@@ -208,7 +211,8 @@ services:
     image: redis:7-alpine
     container_name: dt-redis
     restart: unless-stopped
-    command: ["redis-server", "--appendonly", "yes"]
+    # 后端应答前同步 AOF；去重账本禁止被内存淘汰（故障时返回错误，队列保留待重试）。
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "always", "--maxmemory-policy", "noeviction"]
     ports:
       - "16379:6379"
     volumes:
@@ -235,6 +239,7 @@ services:
       - backend
 
 volumes:
+  event-outbox:
   redis-data:
   model-cache:
   mysql-data:

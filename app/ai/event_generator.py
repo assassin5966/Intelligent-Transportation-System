@@ -1,6 +1,7 @@
 """事件生成器：根据越线检测结果生成 CrossingEvent."""
 from datetime import datetime
-from typing import List
+from typing import List, Optional
+from uuid import uuid4
 
 from ..schemas.events import (
     PERSON_ENTER,
@@ -12,6 +13,7 @@ from ..schemas.events import (
 
 class CrossingEvent:
     def __init__(self, event_type, track_id, class_name, timestamp, camera_id, cross_point, cross_line, direction, confidence):
+        self.event_id = str(uuid4())
         self.event_type = event_type
         self.track_id = track_id
         self.class_name = class_name
@@ -49,6 +51,7 @@ class EventGenerator:
         direction: str,
         entry_exit: str,
         line_name: str = "line_a",
+        timestamp: Optional[float] = None,
     ) -> CrossingEvent:
         """生成越线事件.
 
@@ -68,7 +71,7 @@ class EventGenerator:
             event_type=event_type,
             track_id=track.track_id,
             class_name=track.class_name,
-            timestamp=datetime.now().isoformat(),
+            timestamp=(datetime.fromtimestamp(timestamp) if timestamp is not None else datetime.now()).isoformat(),
             camera_id=camera_id,
             cross_point=cross_point,
             cross_line=line_name,

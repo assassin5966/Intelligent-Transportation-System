@@ -29,6 +29,19 @@ _PRUNE_MARKER_KEY = f"{settings.redis_prefix}:archive:last_prune"
 _MAX_BACKFILL_HOURS = 24 * 7
 
 _HOURLY_PREFIX = f"{settings.redis_prefix}:hourly:"
+_DIRTY_KEY = f"{settings.redis_prefix}:archive:dirty"
+_QUARANTINE_KEY = f"{settings.redis_prefix}:archive:quarantine"
+_DIRTY_DEVICES_PREFIX = f"{settings.redis_prefix}:archive:dirty_devices:"
+
+_ACK_DIRTY_LUA = """
+if redis.call('HEXISTS', KEYS[2], ARGV[1]) == 0
+   and redis.call('HGET', KEYS[1], ARGV[1]) == ARGV[2] then
+    redis.call('HDEL', KEYS[1], ARGV[1])
+    redis.call('DEL', KEYS[3])
+    return 1
+end
+return 0
+"""
 
 
 async def start_scheduler() -> None:
@@ -101,9 +114,6 @@ async def _archive_once() -> None:
         last_hour = last_completed - timedelta(hours=1)
 
     first = last_hour + timedelta(hours=1)
-    if first > last_completed:
-        return  # 没有新的已完成小时
-
     # 限制回填量, 防止宕机过久后一次补写过多
     if (last_completed - first) > timedelta(hours=_MAX_BACKFILL_HOURS):
         first = last_completed - timedelta(hours=_MAX_BACKFILL_HOURS - 1)
@@ -113,15 +123,56 @@ async def _archive_once() -> None:
         await _archive_hour(redis, hour)
         await redis.set(_MARKER_KEY, hour.strftime("%Y%m%d%H"))
         hour += timedelta(hours=1)
+    # 即使 marker 已推进或没有新小时，也必须重试已归档小时的迟到事件。
+    await _archive_dirty(redis, current_hour)
 
 
-async def _archive_hour(redis, hour: datetime) -> None:
-    """归档单个已完成小时的设备数据到 MySQL."""
+async def _archive_dirty(redis, current_hour: datetime) -> None:
+    async for hour_str, version in redis.hscan_iter(_DIRTY_KEY):
+        try:
+            hour = datetime.strptime(hour_str, "%Y%m%d%H")
+        except ValueError:
+            logger.error(f"[归档] 待重归档小时格式错误: {hour_str}")
+            continue
+        if hour >= current_hour:
+            continue
+        await _archive_hour(redis, hour, expected_version=version)
+
+
+async def _archive_hour(redis, hour: datetime, expected_version: str | None = None) -> None:
+    """归档单个小时；只有版本未变且完整时才确认迟到修正。"""
     from ...common.mysql_client import upsert_hourly
 
     hour_str = hour.strftime("%Y%m%d%H")
+    if expected_version is None:
+        # 普通归档与迟到修正可能重叠，使用同一完整性检查及版本确认。
+        expected_version = await redis.hget(_DIRTY_KEY, hour_str)
+    devices_key = f"{_DIRTY_DEVICES_PREFIX}{hour_str}"
+    if await redis.hexists(_QUARANTINE_KEY, hour_str):
+        logger.error(f"[归档] {hour_str} 已隔离，等待人工对账")
+        return
+    if hour + timedelta(hours=1, days=settings.hourly_retention_days) <= datetime.now():
+        await redis.hset(_QUARANTINE_KEY, hour_str, "hourly retention expired")
+        logger.error(f"[归档] {hour_str} 已超过 Redis 保留期，不覆盖 MySQL，等待人工对账")
+        return
+    affected = await redis.smembers(devices_key) if expected_version is not None else set()
+    if expected_version is not None and not affected:
+        await redis.hset(_QUARANTINE_KEY, hour_str, "dirty device set missing")
+        logger.error(f"[归档] {hour_str} 缺失迟到设备清单，等待人工对账")
+        return
+    for device in affected:
+        key = f"{_HOURLY_PREFIX}{device}:{hour_str}"
+        if await redis.ttl(key) <= 0:
+            await redis.hset(_QUARANTINE_KEY, hour_str, "dirty device hourly data missing")
+            logger.error(f"[归档] {hour_str} 设备 {device} 数据缺失，等待人工对账")
+            return
+    if expected_version is not None and await redis.ttl(_hourly_all_key(hour)) <= 0:
+        await redis.hset(_QUARANTINE_KEY, hour_str, "global hourly data missing")
+        logger.error(f"[归档] {hour_str} 全局小时数据缺失，等待人工对账")
+        return
     global_key = _hourly_all_key(hour)
     rows: list[tuple] = []
+    seen_devices: set[str] = set()
     # 匹配 sc:hourly:*:{YYYYMMDDHH} (含设备与全局 key; 全局 key 单独跳过)
     async for key in redis.scan_iter(f"{_HOURLY_PREFIX}*:{hour_str}"):
         if key == global_key:
@@ -130,6 +181,7 @@ async def _archive_hour(redis, hour: datetime) -> None:
         if not data:
             continue
         device_id = key[len(_HOURLY_PREFIX):].rsplit(":", 1)[0]
+        seen_devices.add(device_id)
         rows.append((
             device_id,
             hour.date().isoformat(),
@@ -139,6 +191,24 @@ async def _archive_hour(redis, hour: datetime) -> None:
             int(data.get("person_in", 0) or 0),
             int(data.get("person_out", 0) or 0),
         ))
+    if expected_version is not None:
+        if (not affected.issubset(seen_devices)
+                or await redis.ttl(global_key) <= 0
+                or hour + timedelta(hours=1, days=settings.hourly_retention_days) <= datetime.now()):
+            await redis.hset(_QUARANTINE_KEY, hour_str, "hourly data disappeared during archive")
+            logger.error(f"[归档] {hour_str} 读取期间数据过期或缺失，等待人工对账")
+            return
+        for device in affected:
+            if await redis.ttl(f"{_HOURLY_PREFIX}{device}:{hour_str}") <= 0:
+                await redis.hset(_QUARANTINE_KEY, hour_str, "dirty device expired during archive")
+                logger.error(f"[归档] {hour_str} 设备 {device} 读取期间过期，等待人工对账")
+                return
     if rows:
+        # 扫描期间若出现隔离，禁止用不完整快照覆盖已有 MySQL 数据。
+        if await redis.hexists(_QUARANTINE_KEY, hour_str):
+            return
         await upsert_hourly(rows)
         logger.info(f"[归档] {hour_str} 设备 {len(rows)} 条 -> MySQL")
+    if expected_version is not None:
+        await redis.eval(_ACK_DIRTY_LUA, 3, _DIRTY_KEY, _QUARANTINE_KEY, devices_key,
+                         hour_str, str(expected_version))

@@ -71,6 +71,7 @@ class DeviceOut(BaseModel):
     gb_device_id: Optional[str] = None
     gb_channel_id: Optional[str] = None
     status: str = "registered"
+    ai_status: Optional[str] = None  # 与设备/通道在线状态分开
     last_heartbeat: Optional[str] = None
     longitude: Optional[float] = None  # 设备经纬度 (来自 data/device_geo.json, 按名称匹配)
     latitude: Optional[float] = None
@@ -354,8 +355,13 @@ async def remove(device_id: str):
     return {"status": "deleted", "id": device_id}
 
 
+class DeviceHeartbeat(BaseModel):
+    ai_status: Optional[Literal["stopped", "waiting_first_frame", "no_frames", "no_recent_frame",
+                                "no_recent_inference", "low_fps", "processing", "event_persist_blocked"]] = None
+
+
 @router.post("/{device_id}/heartbeat")
-async def heartbeat(device_id: str):
+async def heartbeat(device_id: str, body: Optional[DeviceHeartbeat] = None):
     """AI 服务心跳: 更新设备最后心跳时间, 标记设备在线."""
     from datetime import datetime, timezone
     redis = get_redis()
@@ -364,10 +370,13 @@ async def heartbeat(device_id: str):
     if not exists:
         raise HTTPException(404, "device not found")
     now_iso = datetime.now(timezone.utc).isoformat()
-    await redis.hset(key, mapping={
+    fields = {
         "last_heartbeat": now_iso,
         "status": "online",
-    })
+    }
+    if body and body.ai_status:
+        fields["ai_status"] = body.ai_status
+    await redis.hset(key, mapping=fields)
     return {"device_id": device_id, "heartbeat": now_iso}
 
 
@@ -596,13 +605,14 @@ async def enable_device(device_id: str, body: DeviceEnableIn):
         # 旧管道不重启会继续用旧配置 (POST /devices 只会返回 409 device already running)
         await _forward_to_ai("DELETE", f"/devices/{device_id}")
         if not await _start_ai_pipeline(updated, stream_url):
+            await redis.hset(key, "ai_status", "start_failed")
             logger.error(f"[WVP] 设备 {device_id} 启流失败 (推理容量已满或 AI 服务异常)")
             raise HTTPException(
                 503, "AI 启流失败: 推理容量已满或 AI 服务异常, 请查看 AI 服务日志"
             )
-        await redis.hset(key, "status", "online")
+        await redis.hset(key, mapping={"status": "online", "ai_status": "waiting_first_frame"})
         logger.info(f"[WVP] 设备 {device_id} 已启用并启流")
-        return {"device_id": device_id, "status": "online", "stream_url": stream_url}
+        return {"device_id": device_id, "status": "online", "ai_status": "waiting_first_frame", "stream_url": stream_url}
     else:
         # 模式 2: 手动注册设备 - 重启 AI 管道 (先停旧管道, 再起新管道)
         from ..core.wvp_sync import _start_ai_pipeline
@@ -612,10 +622,11 @@ async def enable_device(device_id: str, body: DeviceEnableIn):
 
         # 再启动新管道
         if not await _start_ai_pipeline(updated, updated.get("stream_url", "")):
+            await redis.hset(key, "ai_status", "start_failed")
             logger.error(f"[手动] 设备 {device_id} 启流失败 (推理容量已满或 AI 服务异常)")
             raise HTTPException(
                 503, "AI 启流失败: 推理容量已满或 AI 服务异常, 请查看 AI 服务日志"
             )
-        await redis.hset(key, "status", "online")
+        await redis.hset(key, mapping={"status": "online", "ai_status": "waiting_first_frame"})
         logger.info(f"[手动] 设备 {device_id} 已重新配置并启流")
-        return {"device_id": device_id, "status": "online", "stream_url": updated.get("stream_url", "")}
+        return {"device_id": device_id, "status": "online", "ai_status": "waiting_first_frame", "stream_url": updated.get("stream_url", "")}

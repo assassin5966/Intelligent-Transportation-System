@@ -240,17 +240,18 @@ async def sync_once() -> dict:
             continue  # 未配置计数线, 不启流
 
         is_running = device_id in running
-        if status == "offline":
+        if status in ("offline", "synced") and not is_running:
             # 恢复: 先清 AI 侧残留注册 (流断后 pipeline 对象仍留在 _pipelines, 直接 POST 会 409)
             await _stop_ai_pipeline(device_id)
             play = await wvp.start_play(gb_dev, gb_ch)
             stream_url = to_internal(wvp.select_stream_url(play))
             if stream_url:
                 if await _start_ai_pipeline(data, stream_url):
-                    await redis.hset(_DEVICE_KEY_PREFIX + device_id, "status", "online")
+                    await redis.hset(_DEVICE_KEY_PREFIX + device_id, mapping={"status": "online", "ai_status": "waiting_first_frame"})
                     recovered += 1
                     logger.info(f"[WVP同步] 设备 {device_id} 恢复在线, 已启流")
                 else:
+                    await redis.hset(_DEVICE_KEY_PREFIX + device_id, "ai_status", "start_failed")
                     logger.warning(
                         f"[WVP同步] 设备 {device_id} 启流失败 (推理容量已满或 AI 服务异常), 保持 synced"
                     )
@@ -261,9 +262,11 @@ async def sync_once() -> dict:
             stream_url = to_internal(wvp.select_stream_url(play))
             if stream_url:
                 if await _start_ai_pipeline(data, stream_url):
+                    await redis.hset(_DEVICE_KEY_PREFIX + device_id, "ai_status", "waiting_first_frame")
                     started += 1
                     logger.info(f"[WVP同步] 设备 {device_id} AI 侧未运行, 已重新启流")
                 else:
+                    await redis.hset(_DEVICE_KEY_PREFIX + device_id, "ai_status", "start_failed")
                     logger.warning(
                         f"[WVP同步] 设备 {device_id} 重新启流失败 (推理容量已满或 AI 服务异常)"
                     )

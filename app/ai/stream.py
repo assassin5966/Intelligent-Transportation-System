@@ -6,9 +6,9 @@ ZLM 判定 socket send timeout 而周期性断流.
 
 两种解码后端 (settings.decode_backend):
   - ffmpeg (默认): 解码与缩放都在 ffmpeg 子进程内完成, Python 只拿到已缩到推理
-    尺寸的 bgr24 小帧. 4K 流解码端降分辨率只有在 ffmpeg 侧才真正生效 (cv2 的
-    CAP_PROP_FRAME_WIDTH 对网络流无效), 因此该路径同时解决"8MP 全量解码"与
-    "逐帧 cv2.resize 上百毫秒"两个瓶颈.
+    尺寸的 bgr24 小帧. 4K 流降分辨率在 ffmpeg 侧完成 (cv2 的
+    CAP_PROP_FRAME_WIDTH 对网络流通常无效)，减少输出拷贝和 Python resize；
+    滤镜位于解码之后，不能免除原始分辨率的视频解码。
   - opencv: 旧行为 (grab() 节流 + 可能的解码端缩放 + preprocess 钩子),
     保留作兼容/回退, INFER_MODE=legacy 亦强制走此路径.
 
@@ -65,6 +65,16 @@ class FramePacket:
     grabbed: int               # 本连接内累计 grab 帧数 (含被节流丢弃、未 retrieve 的帧)
     stream_size: tuple         # 流原始分辨率 (w, h): 全链路坐标基准
     preprocess_ms: float = 0.0  # 本帧 preprocess (CPU resize) 耗时
+    received_mono: Optional[float] = None  # 完整解码帧到达本机的单调时间, 非相机 PTS
+    received_wall: Optional[float] = None  # 同一时刻的本机 Unix 时间, 非相机 PTS
+    stream_generation: int = 0  # 本次生成器内连接代次
+
+
+def _bounded_capture(url: str) -> cv2.VideoCapture:
+    return cv2.VideoCapture(url, cv2.CAP_FFMPEG, [
+        cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 10000,
+        cv2.CAP_PROP_READ_TIMEOUT_MSEC, 10000,
+    ])
 
 
 @retry(
@@ -74,7 +84,9 @@ class FramePacket:
     reraise=True,
 )
 def _open(url: str) -> cv2.VideoCapture:
-    cap = cv2.VideoCapture(url)
+    # FFmpeg backend 的超时必须在打开时传入，不能随后 cap.set；避免断网后
+    # 读线程永久阻塞。关闭时仅由读线程释放 capture，避免跨线程 release 崩溃。
+    cap = _bounded_capture(url)
     if not cap.isOpened():
         cap.release()
         raise StreamError(f"无法打开视频流: {url}")
@@ -160,10 +172,18 @@ class _FrameReader:
         self._failed = False
         self._stop = False
         self._preprocess_ms = 0.0
+        self._received_mono = None
+        self._received_wall = None
         self._thread = threading.Thread(target=self._drain, daemon=True)
         self._thread.start()
 
     def _drain(self) -> None:
+        try:
+            self._read_loop()
+        finally:
+            self._cap.release()
+
+    def _read_loop(self) -> None:
         next_keep = 0.0
         while not self._stop:
             if not self._cap.grab():  # 只解码头: 失败即认为断流
@@ -182,6 +202,8 @@ class _FrameReader:
                 with self._lock:
                     self._failed = True
                 return
+            received_mono = time.monotonic()
+            received_wall = time.time()
             pre_ms = 0.0
             if self._preprocess is not None:
                 t0 = time.monotonic()
@@ -191,6 +213,8 @@ class _FrameReader:
                 self._frame = frame
                 self._seq += 1
                 self._preprocess_ms = pre_ms
+                self._received_mono = received_mono
+                self._received_wall = received_wall
 
     def snapshot(self) -> tuple:
         """返回 (采样帧序号, 最新帧, 是否读失败, preprocess 耗时ms, grab 总帧数)."""
@@ -198,10 +222,17 @@ class _FrameReader:
             return self._seq, self._frame, self._failed, self._preprocess_ms, self._grabbed
 
     def close(self) -> None:
-        """停止读取并释放 capture (release 会中断阻塞中的 read)."""
+        """等待读线程自行释放 capture，禁止与 grab/retrieve 并发 release。"""
         self._stop = True
-        self._cap.release()
-        self._thread.join(timeout=5)
+        # 读超时为 10s；给线程留出超时和释放的时间，避免进程退出时仍在调用 OpenCV。
+        self._thread.join(timeout=12)
+        if self._thread.is_alive():
+            logger.warning("OpenCV 读帧线程尚未退出，将在读超时后自行释放连接")
+
+    def snapshot_with_time(self) -> tuple:
+        with self._lock:
+            return (self._seq, self._frame, self._failed, self._preprocess_ms,
+                    self._grabbed, self._received_mono, self._received_wall)
 
 
 def _decode_max_fps() -> float:
@@ -217,10 +248,16 @@ def _decode_target_short_side() -> int:
     return int(get_rule("inference", "imgsz", default=settings.infer_imgsz) or 0)
 
 
+def _fps_select_filter(max_fps: float) -> str:
+    """限制采样，不用 fps 滤镜补帧；无 PTS 或时间戳回退时保留输入帧。"""
+    interval = 1.0 / max_fps
+    return f"select='isnan(t)+isnan(prev_selected_t)+lt(t,prev_selected_t)+gte(t-prev_selected_t,{interval:.9f})'"
+
+
 class _FFmpegReader:
     """ffmpeg 子进程读帧: 解码/降帧率/降分辨率全在 C 侧完成.
 
-    与 _FrameReader 接口一致 (snapshot/close). 由于 fps 与 scale 都在 -vf 内完成,
+    与 _FrameReader 接口一致 (snapshot/close). 由于抽帧与 scale 都在 -vf 内完成,
     被丢弃的帧在 ffmpeg 内部, Python 侧观察不到, 故 grabbed 恒等于 sampled
     (运行统计里的"节流丢弃"为 0, 真正的丢帧仍由 Δsampled - 已处理帧数 体现).
     """
@@ -240,6 +277,8 @@ class _FFmpegReader:
         self._failed = False
         self._stop = False
         self._preprocess_ms = 0.0
+        self._received_mono = None
+        self._received_wall = None
         self._err: deque = deque(maxlen=6)
         self._stderr_thread = threading.Thread(target=self._drain_stderr, daemon=True)
         self._stderr_thread.start()
@@ -285,6 +324,8 @@ class _FFmpegReader:
                     return
                 filled += n
             frame = np.frombuffer(buf, dtype=np.uint8).reshape(self._oh, self._ow, 3)
+            received_mono = time.monotonic()
+            received_wall = time.time()
             pre_ms = 0.0
             if self._preprocess is not None:
                 # ffmpeg 已缩到目标短边时该钩子直接返回原帧 (开销 ~0), 仅在
@@ -296,10 +337,17 @@ class _FFmpegReader:
                 self._frame = frame
                 self._seq += 1
                 self._preprocess_ms = pre_ms
+                self._received_mono = received_mono
+                self._received_wall = received_wall
 
     def snapshot(self) -> tuple:
         with self._lock:
             return self._seq, self._frame, self._failed, self._preprocess_ms, self._seq
+
+    def snapshot_with_time(self) -> tuple:
+        with self._lock:
+            return (self._seq, self._frame, self._failed, self._preprocess_ms,
+                    self._seq, self._received_mono, self._received_wall)
 
     def close(self) -> None:
         """先 TERM 后 KILL, 保证不残留 ffmpeg 进程."""
@@ -336,8 +384,12 @@ def _probe_stream_size(url: str) -> Optional[tuple]:
     cmd = [
         exe, "-v", "error", "-select_streams", "v:0",
         "-show_entries", "stream=width,height", "-of", "csv=p=0",
-        "-rw_timeout", "10000000", url,
     ]
+    if url.lower().startswith("rtsp://"):
+        cmd += ["-rtsp_transport", "tcp", "-timeout", "10000000"]
+    elif url.lower().startswith(("http://", "https://")):
+        cmd += ["-rw_timeout", "10000000"]
+    cmd.append(url)
     try:
         proc = subprocess.run(cmd, capture_output=True, timeout=20)
     except Exception as e:  # noqa: BLE001
@@ -354,7 +406,7 @@ def _probe_stream_size(url: str) -> Optional[tuple]:
 
 def _probe_stream_size_cv2(url: str) -> Optional[tuple]:
     """ffprobe 不可用时的兜底: 用 cv2 读一帧取分辨率 (仅连接建立时一次)."""
-    cap = cv2.VideoCapture(url)
+    cap = _bounded_capture(url)
     try:
         if not cap.isOpened():
             return None
@@ -414,23 +466,24 @@ def _open_ffmpeg_reader(url: str, preprocess) -> tuple:
 
     vf = []
     if max_fps and max_fps > 0:
-        # fps 在前: 先丢帧再缩放, 省掉被丢弃帧的 swscale 开销
-        vf.append(f"fps={max_fps:g}")
+        # select 只舍弃输入帧，避免 fps 滤镜在低速视频中复制帧、虚报处理率。
+        vf.append(_fps_select_filter(max_fps))
     if out_size != stream_size:
         vf.append(f"scale={out_size[0]}:{out_size[1]}:flags=bicubic")
 
     cmd = [
         exe, "-nostdin", "-hide_banner", "-loglevel", "error",
-        "-rw_timeout", "10000000",
         "-fflags", "nobuffer", "-flags", "low_delay",
         "-probesize", "1000000", "-analyzeduration", "1000000",
     ]
     if url.lower().startswith("rtsp://"):
-        cmd += ["-rtsp_transport", "tcp"]
+        cmd += ["-rtsp_transport", "tcp", "-timeout", "10000000"]
+    elif url.lower().startswith(("http://", "https://")):
+        cmd += ["-rw_timeout", "10000000"]
     cmd += ["-i", url, "-an"]
     if vf:
         cmd += ["-vf", ",".join(vf)]
-    cmd += ["-f", "rawvideo", "-pix_fmt", "bgr24", "-"]
+    cmd += ["-fps_mode", "passthrough", "-f", "rawvideo", "-pix_fmt", "bgr24", "-"]
 
     try:
         proc = subprocess.Popen(
@@ -538,13 +591,30 @@ async def stream_frames(
 
     idx = 0
     last_seq = 0
+    generation = 0
+    last_progress = time.monotonic()
+    stall_timeout = max(0.0, float(settings.stream_stall_timeout_s))
     refresh_cooldown = 10.0  # 流地址刷新冷却 (秒), 防止频繁打 WVP
     last_refresh = 0.0
     try:
         while True:
             if stop_event is not None and stop_event.is_set():
                 break
-            seq, frame, failed, pre_ms, grabbed = reader.snapshot()
+            seq, frame, failed, pre_ms, grabbed, received_mono, received_wall = reader.snapshot_with_time()
+            if failed and seq != last_seq and frame is not None:
+                # EOF/断流前最后一帧可能已经完整读到，先交付它，再重连。
+                last_seq = seq
+                idx += 1
+                yield FramePacket(frame=frame, idx=idx, sampled=seq, grabbed=grabbed,
+                                  stream_size=stream_size, preprocess_ms=pre_ms,
+                                  received_mono=received_mono, received_wall=received_wall,
+                                  stream_generation=generation)
+                continue
+            if seq != last_seq:
+                last_progress = time.monotonic()
+            elif stall_timeout and time.monotonic() - last_progress >= stall_timeout:
+                logger.warning(f"视频流连续 {stall_timeout:g}s 无新帧, 尝试重连: {current_url}")
+                failed = True
             if failed:
                 logger.warning(f"读流失败, 尝试重连: {current_url}")
                 await asyncio.to_thread(reader.close)
@@ -593,6 +663,8 @@ async def stream_frames(
                     f"({stream_size[0]}x{stream_size[1]})"
                 )
                 last_seq = 0
+                generation += 1
+                last_progress = time.monotonic()
                 continue
             if seq == last_seq:
                 await asyncio.sleep(_POLL_INTERVAL)
@@ -606,6 +678,9 @@ async def stream_frames(
                 grabbed=grabbed,
                 stream_size=stream_size,
                 preprocess_ms=pre_ms,
+                received_mono=received_mono,
+                received_wall=received_wall,
+                stream_generation=generation,
             )
     finally:
         if reader is not None:

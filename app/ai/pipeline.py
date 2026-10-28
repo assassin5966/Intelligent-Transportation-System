@@ -12,6 +12,7 @@
   - WS 广播非阻塞 (有界队列, 满时丢最旧), 慢客户端不影响帧循环.
 """
 import asyncio
+import math
 import time
 from collections import deque
 from datetime import datetime
@@ -23,9 +24,10 @@ import httpx
 from ..common.business_rules import get_rule
 from ..common.config import settings
 from ..common.logger import logger
-from ..schemas.events import EventIn, CrossingEvent
+from ..schemas.events import CrossingEvent
 from .anomaly import AnomalyEvent, AnomalyMonitor
 from .counter import LineCrossingCounter, Point
+from .event_outbox import event_outbox
 from .gpu_engine import EngineBusy
 from .inference_scheduler import InferBusy, run_inference
 from .model_pool import Lease
@@ -172,6 +174,9 @@ class DevicePipeline:
         self._stats_batch_infer_seconds = 0.0
         self._stats_batch_size_total = 0
         self._stats_wait_seconds = 0.0
+        self._stats_executor_wait_seconds = 0.0
+        self._stats_track_seconds = 0.0
+        self._stats_frame_age_seconds = 0.0
         self._stats_preprocess_seconds = 0.0
         # 帧间隔 (秒, EMA): 供轨迹状态按时间量纲换算缺失宽限期/缝合窗口
         self._last_frame_mono: Optional[float] = None
@@ -182,6 +187,15 @@ class DevicePipeline:
         self._stats_shed_drops = 0
         self._outbox_drops = 0
         self._last_tracks_ws = 0.0
+        # 业务健康独立于设备心跳: supervisor 存活并不代表已取帧或完成推理.
+        self._started_mono = time.monotonic()
+        self._last_packet_mono: Optional[float] = None
+        self._last_success_mono: Optional[float] = None
+        self._success_times: deque = deque()
+        self._watchdog_task: Optional[asyncio.Task] = None
+        self._last_health_warning = 0.0
+        self._has_processed_stream = False
+        self._event_persist_started: Optional[float] = None
 
     # ---- 主处理循环 ----
 
@@ -195,15 +209,11 @@ class DevicePipeline:
         """单帧处理: 尺寸自适应 -> 异常检测 -> 推理 -> 计数 -> 上报入队."""
         frame = packet.frame
         sw, sh = packet.stream_size
-        # 帧间隔 (秒): 轨迹状态用它把"缺失宽限期/缝合窗口"从时间折算成帧数.
-        # 低帧率时必须用真实间隔, 否则 60 帧的窗口会被当成 60×8s = 8 分钟.
-        now_mono = time.monotonic()
-        dt = self._frame_dt
-        if self._last_frame_mono is not None:
-            raw_dt = now_mono - self._last_frame_mono
-            if 0.0 < raw_dt < 10.0:
-                dt = raw_dt
-                self._frame_dt = 0.9 * self._frame_dt + 0.1 * raw_dt
+        # 本地接收时间；坏时间或乱序帧不能推进 tracker 和计数状态。
+        now_mono = packet.received_mono if packet.received_mono is not None else time.monotonic()
+        if not math.isfinite(now_mono) or (self._last_frame_mono is not None and now_mono <= self._last_frame_mono):
+            logger.warning(f"[{self.device_id}] 丢弃时间无效或乱序帧")
+            return
         if self._frame_size != (sw, sh):
             # 首帧或流重连后分辨率变化 -> 更新计数器帧尺寸.
             # 一律用"流原始分辨率"作为坐标基准, 与推理帧尺寸/解码端缩放解耦,
@@ -216,8 +226,6 @@ class DevicePipeline:
         if anomaly_ev is not None:
             anomaly_ev.timestamp = datetime.now().isoformat()
             self._enqueue_anomaly(anomaly_ev)
-
-        self._stats_preprocess_seconds += packet.preprocess_ms / 1000.0
 
         if self.lease is not None:
             # 过载降载: 上一批等待已超阈值时主动跳过本帧, 让引擎队列排空.
@@ -237,17 +245,19 @@ class DevicePipeline:
             self._wait_ema_ms = 0.9 * self._wait_ema_ms + 0.1 * outcome.wait_ms
             if self._wait_ema_ms > _OVERLOAD_WAIT_MS:
                 self._shed_skip = 1
-            track_result = self.tracker.track_from_raw(outcome.raw_tracks, dt=dt)
+            track_result = self.tracker.track_from_raw(outcome.raw_tracks, current_time=now_mono)
             self._stats_batches += 1
             self._stats_batch_size_total += outcome.batch_size
             self._stats_batch_infer_seconds += outcome.infer_ms / 1000.0
             self._stats_wait_seconds += outcome.wait_ms / 1000.0
+            self._stats_executor_wait_seconds += outcome.executor_wait_ms / 1000.0
+            self._stats_track_seconds += outcome.track_ms / 1000.0
         else:
             # legacy: 帧尺寸 == 流原始分辨率 (无解码端缩放/预降采样, 见 decode_tuning),
             # 跟踪器内部历史/速度与计数器基准同一坐标系, 无需还原
             infer_start = time.monotonic()
             try:
-                track_result = await run_inference(self.tracker.track, frame)
+                track_result = await run_inference(self.tracker.track, frame, now_mono)
             except InferBusy:
                 # 推理池饱和 (多路并发超上限): 丢本帧取下一最新帧, 语义与处理慢
                 # 被读帧线程覆盖丢帧等价; 不计 _stats_frames, 丢帧对账
@@ -259,15 +269,31 @@ class DevicePipeline:
         # 只在帧真正被处理(提交成功)后推进时间基准: 降载/饱和丢掉的帧不计入间隔,
         # 下一次的 dt 才是"距上一帧被处理"的真实间隔
         self._last_frame_mono = now_mono
-        self._stats_frames += 1
 
-        # 单调时钟统一: 计数器内部冷却/去重/TTL 与本管道的车流统计
-        # (_vehicle_cross_times) 均基于 monotonic, 不受系统对时跳变影响
+        # 接收时间并非摄像头采集时间/PTS；单调时间用于间隔，本机墙钟用于事件日期。
         events = self.counter.process_tracks(
-            track_result, self.device_id, current_time=time.monotonic(),
+            track_result, self.device_id, current_time=now_mono,
+            current_wall_time=packet.received_wall,
         )
+        # 同帧多个事件一起落盘，避免部分提交成功后异常退出丢掉其余事件。
+        if events:
+            self._event_persist_started = time.monotonic()
+            try:
+                await event_outbox.enqueue_many([
+                    {"event_id": event.event_id, "device_id": self.device_id,
+                     "event_type": event.event_type, "occurred_at": event.timestamp}
+                    for event in events
+                ])
+            finally:
+                self._event_persist_started = None
+        self._stats_frames += 1
         self._stats_events += len(events)
-
+        self._stats_preprocess_seconds += packet.preprocess_ms / 1000.0
+        self._stats_frame_age_seconds += max(0.0, time.monotonic() - now_mono)
+        self._last_success_mono = time.monotonic()
+        self._success_times.append(self._last_success_mono)
+        while self._success_times and self._last_success_mono - self._success_times[0] > 30.0:
+            self._success_times.popleft()
         for event in events:
             if settings.count_event_log:
                 # 逐事件明细 (COUNT_EVENT_LOG=true 时): 便于核对漏计/误计的时刻与交点
@@ -279,8 +305,6 @@ class DevicePipeline:
                     f"conf={event.confidence:.2f}"
                 )
             await self._broadcast_ws(event)
-            # 事件入 outbox 由后台任务发送, 帧循环不再被 HTTP 往返阻塞
-            self._enqueue_event(event)
 
         # 车流/人流速度统计: 记录跨线事件时间戳 (每分钟车/人流量计算)
         now_mono = time.monotonic()
@@ -307,6 +331,7 @@ class DevicePipeline:
         logger.info(f"[{self.device_id}] 管道启动: {self.stream_url}")
         heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         sender_task = asyncio.create_task(self._outbox_sender())
+        current_generation = None
         try:
             url_provider = self._refresh_stream_url if self.enable_url_refresh else None
             async for packet in stream_frames(
@@ -316,6 +341,12 @@ class DevicePipeline:
                 # CPU 部署) 保持优化前的原始帧率与分辨率, 坐标基准与跟踪器内一致
                 decode_tuning=self.lease is not None,
             ):
+                if current_generation != packet.stream_generation:
+                    if self._has_processed_stream:
+                        await self._reset_stream_tracking()
+                    current_generation = packet.stream_generation
+                    self._has_processed_stream = True
+                self._last_packet_mono = packet.received_mono or time.monotonic()
                 await self._process_frame(packet)
         except asyncio.CancelledError:
             raise
@@ -339,26 +370,84 @@ class DevicePipeline:
         """
         backoff = 1.0
         first = True
+        try:
+            while not self._stop.is_set():
+                if not first:
+                    logger.info(f"[{self.device_id}] 管道 {backoff:.0f}s 后自动重启")
+                    try:
+                        await asyncio.wait_for(self._stop.wait(), timeout=backoff)
+                        break
+                    except asyncio.TimeoutError:
+                        pass
+                first = False
+                await self._run_once()
+                backoff = min(backoff * 2, 60.0)
+        finally:
+            await self._client.aclose()
+            logger.info(f"[{self.device_id}] 管道守护退出")
+
+    async def _reset_stream_tracking(self) -> None:
+        """连接代次变化时不让旧轨迹/ID 跨断流延续."""
+        if self.lease is not None:
+            await self.lease.engine.reset_device(self.device_id)
+        self.tracker.reset()
+        self.counter.reset()
+        self._last_frame_mono = None
+        self._frame_dt = 1.0 / 25.0
+        self._stats_grabbed_last = 0
+        self._stats_sampled_last = 0
+        # 上一连接的累计序号无法与新连接相减；丢弃未满窗口的统计，避免误报。
+        self._stats_window_start = None
+        self._stats_frames = self._stats_events = self._infer_busy_drops = 0
+        self._stats_batches = self._stats_batch_size_total = self._stats_shed_drops = 0
+        self._stats_infer_seconds = self._stats_batch_infer_seconds = 0.0
+        self._stats_wait_seconds = self._stats_executor_wait_seconds = 0.0
+        self._stats_track_seconds = self._stats_frame_age_seconds = self._stats_preprocess_seconds = 0.0
+        logger.info(f"[{self.device_id}] 流连接变化, 已重置跟踪和计数状态")
+
+    def health_snapshot(self) -> dict:
+        now = time.monotonic()
+        while self._success_times and now - self._success_times[0] > 30.0:
+            self._success_times.popleft()
+        age_packet = None if self._last_packet_mono is None else max(0.0, now - self._last_packet_mono)
+        age_success = None if self._last_success_mono is None else max(0.0, now - self._last_success_mono)
+        age_start = max(0.0, now - self._started_mono)
+        limit = max(1.0, float(settings.stream_stall_timeout_s or 15.0))
+        if not self.running:
+            state = "stopped"
+        elif self._event_persist_started is not None and now - self._event_persist_started >= 5.0:
+            state = "event_persist_blocked"
+        elif age_packet is None:
+            state = "waiting_first_frame" if age_start < limit else "no_frames"
+        elif age_packet >= limit:
+            state = "no_recent_frame"
+        elif age_success is None or age_success >= limit:
+            state = "no_recent_inference"
+        elif age_start >= 30.0 and len(self._success_times) / 30.0 < _MIN_HEALTHY_FPS:
+            state = "low_fps"
+        else:
+            state = "processing"
+        return {"state": state, "fps_30s": round(len(self._success_times) / min(30.0, max(age_start, 1.0)), 2),
+                "last_frame_age_s": None if age_packet is None else round(age_packet, 2),
+                "last_processed_age_s": None if age_success is None else round(age_success, 2),
+                "timestamp_basis": "local_decode_receive"}
+
+    async def _watchdog_loop(self) -> None:
         while not self._stop.is_set():
-            if not first:
-                logger.info(f"[{self.device_id}] 管道 {backoff:.0f}s 后自动重启")
-                try:
-                    await asyncio.wait_for(self._stop.wait(), timeout=backoff)
-                    break  # stop 被触发, 正常退出
-                except asyncio.TimeoutError:
-                    pass
-            first = False
-            await self._run_once()
-            backoff = min(backoff * 2, 60.0)
-        await self._client.aclose()
-        logger.info(f"[{self.device_id}] 管道守护退出")
+            await asyncio.sleep(5.0)
+            snap = self.health_snapshot()
+            now = time.monotonic()
+            if snap["state"] in {"no_frames", "no_recent_frame", "no_recent_inference", "low_fps", "event_persist_blocked"} and now - self._last_health_warning >= 30.0:
+                logger.warning(f"[{self.device_id}] AI 处理异常: {snap}")
+                self._last_health_warning = now
 
     async def _heartbeat_loop(self) -> None:
         """每 30 秒向后端发送心跳, 供离线检测使用."""
         while not self._stop.is_set():
             try:
                 await self._client.post(
-                    f"{settings.backend_url}/api/devices/{self.device_id}/heartbeat"
+                    f"{settings.backend_url}/api/devices/{self.device_id}/heartbeat",
+                    json={"ai_status": self.health_snapshot()["state"]},
                 )
             except Exception:  # noqa: BLE001
                 pass  # 心跳失败不影响视频处理
@@ -384,9 +473,6 @@ class DevicePipeline:
 
     # ---- 后台上报 (outbox): 帧循环只入队, 网络发送由独立任务串行执行 ----
 
-    def _enqueue_event(self, event: CrossingEvent) -> None:
-        self._outbox_put({"kind": "event", "event": event})
-
     def _enqueue_anomaly(self, ev: AnomalyEvent) -> None:
         self._outbox_put({"kind": "anomaly", "anomaly_ev": ev})
 
@@ -404,8 +490,7 @@ class DevicePipeline:
     def _outbox_put(self, message: dict) -> None:
         """有界入队: 满时丢最旧 (周期上报允许丢, 保最新状态).
 
-        注: 越线事件满时同样丢最旧 —— outbox 容量 512 远大于单帧事件量,
-        仅在后端长时间不可达时才可能触顶, 此时丢的也是积压最旧的历史事件.
+        越线事件使用独立的持久队列，这里只承载可覆盖的快照消息。
         """
         if self._outbox.full():
             try:
@@ -424,9 +509,7 @@ class DevicePipeline:
         while True:
             message = await self._outbox.get()
             try:
-                if message["kind"] == "event":
-                    await self._push(message["event"])
-                elif message["kind"] == "congestion":
+                if message["kind"] == "congestion":
                     await self._report_congestion(
                         message["roi_vehicles"], message["roi_persons"],
                         vehicle_flow_per_min=message["vehicle_flow_per_min"],
@@ -436,23 +519,6 @@ class DevicePipeline:
                     await self._handle_anomaly(message["anomaly_ev"])
             except Exception as e:  # noqa: BLE001
                 logger.error(f"[{self.device_id}] 上报任务异常: {e}")
-
-    async def _push(self, event: CrossingEvent) -> None:
-        payload = EventIn(
-            device_id=self.device_id,
-            event_type=event.event_type,
-            occurred_at=datetime.fromisoformat(event.timestamp),
-        )
-        try:
-            resp = await self._client.post(
-                f"{settings.backend_url}/api/events",
-                json=payload.model_dump(mode="json"),
-            )
-            logger.info(
-                f"[{self.device_id}] 推送 {event.event_type} -> HTTP {resp.status_code}"
-            )
-        except Exception as e:  # noqa: BLE001
-            logger.error(f"[{self.device_id}] 推送失败: {e}")
 
     def _report_stats(self, packet: FramePacket) -> None:
         """周期汇总运行统计 (每 _STATS_INTERVAL 秒一行 INFO).
@@ -499,6 +565,9 @@ class DevicePipeline:
                 f"推理={self._stats_batch_infer_seconds / batches * 1000.0:.0f}ms/批 "
                 f"均批={self._stats_batch_size_total / batches:.1f} "
                 f"组批等待={self._stats_wait_seconds / batches * 1000.0:.0f}ms "
+                f"执行器等待={self._stats_executor_wait_seconds / batches * 1000.0:.0f}ms "
+                f"跟踪={self._stats_track_seconds / batches * 1000.0:.0f}ms "
+                f"接收至完成={self._stats_frame_age_seconds / (processed or 1) * 1000.0:.0f}ms "
                 f"预处理={self._stats_preprocess_seconds / (processed or 1) * 1000.0:.1f}ms/帧"
                 if batches else "推理=无批次"
             )
@@ -538,6 +607,9 @@ class DevicePipeline:
         self._stats_batch_infer_seconds = 0.0
         self._stats_batch_size_total = 0
         self._stats_wait_seconds = 0.0
+        self._stats_executor_wait_seconds = 0.0
+        self._stats_track_seconds = 0.0
+        self._stats_frame_age_seconds = 0.0
         self._stats_preprocess_seconds = 0.0
 
     def _vehicle_flow_per_minute(self, now_mono: float) -> float:
@@ -672,10 +744,19 @@ class DevicePipeline:
 
     def start(self) -> None:
         self._stop.clear()
+        self._started_mono = time.monotonic()
         self._task = asyncio.create_task(self._supervisor())
+        self._watchdog_task = asyncio.create_task(self._watchdog_loop())
 
     async def stop(self) -> None:
         self._stop.set()
+        if self._watchdog_task is not None:
+            self._watchdog_task.cancel()
+            try:
+                await self._watchdog_task
+            except asyncio.CancelledError:
+                pass
+            self._watchdog_task = None
         if self._task is not None:
             self._task.cancel()
             try:

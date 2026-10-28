@@ -83,7 +83,7 @@ class ModelPool:
         if not gpus:
             reason = detail if not ok else "无可用 GPU 卡"
             if requested == "gpu_batch":
-                self._set_legacy(f"{reason} (gpu_batch 显式指定, 不降 CPU)")
+                self._set_unavailable(f"{reason} (gpu_batch 显式指定, 不降 CPU)")
                 return
             logger.warning(f"推理模式: GPU 不可用 ({reason}), 自动转 cpu_batch")
         else:
@@ -99,7 +99,7 @@ class ModelPool:
             except Exception as e:  # noqa: BLE001
                 reason = f"GPU 引擎加载/自检失败: {type(e).__name__}: {e}"
                 if requested == "gpu_batch":
-                    self._set_legacy(f"{reason} (gpu_batch 显式指定, 不降 CPU)")
+                    self._set_unavailable(f"{reason} (gpu_batch 显式指定, 不降 CPU)")
                     return
                 logger.warning(f"推理模式: {reason}, 自动转 cpu_batch")
 
@@ -109,6 +109,12 @@ class ModelPool:
         self.mode = "legacy"
         self.reason = reason
         logger.warning(f"推理模式: legacy ({reason})")
+
+    def _set_unavailable(self, reason: str) -> None:
+        """批量引擎不可用时拒绝注册，避免隐式创建每路独立模型。"""
+        self.mode = "unavailable"
+        self.reason = reason
+        logger.error(f"推理不可用: {reason}; 仅显式 INFER_MODE=legacy 才启用独立模型")
 
     async def _init_cpu(self, *, explicit: bool) -> None:
         """启动 CPU 批量引擎; 失败回退 legacy (explicit 语义只影响提示文案)."""
@@ -129,7 +135,7 @@ class ModelPool:
                 f"imgsz={settings.infer_imgsz}; CPU 部署建议 imgsz<=640 且拉子码流)"
             )
         except Exception as e:  # noqa: BLE001
-            self._set_legacy(
+            self._set_unavailable(
                 f"CPU 引擎加载/自检失败: {type(e).__name__}: {e}"
                 + (" (cpu_batch 显式指定)" if explicit else "")
             )

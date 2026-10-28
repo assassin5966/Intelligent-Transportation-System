@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     # ---- 服务间通信 ----
     backend_url: str = "http://backend:8000"
     ai_service_url: str = "http://ai:8001"
+    event_outbox_path: str = "data/event_outbox.sqlite3"
 
     # ---- 服务端口 ----
     backend_port: int = 8000
@@ -46,6 +47,7 @@ class Settings(BaseSettings):
     infer_half: bool = True            # FP16 半精度 (仅 CUDA 生效, CPU 引擎自动关闭)
     infer_batch_timeout_ms: int = 40   # 组批等待窗口 (毫秒): 凑批上限时长, 单路时即纯延迟
     infer_queue_max_batches: int = 2   # 每卡待处理批次数上限; 超限丢帧 (EngineBusy)
+    infer_max_queue_age_s: float = 2.0  # 从提交至开始推理的最长等待时间，超时丢弃
     # ---- cpu_batch (无 GPU 部署) ----
     # 每个 CPU 引擎 = 1 个模型实例 + 1 条推理线程, 多引擎共享全部设备槽位 (最少负载分配).
     # CPU 批量近似线性扩展 (算力受限, 批大不省算力), 引擎数主要影响"路间隔离":
@@ -61,6 +63,7 @@ class Settings(BaseSettings):
     decode_backend: str = "ffmpeg"     # 解码后端: ffmpeg(解码/缩放/降帧率在子进程内完成) | opencv(旧行为)
     decode_max_fps: float = 8.0        # >0 按此帧率 grab/retrieve 节流; 0=不限速(旧行为)
     decode_max_short_side: int = 0     # >0 请求解码端缩放到该短边; 0=不缩放(旧行为)
+    stream_stall_timeout_s: float = 15.0  # 连续无新帧则重连; 0 禁用, 慢速源须调大
 
     # ---- 时序预测 ----
     chronos_model: str = "models"  # 本地 Chronos-2 模型目录

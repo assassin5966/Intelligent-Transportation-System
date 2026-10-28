@@ -100,7 +100,7 @@ class ByteTracker:
 
     # ---- legacy 路径: 本地模型逐帧推理 ----
 
-    def track(self, frame: np.ndarray) -> TrackResult:
+    def track(self, frame: np.ndarray, current_time: Optional[float] = None) -> TrackResult:
         """legacy/CPU/离线路径: 本地模型推理 + 跟踪, 返回带历史的 TrackResult."""
         self._ensure_loaded()
         conf, iou, track_buffer = self._track_params()
@@ -136,7 +136,7 @@ class ByteTracker:
                     confidence=box.conf[0].item(),
                 ))
 
-        return self._state.apply(raw_tracks, max_history_length=track_buffer)
+        return self._state.apply(raw_tracks, max_history_length=track_buffer, current_time=current_time)
 
     # ---- gpu_batch 路径: 只做每路状态维护 ----
 
@@ -145,18 +145,26 @@ class ByteTracker:
         raw_tracks: list,
         max_history_length: Optional[int] = None,
         dt: Optional[float] = None,
+        current_time: Optional[float] = None,
     ) -> TrackResult:
         """批量引擎路径: 直接把引擎返回的原始轨迹转为带历史的 TrackResult.
 
-        dt: 本帧距上一帧的秒数 (缺失宽限期/缝合窗口按时间量纲换算用).
+        current_time: 严格递增的单调接收时间；dt 是兼容离线调用的帧间隔。
         """
         if max_history_length is None:
             max_history_length = int(
                 get_rule("tracking", "track_buffer", default=settings.track_buffer)
             )
         return self._state.apply(
-            raw_tracks, max_history_length=max_history_length, dt=dt
+            raw_tracks, max_history_length=max_history_length, dt=dt, current_time=current_time
         )
 
     def get_track_history(self, track_id: int):
         return self._state.get_track_history(track_id)
+
+    def reset(self):
+        """清空单路轨迹和本地模型的跟踪状态，保留模型权重。"""
+        self._state = TrajectoryState(camera_type=self._camera_type)
+        predictor = getattr(self._model, 'predictor', None)
+        for tracker in getattr(predictor, 'trackers', ()) or ():
+            tracker.reset()

@@ -22,6 +22,7 @@ from ..common.logger import logger
 from .counter import Point
 from .mock_simulator import MockSimulator
 from .model_pool import model_pool
+from .event_outbox import event_outbox
 from .pipeline import _WS_QUEUE_MAX, DevicePipeline, register_ws_client, unregister_ws_client
 
 _pipelines: dict[str, DevicePipeline] = {}
@@ -32,6 +33,7 @@ _simulator: Optional[MockSimulator] = None
 async def lifespan(app: FastAPI):
     global _simulator
     logger.info(f"AI 分析服务启动 (端口 {settings.ai_port})")
+    await event_outbox.start()
     if settings.mock_enabled:
         # Mock 模式: 不拉流不推理, 由模拟器按真实规律生成事件 (验证前端/联调用)
         _simulator = MockSimulator()
@@ -54,6 +56,7 @@ async def lifespan(app: FastAPI):
         await p.stop()
     _pipelines.clear()
     await model_pool.shutdown()
+    await event_outbox.stop()
 
 
 app = FastAPI(title="AI 分析服务", version="0.1.0", lifespan=lifespan)
@@ -80,11 +83,12 @@ async def health():
         "service": "ai",
         "active_devices": len(_simulator.device_ids) if mock else len(_pipelines),
         "mock": mock,
+        "event_outbox": await event_outbox.snapshot(),
         # 推理模式与每卡负载 (运维可见): selftest_failed 表示已整体降级 legacy
         "infer": {
             "mode": "mock" if mock else infer["mode"],
             "reason": infer["reason"],
-            "selftest_failed": infer["mode"] == "legacy" and infer["reason"].startswith("引擎自检"),
+            "selftest_failed": infer["mode"] == "unavailable" and "自检" in infer["reason"],
             "engines": infer["engines"],
         },
     }
@@ -103,6 +107,7 @@ async def list_devices():
             "device_id": d,
             "stream_url": p.stream_url,
             "running": p.running,
+            "processing_health": p.health_snapshot(),
             "infer_mode": p.mode,
             "engine_id": p.lease.engine_id if p.lease is not None else None,
         }
@@ -117,8 +122,12 @@ async def register(dev: DeviceRegister):
         raise HTTPException(409, "mock mode enabled: real pipelines are disabled (MOCK_ENABLED=true)")
     if dev.device_id in _pipelines:
         raise HTTPException(409, "device already running")
+    if model_pool.mode == "legacy" and _pipelines:
+        raise HTTPException(503, "legacy 模式仅支持单路；多路请使用批量推理模式")
     if len(dev.line) != 2:
         raise HTTPException(400, "line must be 2 points [[x1,y1],[x2,y2]]")
+    if model_pool.mode == "unavailable":
+        raise HTTPException(503, f"推理引擎不可用: {model_pool.reason}")
     line: tuple[Point, Point] = (
         (float(dev.line[0][0]), float(dev.line[0][1])),
         (float(dev.line[1][0]), float(dev.line[1][1])),
@@ -160,6 +169,7 @@ async def register(dev: DeviceRegister):
     return {
         "device_id": dev.device_id,
         "status": "started",
+        "readiness": "pending_first_frame",
         "infer_mode": p.mode,
         "engine_id": lease.engine_id if lease is not None else None,
     }
