@@ -95,3 +95,24 @@ class PipelineIntegrationTest(unittest.IsolatedAsyncioTestCase):
                                            (1000, 1000), received_mono=9))
         lease.engine.submit.assert_not_awaited()
         await p._client.aclose()
+
+    async def test_1080p_mapping_and_windowed_quality_metrics(self):
+        p = DevicePipeline("cam", "test://stream", ((.5, .1), (.5, .9)), lease=FakeLease())
+        packet = FramePacket(np.zeros((540, 960, 3), dtype=np.uint8), 1, 1, 1,
+                             (1920, 1080), decode_backend="ffmpeg", decode_max_fps=8)
+        self.assertEqual(p._scale_to_stream(packet), (2.0, 2.0))
+        p._source_size = packet.stream_size
+        p._output_size = (960, 540)
+        p._decode_backend = packet.decode_backend
+        p._decode_max_fps = packet.decode_max_fps
+        now = time.monotonic()
+        for i in range(20):
+            p._quality_samples.append((now - 1 + i * .04, now - 1 + i * .04, (i + 1) / 1000))
+        h = p.health_snapshot()
+        self.assertEqual(h["latency_sample_count_30s"], 20)
+        self.assertEqual(h["receive_to_persist_p95_ms_30s"], 19.0)
+        self.assertEqual(h["receive_to_persist_p99_ms_30s"], 20.0)
+        self.assertTrue(h["source_is_1080p"])
+        self.assertEqual(h["decode_max_fps_at_connect"], 8)
+        self.assertGreaterEqual(h["max_processed_gap_s_30s"], .2)
+        await p._client.aclose()

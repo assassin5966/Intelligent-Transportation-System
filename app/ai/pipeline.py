@@ -196,6 +196,12 @@ class DevicePipeline:
         self._last_health_warning = 0.0
         self._has_processed_stream = False
         self._event_persist_started: Optional[float] = None
+        # 完成时间、解码接收时间和接收至持久化完成的耗时；仅统计最近 30 秒。
+        self._quality_samples: deque = deque(maxlen=4096)
+        self._source_size: Optional[tuple[int, int]] = None
+        self._output_size: Optional[tuple[int, int]] = None
+        self._decode_backend = "unknown"
+        self._decode_max_fps: Optional[float] = None
 
     # ---- 主处理循环 ----
 
@@ -209,6 +215,13 @@ class DevicePipeline:
         """单帧处理: 尺寸自适应 -> 异常检测 -> 推理 -> 计数 -> 上报入队."""
         frame = packet.frame
         sw, sh = packet.stream_size
+        if self._source_size != (sw, sh):
+            self._source_size = (sw, sh)
+            if (sw, sh) != (1920, 1080):
+                logger.warning(f"[{self.device_id}] 实际源流 {sw}x{sh}，不符合 1080P 验收前提")
+        self._output_size = (frame.shape[1], frame.shape[0])
+        self._decode_backend = packet.decode_backend
+        self._decode_max_fps = packet.decode_max_fps
         # 本地接收时间；坏时间或乱序帧不能推进 tracker 和计数状态。
         now_mono = packet.received_mono if packet.received_mono is not None else time.monotonic()
         if not math.isfinite(now_mono) or (self._last_frame_mono is not None and now_mono <= self._last_frame_mono):
@@ -289,8 +302,10 @@ class DevicePipeline:
         self._stats_frames += 1
         self._stats_events += len(events)
         self._stats_preprocess_seconds += packet.preprocess_ms / 1000.0
-        self._stats_frame_age_seconds += max(0.0, time.monotonic() - now_mono)
         self._last_success_mono = time.monotonic()
+        age_seconds = max(0.0, self._last_success_mono - now_mono)
+        self._stats_frame_age_seconds += age_seconds
+        self._quality_samples.append((self._last_success_mono, now_mono, age_seconds))
         self._success_times.append(self._last_success_mono)
         while self._success_times and self._last_success_mono - self._success_times[0] > 30.0:
             self._success_times.popleft()
@@ -403,12 +418,23 @@ class DevicePipeline:
         self._stats_infer_seconds = self._stats_batch_infer_seconds = 0.0
         self._stats_wait_seconds = self._stats_executor_wait_seconds = 0.0
         self._stats_track_seconds = self._stats_frame_age_seconds = self._stats_preprocess_seconds = 0.0
+        self._quality_samples.clear()
         logger.info(f"[{self.device_id}] 流连接变化, 已重置跟踪和计数状态")
 
     def health_snapshot(self) -> dict:
         now = time.monotonic()
         while self._success_times and now - self._success_times[0] > 30.0:
             self._success_times.popleft()
+        while self._quality_samples and now - self._quality_samples[0][0] > 30.0:
+            self._quality_samples.popleft()
+        samples = list(self._quality_samples)
+        ages_ms = sorted(s[2] * 1000.0 for s in samples)
+        def percentile(p):
+            return round(ages_ms[max(0, math.ceil(len(ages_ms) * p) - 1)], 1) if ages_ms else None
+        gaps = [samples[i][1] - samples[i - 1][1] for i in range(1, len(samples))]
+        # 包含当前仍未结束的空窗；这里的时间是本机接收时间，不是摄像头 PTS。
+        if samples:
+            gaps.append(max(0.0, now - samples[-1][1]))
         age_packet = None if self._last_packet_mono is None else max(0.0, now - self._last_packet_mono)
         age_success = None if self._last_success_mono is None else max(0.0, now - self._last_success_mono)
         age_start = max(0.0, now - self._started_mono)
@@ -430,7 +456,15 @@ class DevicePipeline:
         return {"state": state, "fps_30s": round(len(self._success_times) / min(30.0, max(age_start, 1.0)), 2),
                 "last_frame_age_s": None if age_packet is None else round(age_packet, 2),
                 "last_processed_age_s": None if age_success is None else round(age_success, 2),
-                "timestamp_basis": "local_decode_receive"}
+                "timestamp_basis": "local_decode_receive",
+                "source_size": self._source_size, "output_size": self._output_size,
+                "source_is_1080p": None if self._source_size is None else self._source_size == (1920, 1080),
+                "decode_backend": self._decode_backend,
+                "decode_max_fps_at_connect": self._decode_max_fps,
+                "latency_sample_count_30s": len(samples),
+                "receive_to_persist_p95_ms_30s": percentile(0.95),
+                "receive_to_persist_p99_ms_30s": percentile(0.99),
+                "max_processed_gap_s_30s": round(max(gaps), 3) if gaps else None}
 
     async def _watchdog_loop(self) -> None:
         while not self._stop.is_set():
@@ -578,6 +612,7 @@ class DevicePipeline:
             mode_str = "模式=legacy"
 
         fps = processed / elapsed if elapsed else 0.0
+        quality = self.health_snapshot()
         logger.info(
             f"[{self.device_id}] 运行统计({elapsed:.0f}s): "
             f"处理fps={fps:.2f} "
@@ -585,6 +620,9 @@ class DevicePipeline:
             f"丢帧={dropped}({dropped_pct:.0f}%) "
             f"推理饱和丢帧={self._infer_busy_drops} 降载丢帧={self._stats_shed_drops} "
             f"outbox丢弃={self._outbox_drops} "
+            f"接收至持久化P95={quality['receive_to_persist_p95_ms_30s']}ms "
+            f"接收至持久化P99={quality['receive_to_persist_p99_ms_30s']}ms "
+            f"最大处理帧间隔={quality['max_processed_gap_s_30s']}s "
             f"{mode_str} {infer_str} "
             f"事件={self._stats_events} | 拒绝: {reject_str}"
         )

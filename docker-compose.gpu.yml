@@ -52,7 +52,7 @@ services:
       - MOCK_ENABLED=${MOCK_ENABLED:-false}
       # GPU 批量推理: 每卡 1 个模型实例 + 批内多路 track (32 路 32 实例 -> 卡数实例).
       # INFER_MODE=legacy 可一键回退为旧的"每路独立实例"路径
-      - INFER_MODE=${INFER_MODE:-auto}
+      - INFER_MODE=${INFER_MODE:-gpu_batch}
       - INFER_GPU_DEVICES=${INFER_GPU_DEVICES:-}
       # 每卡槽位: 0=按 INFER_CAPACITY 自适应 (ceil(路数/实际卡数)); >0 固定值
       - INFER_SLOTS_PER_GPU=${INFER_SLOTS_PER_GPU:-0}
@@ -69,7 +69,7 @@ services:
       # 解码侧采样: 按帧率节流 + 解码端降分辨率 (ffmpeg 后端在子进程内完成, 4K 流收益最大)
       - DECODE_BACKEND=${DECODE_BACKEND:-ffmpeg}
       - DECODE_MAX_FPS=${DECODE_MAX_FPS:-8}
-      - DECODE_MAX_SHORT_SIDE=${DECODE_MAX_SHORT_SIDE:-960}
+      - DECODE_MAX_SHORT_SIDE=${DECODE_MAX_SHORT_SIDE:-540}
       - STREAM_STALL_TIMEOUT_S=${STREAM_STALL_TIMEOUT_S:-15}
     volumes:
       - ./app:/app/app:cached
@@ -132,7 +132,7 @@ services:
       # 解码侧采样参数透传: 业务规则页「检测层」卡片展示 AI 侧生效值 (与 ai 服务同源 .env.gpu)
       - DECODE_BACKEND=${DECODE_BACKEND:-ffmpeg}
       - DECODE_MAX_FPS=${DECODE_MAX_FPS:-8}
-      - DECODE_MAX_SHORT_SIDE=${DECODE_MAX_SHORT_SIDE:-960}
+      - DECODE_MAX_SHORT_SIDE=${DECODE_MAX_SHORT_SIDE:-540}
       # WVP-GB28181 对接 (WVP/ZLM 已外部部署; 启用需 WVP_ENABLED=true 且 WVP_API_URL 指向外部 WVP)
       - WVP_ENABLED=${WVP_ENABLED:-false}
       - WVP_API_URL=${WVP_API_URL:-http://wvp:18080}

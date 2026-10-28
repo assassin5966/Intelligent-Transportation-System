@@ -76,3 +76,15 @@ class DeviceHealthTest(unittest.IsolatedAsyncioTestCase):
             await pool.initialize()
         self.assertEqual(pool.mode, "unavailable")
         self.assertIsNone(pool.acquire("cam"))
+
+    async def test_health_reports_effective_next_connection_config(self):
+        from app.ai import service
+        snapshot = {"mode": "gpu_batch", "reason": "ok", "engines": []}
+        with patch.object(service.model_pool, "snapshot", return_value=snapshot), \
+             patch.object(service.event_outbox, "snapshot", AsyncMock(return_value={"pending": 0})), \
+             patch.object(service, "get_rule", return_value=960), \
+             patch.object(service, "_decode_max_fps", return_value=8), \
+             patch.object(service, "_decode_target_short_side", return_value=540):
+            result = await service.health()
+        self.assertEqual(result["effective_config"]["decode_short_side_next_connection"], 540)
+        self.assertEqual(result["effective_config"]["decode_max_fps_next_connection"], 8)

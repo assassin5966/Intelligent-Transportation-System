@@ -25,12 +25,12 @@ router = APIRouter(prefix="/api/config", tags=["config"])
 _RULE_META: dict[str, dict[str, Any]] = {
     "detection": {
         "title": "检测层",
-        "desc": "YOLO 检测与解码采样参数 — 影响识别准确性的第一环 (能否看到目标). imgsz / decode_max_fps 保存后热重载生效; decode_max_short_side 为结构性参数, 需改 .env.gpu 后重建 AI 容器.",
+        "desc": "YOLO 检测与采样参数。imgsz 按批次更新；decode_max_fps 对新建或重连的视频流生效。decode_max_short_side 需重建 AI 容器。",
         "params": {
             "yolo_conf": {"label": "YOLO 置信度", "desc": "检测置信度阈值: 调高→远处/黄昏小目标漏检, 调低→误检增多 (0.4 曾致黄昏远处车辆漏检)", "type": "float", "default": 0.3, "step": 0.05, "min": 0.05, "max": 1, "section": "tracking"},
             "yolo_iou": {"label": "NMS IoU", "desc": "非极大值抑制 IoU 阈值: 调低→相邻目标易被合并漏检, 调高→同一目标出双框重复计数", "type": "float", "default": 0.5, "step": 0.05, "min": 0.05, "max": 1, "section": "tracking"},
-            "imgsz": {"label": "推理输入尺寸(短边)", "desc": "推理输入短边像素: 决定小目标能否检出, 越大越准但 GPU 耗时越高 (640 快 / 960 平衡 / 1280 更准); 保存后按批次热生效", "type": "int", "default": int(settings.infer_imgsz), "step": 32, "min": 320, "max": 1920, "section": "inference"},
-            "decode_max_fps": {"label": "解码采样帧率 FPS", "desc": "解码侧抽帧频率: 全速解码头, 仅按此帧率取帧送推理; 调高→快车轨迹更连续但 GPU 负载增大, 0=不限速; 保存后热生效", "type": "float", "default": float(settings.decode_max_fps), "step": 1, "min": 0, "max": 60, "section": "inference"},
+            "imgsz": {"label": "推理输入尺寸", "desc": "YOLO 输入尺寸参数；实际张量受原图比例和矩形填充影响。保存后按批次生效。", "type": "int", "default": int(settings.infer_imgsz), "step": 32, "min": 320, "max": 1920, "section": "inference"},
+            "decode_max_fps": {"label": "解码采样帧率上限", "desc": "解码后选取原始帧，实际输出可能低于上限；0=不限速。保存后新建或重连的流生效。", "type": "float", "default": float(settings.decode_max_fps), "step": 1, "min": 0, "max": 60, "section": "inference"},
             "decode_max_short_side": {"label": "解码缩放短边", "desc": "解码端把短边缩放到该值再输出 (4K 流收益最大), 过小会糊掉远处目标; 结构性参数 — 需修改 .env.gpu 的 DECODE_MAX_SHORT_SIDE 并重建 AI 容器, 页面不可改", "type": "int", "default": int(settings.decode_max_short_side), "readonly": True},
         },
     },

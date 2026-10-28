@@ -99,3 +99,22 @@ def test_ffmpeg_sampling_does_not_duplicate_low_rate_frames():
            "-f", "rawvideo", "-pix_fmt", "bgr24", "-"]
     result = subprocess.run(cmd, capture_output=True, check=True, timeout=10)
     assert len(result.stdout) == 4 * 32 * 32 * 3
+
+
+def test_1080p_output_canvas_and_unscaled_small_input():
+    with patch.object(stream.settings, "decode_max_short_side", 540):
+        assert stream._ffmpeg_out_size((1920, 1080)) == (960, 540)
+        assert stream._ffmpeg_out_size((960, 540)) == (960, 540)
+
+
+def test_25fps_source_is_not_mistaken_for_8fps_output():
+    if not shutil.which("ffmpeg"):
+        import pytest
+        pytest.skip("ffmpeg unavailable")
+    cmd = ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
+           "-f", "lavfi", "-i", "color=c=black:s=32x32:r=25:d=4",
+           "-vf", stream._fps_select_filter(8), "-fps_mode", "passthrough",
+           "-f", "rawvideo", "-pix_fmt", "bgr24", "-"]
+    result = subprocess.run(cmd, capture_output=True, check=True, timeout=10)
+    frames = len(result.stdout) // (32 * 32 * 3)
+    assert frames == 25  # 100 帧、每 4 帧一帧：约 6.25 FPS，不是配置的 8 FPS

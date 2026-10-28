@@ -68,6 +68,8 @@ class FramePacket:
     received_mono: Optional[float] = None  # 完整解码帧到达本机的单调时间, 非相机 PTS
     received_wall: Optional[float] = None  # 同一时刻的本机 Unix 时间, 非相机 PTS
     stream_generation: int = 0  # 本次生成器内连接代次
+    decode_backend: str = "unknown"  # 实际读帧器，回退时与配置可能不同
+    decode_max_fps: Optional[float] = None  # 建连时生效值，不是实际输出帧率
 
 
 def _bounded_capture(url: str) -> cv2.VideoCapture:
@@ -493,6 +495,7 @@ def _open_ffmpeg_reader(url: str, preprocess) -> tuple:
         raise StreamError(f"启动 ffmpeg 失败: {e}") from e
 
     reader = _FFmpegReader(proc, out_size, preprocess)
+    reader.decode_max_fps = max_fps
     deadline = time.monotonic() + _FFMPEG_START_TIMEOUT
     while time.monotonic() < deadline:
         seq, frame, failed, _pre, _g = reader.snapshot()
@@ -547,7 +550,9 @@ def _open_reader(url: str, decode_tuning: bool, preprocess) -> tuple:
         cap.release()
         raise
     max_fps = _decode_max_fps() if decode_tuning else 0.0
-    return _FrameReader(cap, max_fps=max_fps, preprocess=preprocess), stream_size
+    reader = _FrameReader(cap, max_fps=max_fps, preprocess=preprocess)
+    reader.decode_max_fps = max_fps
+    return reader, stream_size
 
 
 async def stream_frames(
@@ -608,7 +613,9 @@ async def stream_frames(
                 yield FramePacket(frame=frame, idx=idx, sampled=seq, grabbed=grabbed,
                                   stream_size=stream_size, preprocess_ms=pre_ms,
                                   received_mono=received_mono, received_wall=received_wall,
-                                  stream_generation=generation)
+                                  stream_generation=generation,
+                                  decode_backend="ffmpeg" if isinstance(reader, _FFmpegReader) else "opencv",
+                                  decode_max_fps=getattr(reader, "decode_max_fps", None))
                 continue
             if seq != last_seq:
                 last_progress = time.monotonic()
@@ -681,6 +688,8 @@ async def stream_frames(
                 received_mono=received_mono,
                 received_wall=received_wall,
                 stream_generation=generation,
+                decode_backend="ffmpeg" if isinstance(reader, _FFmpegReader) else "opencv",
+                decode_max_fps=getattr(reader, "decode_max_fps", None),
             )
     finally:
         if reader is not None:

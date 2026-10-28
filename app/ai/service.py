@@ -18,12 +18,14 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
 from ..common.config import settings
+from ..common.business_rules import get_rule
 from ..common.logger import logger
 from .counter import Point
 from .mock_simulator import MockSimulator
 from .model_pool import model_pool
 from .event_outbox import event_outbox
 from .pipeline import _WS_QUEUE_MAX, DevicePipeline, register_ws_client, unregister_ws_client
+from .stream import _decode_max_fps, _decode_target_short_side
 
 _pipelines: dict[str, DevicePipeline] = {}
 _simulator: Optional[MockSimulator] = None
@@ -84,6 +86,13 @@ async def health():
         "active_devices": len(_simulator.device_ids) if mock else len(_pipelines),
         "mock": mock,
         "event_outbox": await event_outbox.snapshot(),
+        "effective_config": {
+            "requested_infer_mode": settings.infer_mode,
+            "inference_imgsz_current": int(get_rule("inference", "imgsz", default=settings.infer_imgsz)),
+            "decode_backend_requested": settings.decode_backend,
+            "decode_max_fps_next_connection": _decode_max_fps(),
+            "decode_short_side_next_connection": _decode_target_short_side(),
+        },
         # 推理模式与每卡负载 (运维可见): selftest_failed 表示已整体降级 legacy
         "infer": {
             "mode": "mock" if mock else infer["mode"],

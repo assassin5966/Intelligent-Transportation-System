@@ -698,6 +698,7 @@ class GpuInferEngine:
             "pending": self._pending_count,
             "outstanding": len(self._outstanding),
             "max_queue_age_s": self._max_queue_age_s,
+            "batch_timeout_ms": round(self._batch_timeout * 1000.0, 1),
             "drops_expired": self.drops_expired,
             "batch_sizes": dict(self.batch_sizes),
             "inflight": self._inflight,
