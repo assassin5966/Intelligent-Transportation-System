@@ -1,6 +1,7 @@
 """事件生成器：根据越线检测结果生成 CrossingEvent."""
 from datetime import datetime
-from typing import List
+from typing import List, Optional
+from uuid import uuid4
 
 from ..schemas.events import (
     PERSON_ENTER,
@@ -12,6 +13,7 @@ from ..schemas.events import (
 
 class CrossingEvent:
     def __init__(self, event_type, track_id, class_name, timestamp, camera_id, cross_point, cross_line, direction, confidence):
+        self.event_id = str(uuid4())
         self.event_type = event_type
         self.track_id = track_id
         self.class_name = class_name
@@ -21,6 +23,7 @@ class CrossingEvent:
         self.cross_line = cross_line
         self.direction = direction
         self.confidence = confidence
+        self.timestamp_epoch = None
 
 
 class EventGenerator:
@@ -38,8 +41,9 @@ class EventGenerator:
         """
         if class_name in ("person", "bicycle", "motorcycle"):
             return PERSON_ENTER if entry_exit == "enter" else PERSON_EXIT
-        else:
+        elif class_name in ("car", "truck", "bus"):
             return VEHICLE_ENTER if entry_exit == "enter" else VEHICLE_EXIT
+        raise ValueError(f"unknown object class: {class_name}")
 
     @staticmethod
     def generate(
@@ -49,6 +53,7 @@ class EventGenerator:
         direction: str,
         entry_exit: str,
         line_name: str = "line_a",
+        timestamp: Optional[float] = None,
     ) -> CrossingEvent:
         """生成越线事件.
 
@@ -64,14 +69,16 @@ class EventGenerator:
             CrossingEvent 对象
         """
         event_type = EventGenerator.determine_event_type(track.class_name, entry_exit)
-        return CrossingEvent(
+        event = CrossingEvent(
             event_type=event_type,
             track_id=track.track_id,
             class_name=track.class_name,
-            timestamp=datetime.now().isoformat(),
+            timestamp=(datetime.fromtimestamp(timestamp) if timestamp is not None else datetime.now()).isoformat(),
             camera_id=camera_id,
             cross_point=cross_point,
             cross_line=line_name,
             direction=direction,
             confidence=track.confidence,
         )
+        event.timestamp_epoch = timestamp
+        return event

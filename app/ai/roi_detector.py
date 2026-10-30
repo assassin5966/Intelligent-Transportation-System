@@ -53,6 +53,13 @@ class ROIDetector:
         for i in range(n):
             xi, yi = self._roi_px[i]
             xj, yj = self._roi_px[j]
+            # ROI 边界属于 ROI；否则沿边计数线会被射线法误判为无效。
+            ex, ey = xj - xi, yj - yi
+            px, py = point[0] - xi, point[1] - yi
+            if (abs(ex * py - ey * px) <= 1e-9 * max(1.0, math.hypot(ex, ey))
+                    and min(xi, xj) - 1e-9 <= point[0] <= max(xi, xj) + 1e-9
+                    and min(yi, yj) - 1e-9 <= point[1] <= max(yi, yj) + 1e-9):
+                return True
             # 射线法: point 与多边形边的交点奇偶性判断内外
             if (yi > point[1]) != (yj > point[1]):
                 x_int = (xj - xi) * (point[1] - yi) / (yj - yi) + xi
@@ -61,27 +68,14 @@ class ROIDetector:
             j = i
         return inside
 
-    def clip_line_to_roi(
+    def clip_line_intervals_to_roi(
         self,
         line_start: List[float],
         line_end: List[float],
-    ) -> Tuple[float, float, List[float], List[float]]:
-        """将线段 P1->P2 裁剪到 ROI 多边形内, 得到有效参数区间 [t0,t1] 与端点像素.
-
-        线段参数 t: P(t) = P1 + t*(P2-P1), t∈[0,1] 为原线段.
-        算法: 收集线段与 ROI 所有边的交点 t + 端点 t=0/1, 排序后扫描相邻 t 的中点,
-        中点在 ROI 内 -> 该子段有效; 合并所有有效子段取最长者作为 [t0,t1].
-        ROI 关闭时整段有效 [0,1]; 线完全在 ROI 外时 t0>t1 (整段失效).
-
-        Returns:
-            (t0, t1, clip_p0, clip_p1): 有效参数区间和裁剪后端点像素坐标
-        """
-        # 默认整段有效
-        t0, t1 = 0.0, 1.0
-        clip_p0, clip_p1 = list(line_start), list(line_end)
-
+    ) -> List[Tuple[float, float]]:
+        """返回计数线位于 ROI 内的全部闭区间，支持凹多边形及边界重合。"""
         if self._roi_px is None:
-            return t0, t1, clip_p0, clip_p1
+            return [(0.0, 1.0)]
 
         p1x, p1y = line_start
         dx = line_end[0] - line_start[0]
@@ -89,7 +83,7 @@ class ROIDetector:
         len_sq = dx * dx + dy * dy
 
         if len_sq < 1e-6:
-            return t0, t1, clip_p0, clip_p1
+            return []
 
         # 候选参数点: 端点 + 线段与 ROI 每条边的交点
         ts = [0.0, 1.0]
@@ -101,7 +95,12 @@ class ROIDetector:
             # 求解 P1 + t*(dx,dy) = (ax,ay) + s*(ex,ey), t∈[0,1], s∈[0,1]
             denom = dx * (-ey) + dy * ex
             if abs(denom) < 1e-9:
-                continue  # 线段与边平行/重合, 跳过
+                if abs((ax - p1x) * dy - (ay - p1y) * dx) < 1e-9:
+                    for x, y in ((ax, ay), (bx, by)):
+                        t = ((x - p1x) * dx + (y - p1y) * dy) / len_sq
+                        if 0.0 <= t <= 1.0:
+                            ts.append(t)
+                continue
             t = ((ax - p1x) * (-ey) + (ay - p1y) * ex) / denom
             s = (dx * (ay - p1y) - dy * (ax - p1x)) / denom
             if 0.0 <= t <= 1.0 and 0.0 <= s <= 1.0:
@@ -109,8 +108,7 @@ class ROIDetector:
 
         ts = sorted(set(ts))
 
-        # 扫描相邻 t 区间, 中点在 ROI 内则为有效子段; 取最长有效段
-        best_t0, best_t1, best_len = 1.0, 0.0, -1.0
+        intervals: List[Tuple[float, float]] = []
         for i in range(len(ts) - 1):
             seg_t0, seg_t1 = ts[i], ts[i + 1]
             if seg_t1 - seg_t0 < 1e-9:
@@ -119,10 +117,18 @@ class ROIDetector:
             mx = p1x + mid_t * dx
             my = p1y + mid_t * dy
             if self.point_in_roi([mx, my]):
-                if (seg_t1 - seg_t0) > best_len:
-                    best_t0, best_t1, best_len = seg_t0, seg_t1, seg_t1 - seg_t0
+                if intervals and abs(intervals[-1][1] - seg_t0) < 1e-9:
+                    intervals[-1] = (intervals[-1][0], seg_t1)
+                else:
+                    intervals.append((seg_t0, seg_t1))
+        return intervals
 
-        if best_len < 0:
+    def clip_line_to_roi(
+        self, line_start: List[float], line_end: List[float],
+    ) -> Tuple[float, float, List[float], List[float]]:
+        """兼容旧调用方：返回最长子段；计数使用 clip_line_intervals_to_roi。"""
+        intervals = self.clip_line_intervals_to_roi(line_start, line_end)
+        if not intervals:
             # 线段完全在 ROI 外, 标记整段失效 (t0>t1)
             logger.warning(
                 "计数线与 ROI 不相交 (线完全落在 ROI 外), 越线段失效, "
@@ -130,6 +136,9 @@ class ROIDetector:
             )
             return 1.0, 0.0, list(line_start), list(line_end)
 
+        best_t0, best_t1 = max(intervals, key=lambda item: item[1] - item[0])
+        p1x, p1y = line_start
+        dx, dy = line_end[0] - p1x, line_end[1] - p1y
         clip_p0 = [p1x + best_t0 * dx, p1y + best_t0 * dy]
         clip_p1 = [p1x + best_t1 * dx, p1y + best_t1 * dy]
         return best_t0, best_t1, clip_p0, clip_p1

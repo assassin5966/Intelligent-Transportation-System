@@ -42,6 +42,9 @@ ENV PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
 # aarch64 (arm64): 官方 CPU 源无对应 wheel, 改用 PyPI (aarch64 版, 含 CUDA 可用于 GPU 推理)
 # 如需 amd64 + NVIDIA GPU: 把下方 amd64 分支的 --index-url 改为
 #   https://download.pytorch.org/whl/cu121
+# 依赖安装 (默认): 区间约束的 requirements.txt。
+# 离线可复现 (推荐): 在联网构建机执行 scripts/gen_requirements_lock.sh 生成 requirements.lock.txt (精确 == 锁),
+#   构建时将其拷入镜像并改用 `pip install -r /app/requirements.lock.txt` (见 docs/OFFLINE_BUILD.md 的"离线锁依赖"一节)。
 COPY requirements.txt /app/requirements.txt
 RUN ARCH=$(dpkg --print-architecture) && \
     if [ "$ARCH" = "amd64" ]; then \
@@ -58,8 +61,17 @@ COPY scripts /app/scripts
 COPY tool /app/tool
 COPY static /app/static
 # models/ 被 gitignore 不入库, 但未被 .dockerignore 排除 (会进构建上下文):
-# 构建前必须本地准备 models/yolo11n.pt, 缺失时此处 COPY 直接失败 (国内网络无法联网下载)
+# 构建前必须本地准备 models/yolo11n.pt, 缺失时下方 COPY 会失败; 显式校验给出清晰报错。
 COPY models /app/models
+# 构建前校验: 权重必须随离线 tar 预置, 不联网下载。缺失/为空时清晰报错, 而非含糊失败。
+RUN if [ -z "$(ls /app/models/*.pt 2>/dev/null)" ]; then \
+      echo "============================================================="; \
+      echo "错误: /app/models 下未找到任何 *.pt 权重文件。"; \
+      echo "本项目离线构建, 权重不联网下载。请先将 yolo11n.pt 放入 ./models/"; \
+      echo "(随离线 tar 一起预置) 再执行 docker build。"; \
+      echo "============================================================="; \
+      exit 1; \
+    fi
 
 # ---------- 4. 环境配置 ----------
 ENV TZ=Asia/Shanghai \

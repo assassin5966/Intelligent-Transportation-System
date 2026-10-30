@@ -5,7 +5,9 @@ N 分钟区间计数 (供 Chronos-2 总人数预测). 逐设备在場人数 (供
 越线事件历史 (Redis List, 供前端"最近事件"与审计回溯).
 """
 import json
-from datetime import date, datetime, timezone
+import hashlib
+from uuid import uuid4
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 from ...common.config import settings
@@ -72,72 +74,121 @@ def _hourly_all_key(dt: datetime) -> str:
     return f"{settings.redis_prefix}:hourly:all:{dt.strftime('%Y%m%d%H')}"
 
 
+# 去重记录不设置过期：持久 outbox 可无限期重试，运维须监控 Redis 容量。
+# 脚本先校验既有 key 类型及计数字段，避免 Redis 脚本错误造成部分写入。
+_APPLY_EVENT_LUA = r"""
+local expected = {'hash','hash','hash','hash','hash','hash','hash','set','list','hash','hash','hash','hash','hash','set'}
+for i, kind in ipairs(expected) do
+    local actual = redis.call('TYPE', KEYS[i]).ok
+    if actual ~= 'none' and actual ~= kind then return redis.error_reply('event key type mismatch: ' .. i) end
+end
+local old = redis.call('HGET', KEYS[10], ARGV[1])
+if old then
+    if old == ARGV[2] then return 0 end
+    return -1
+end
+local current, daily, interval = ARGV[3], ARGV[4], ARGV[5]
+local late, safe = ARGV[13] == '1', true
+if late then
+    -- 没有完整桶证明时不允许用部分数据覆盖 MySQL；持久隔离待人工处理。
+    if tonumber(ARGV[14]) <= tonumber(ARGV[15]) or redis.call('EXISTS',KEYS[6]) == 0
+       or redis.call('EXISTS',KEYS[7]) == 0 or redis.call('TTL',KEYS[6]) <= 0
+       or redis.call('TTL',KEYS[7]) <= 0 or redis.call('HEXISTS',KEYS[13],ARGV[12]) == 1 then
+        safe = false
+    end
+end
+local ver = redis.call('HGET', KEYS[12], ARGV[12])
+if ver and (not string.match(ver, '^%d+$') or not tonumber(ver) or tonumber(ver) > 9000000000000000) then
+    return redis.error_reply('invalid archive version')
+end
+for _, pair in ipairs({{1,current},{2,current},{3,daily},{4,daily},{5,interval},{6,interval},{7,interval}}) do
+    local value = redis.call('HGET', KEYS[pair[1]], pair[2])
+    if value and (not string.match(value, '^%-?%d+$') or not tonumber(value) or math.abs(tonumber(value)) > 9000000000000000) then
+        return redis.error_reply('event counter is not a safe integer')
+    end
+end
+local a = redis.call('HINCRBY', KEYS[1], current, ARGV[6])
+if a < 0 then redis.call('HSET', KEYS[1], current, 0) end
+redis.call('HINCRBY', KEYS[2], current, ARGV[6])
+redis.call('HINCRBY', KEYS[3], daily, 1)
+redis.call('HINCRBY', KEYS[4], daily, 1)
+redis.call('HINCRBY', KEYS[5], interval, 1)
+if safe then
+    for i=6,7 do redis.call('HINCRBY', KEYS[i], interval, 1) end
+    if late then
+        local version = redis.call('HINCRBY', KEYS[12], ARGV[12], 1)
+        redis.call('HSET', KEYS[11], ARGV[12], version)
+        redis.call('SADD', KEYS[15], ARGV[8])
+    end
+else
+    redis.call('HSET', KEYS[13], ARGV[12], 'hourly data missing, expired or already quarantined')
+    redis.call('HSET', KEYS[14], ARGV[1], ARGV[11])
+end
+redis.call('HSET', KEYS[1], 'updated_at', ARGV[7])
+redis.call('SADD', KEYS[8], ARGV[8])
+redis.call('EXPIRE', KEYS[2], 86400)
+redis.call('EXPIRE', KEYS[3], 7776000)
+redis.call('EXPIRE', KEYS[4], 7776000)
+redis.call('EXPIRE', KEYS[5], ARGV[9])
+if safe then
+    redis.call('EXPIREAT', KEYS[6], ARGV[14])
+    redis.call('EXPIREAT', KEYS[7], ARGV[14])
+end
+redis.call('LPUSH', KEYS[9], ARGV[11])
+redis.call('LTRIM', KEYS[9], 0, 1999)
+redis.call('HSET', KEYS[10], ARGV[1], ARGV[2])
+if not safe then return 2 end
+return 1
+"""
+
+
+class EventIdConflict(ValueError):
+    """同一 ID 被用于不同事件。"""
+
+
 async def apply_event(
-    event_type: str, device_id: str, occurred_at: Optional[datetime] = None
-) -> dict:
-    """应用一个业务事件到 Redis 实时状态, 返回更新后的统计.
-
-    occurred_at: 事件实际发生时间 (用于日/N分钟区间维度聚合); 缺省取当前时间.
-
-    current_vehicles/persons 始终更新 (车流单向车道无 Exit 事件, current_vehicles 即
-    累计进入数, 为该场景的预期语义; 人流恒为双向计数, Enter/Exit 自然对冲).
-    """
+    event_type: str, device_id: str, occurred_at: Optional[datetime] = None,
+    event_id: Optional[str] = None,
+) -> bool:
+    """原子去重并更新全部统计；返回是否首次应用。旧客户端不带 ID 时维持原有语义。"""
     delta = EVENT_DELTA.get(event_type)
     if delta is None:
-        return await get_stats()
-
-    redis = get_redis()
-    # 用事件发生时间聚合日/N分钟区间/小时维度 (离线回放/延迟事件落到正确时段)
+        raise ValueError("invalid event_type")
     event_time = occurred_at or datetime.now()
-    daily_key = _daily_key(event_time.date())
-    interval_key = _interval_key(event_time)
-    hourly_key = _hourly_key(device_id, event_time)
-    hourly_all_key = _hourly_all_key(event_time)
-    pipe = redis.pipeline()
-    device_key = _device_key(device_id)
-    device_daily_key = _device_daily_key(device_id, event_time.date())
-    for field, d in delta.items():
-        if field in _CURRENT_FIELDS:
-            pipe.hincrby(_CUR_KEY, field, d)
-            pipe.hincrby(device_key, field, d)  # 逐设备在場人数 (供警力分配)
-        else:
-            pipe.hincrby(daily_key, field, d)
-            pipe.hincrby(device_daily_key, field, d)  # 逐设备今日累计
-            interval_field = _FIELD_MAP.get(field)
-            if interval_field is not None:
-                # N 分钟区间计数 (供 Chronos-2 总人数预测)
-                pipe.hincrby(interval_key, interval_field, d)
-                # 小时级累计 (每设备 + 全局, 供"每天每小时车流/人流量")
-                pipe.hincrby(hourly_key, interval_field, d)
-                pipe.hincrby(hourly_all_key, interval_field, d)
-    pipe.hset(_CUR_KEY, "updated_at", datetime.now(timezone.utc).isoformat())
-    pipe.sadd(_DEVICES_KEY, device_id)
-    pipe.expire(daily_key, 90 * 24 * 3600)  # 日累计保留 90 天, 防止内存泄漏
-    pipe.expire(device_key, 24 * 3600)  # 逐设备在場人数保留 24 小时
-    pipe.expire(device_daily_key, 90 * 24 * 3600)  # 逐设备日累计保留 90 天
-    # N 分钟区间保留 (序列长度 + 余量) × 区间分钟 × 60 秒; 参数热重载
+    identifier = event_id or str(uuid4())
+    # 同 ID 不允许用于不同内容，避免错误配置或冲突掩盖漏计。
+    identity = json.dumps([device_id, event_type, event_time.isoformat()], ensure_ascii=False, separators=(",", ":"))
+    digest = hashlib.sha256(identity.encode()).hexdigest()
+    current = next(k for k in delta if k in _CURRENT_FIELDS)
+    daily = next(k for k in delta if k in _DAILY_FIELDS)
     from ...common.business_rules import get_rule
-
     series_length = int(get_rule("prediction", "series_length", default=settings.prediction_series_length))
     interval_minutes = int(get_rule("prediction", "interval_minutes", default=settings.prediction_interval_minutes))
     interval_ttl = (series_length + 10) * interval_minutes * 60
-    pipe.expire(interval_key, interval_ttl)
-    # 小时级数据保留 (默认 30 天, 防止内存泄漏)
-    pipe.expire(hourly_key, settings.hourly_retention_days * 24 * 3600)
-    pipe.expire(hourly_all_key, settings.hourly_retention_days * 24 * 3600)
-    # 越线事件历史持久化 (Redis List, 头插, 保留最近 _EVENT_MAX 条)
-    event_record = {
-        "device_id": device_id,
-        "event_type": event_type,
-        "occurred_at": event_time.isoformat() if isinstance(event_time, datetime) else str(event_time),
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    }
-    pipe.lpush(_EVENTS_KEY, json.dumps(event_record, ensure_ascii=False))
-    pipe.ltrim(_EVENTS_KEY, 0, _EVENT_MAX - 1)
-    await pipe.execute()
-
-    await _clamp_negatives(_CUR_KEY, _CURRENT_FIELDS)
-    return await get_stats()
+    timestamp = datetime.now(timezone.utc).isoformat()
+    record = json.dumps({"event_id": event_id, "device_id": device_id, "event_type": event_type,
+                         "occurred_at": event_time.isoformat(), "created_at": timestamp}, ensure_ascii=False)
+    local_now = datetime.now(event_time.tzinfo)
+    event_hour = event_time.replace(minute=0, second=0, microsecond=0)
+    late = event_hour < local_now.replace(minute=0, second=0, microsecond=0)
+    expires_at = (event_hour + timedelta(hours=1, days=settings.hourly_retention_days)).timestamp()
+    keys = [_CUR_KEY, _device_key(device_id), _daily_key(event_time.date()),
+            _device_daily_key(device_id, event_time.date()), _interval_key(event_time),
+            _hourly_key(device_id, event_time), _hourly_all_key(event_time), _DEVICES_KEY,
+            _EVENTS_KEY, f"{settings.redis_prefix}:event:dedup",
+            f"{settings.redis_prefix}:archive:dirty", f"{settings.redis_prefix}:archive:versions",
+            f"{settings.redis_prefix}:archive:quarantine", f"{settings.redis_prefix}:archive:quarantine_events",
+            f"{settings.redis_prefix}:archive:dirty_devices:{event_hour:%Y%m%d%H}"]
+    result = await get_redis().eval(_APPLY_EVENT_LUA, len(keys), *keys, identifier, digest,
+                                    current, daily, _FIELD_MAP[daily], delta[current], timestamp,
+                                    device_id, interval_ttl, settings.hourly_retention_days * 86400, record,
+                                    event_hour.strftime("%Y%m%d%H"), int(late), int(expires_at), int(local_now.timestamp()))
+    if result == -1:
+        raise EventIdConflict("event_id already used for another event")
+    if result == 2:
+        from ...common.logger import logger
+        logger.error(f"迟到事件 {identifier} 的小时 {event_hour:%Y%m%d%H} 缺少完整数据，已隔离，必须人工对账")
+    return result in (1, 2)
 
 
 async def list_events(limit: int = 100) -> list[dict]:

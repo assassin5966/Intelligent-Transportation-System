@@ -22,11 +22,13 @@ device 可为 "cuda:N" (GPU) 或 "cpu" (无 GPU 部署的 cpu_batch 模式), 检
   的调用, 但批内组成可任意变化, 无需补齐/重建:
       results = model.predict(frames, ...)        # 无状态, 任意组批
       tracks  = tracker[device_id].update(det, frame)   # 每路独立、状态稳定
-  另: 依据官方 `on_predict_postprocess_end` 语义, 检测为空的帧不调用 update
-  (保持与 `Model.track()` 完全一致的行为), 但会推进本引擎的批次统计.
+  检测为空的帧也调用 update, 以推进 tracker 的失踪时长和轨迹清理.
+  Ultralytics 版本间的空检测输入包装与普通检测保持一致.
 """
 import asyncio
+import itertools
 import time
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Optional
@@ -43,8 +45,8 @@ from .traj_state import RawTrack, filter_detection_class
 class EngineBusy(Exception):
     """引擎待处理队列饱和 (等待批次已达上限), 调用方应跳过本帧取下一最新帧.
 
-    语义与旧 CPU 路径的 inference_scheduler.InferBusy 一致: 丢一帧与排队多帧
-    在计数语义上等价, 但丢弃可避免延迟累积与队列雪崩.
+    语义与旧 CPU 路径的 inference_scheduler.InferBusy 一致；丢帧可避免
+    延迟累积，但会影响轨迹连续性和计数准确率，需现场评估。
     """
 
 
@@ -59,10 +61,18 @@ class _Req:
     scale: tuple  # (sx, sy): frame 尺寸 -> 流原始分辨率
     enqueued_at: float = 0.0
     future: Optional[asyncio.Future] = None
+    generation: int = 0
+    dispatched_at: float = 0.0
+    cancelled: threading.Event = field(default_factory=threading.Event)
+    expired: bool = False
 
 
 # 停止信号 (与"本批次无新请求"的超时区分开)
 _STOP = object()
+_WAKE = object()
+
+# 同进程内所有 tracker 共用单调 ID 源；重建或 reset 不回绕，避免旧轨迹碰撞。
+_TRACK_ID_SEQUENCE = itertools.count(1)
 
 
 @dataclass
@@ -72,7 +82,9 @@ class InferOutcome:
     raw_tracks: list = field(default_factory=list)
     batch_size: int = 0
     wait_ms: float = 0.0     # 本次请求在队列中等待组批的时长
-    infer_ms: float = 0.0    # 本批次整体推理+跟踪耗时
+    infer_ms: float = 0.0    # 模型预测耗时
+    executor_wait_ms: float = 0.0
+    track_ms: float = 0.0
 
 
 class GpuInferEngine:
@@ -105,6 +117,23 @@ class GpuInferEngine:
         self._slots_total = slots
         self._batch_timeout = batch_timeout_s
         self._max_pending = max(1, slots * queue_max_batches)
+        # 在途批上限: executor 是单线程且队列无界, 不设上限时推理变慢会把请求
+        # 一直排队 (现场曾出现组批等待 8~9s), 这里改为"批完成才继续派发"
+        self._max_inflight = max(1, int(queue_max_batches))
+        self._inflight = 0
+        # 队列、组批和在途统一计数，同一设备最多一个未完成请求。
+        self._outstanding: dict = {}
+        self._pending_count = 0
+        self._max_queue_age_s = max(0.001, float(getattr(settings, "infer_max_queue_age_s", 2.0)))
+        self._wake_pending = False
+        self._generations: dict = {}
+        self._generation_seq = 0
+        self.drops_expired = 0
+        self.batch_sizes: dict = {}
+        # 形状 -> {device_id: 最近出现时刻}: 该形状组的提前派发阈值.
+        # 不同分辨率各自成组, 用"本卡设备数"当阈值永远凑不满 -> 只能超时派发单帧.
+        self._shape_devices: dict = {}
+        self._shape_ttl = 60.0
         self._tracker_cfg = tracker_cfg
         self._imgsz = imgsz
         # ultralytics CPU 推理不支持 FP16, 强制关闭
@@ -163,6 +192,7 @@ class GpuInferEngine:
     def attach_loop(self) -> None:
         """绑定当前事件循环并启动组批 collector (必须在事件循环线程内调用)."""
         self._loop = asyncio.get_running_loop()
+        self._stopping = False
         self._queue = asyncio.Queue()
         self._executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix=f"{self.engine_id}-infer"
@@ -184,11 +214,15 @@ class GpuInferEngine:
                 await asyncio.wait_for(asyncio.shield(task), timeout=2.0)
             except asyncio.TimeoutError:
                 task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
             except Exception:  # noqa: BLE001
                 pass
         if self._executor is not None:
-            self._executor.shutdown(wait=True)
-            self._executor = None
+            executor, self._executor = self._executor, None
+            await asyncio.to_thread(executor.shutdown, wait=True)
         # 释放模型与显存 (修复"删除设备后显存不回收")
         self._trackers.clear()
         if self._model is not None:
@@ -218,13 +252,33 @@ class GpuInferEngine:
 
     @property
     def _dispatch_size(self) -> int:
-        """提前派发阈值: 本卡已分配的设备数.
-
-        同形状分组最多只可能收到"本卡设备数"个请求 (一路一帧), 按槽位上限判定会
-        在 32 路/8 卡 (每卡 4 路) 时永远凑不满, 退化成纯超时批 (均批≈1~4).
-        _devices 只在事件循环线程内增删, 与 collector 同线程, 无需加锁.
-        """
+        """兼容保留: 本卡已分配设备数 (形状信息缺失时的兜底阈值)."""
         return max(1, len(self._devices))
+
+    def _note_shape(self, shape: tuple, device_id: str) -> None:
+        """登记"该形状由哪些设备产生", 作为该组提前派发的阈值依据.
+
+        组批按 frame.shape 分组, 不同源分辨率不同形状; 只有同一形状的活跃设备数
+        才是该组真正能凑到的上限, 用本卡总设备数当阈值会导致永远等超时.
+        """
+        now = time.monotonic()
+        for old_shape, old_devices in list(self._shape_devices.items()):
+            if old_shape != shape:
+                old_devices.pop(device_id, None)
+                if not old_devices:
+                    self._shape_devices.pop(old_shape, None)
+        devs = self._shape_devices.setdefault(shape, {})
+        devs[device_id] = now
+        for d in [d for d, ts in devs.items() if now - ts > self._shape_ttl]:
+            devs.pop(d, None)
+        while len(self._shape_devices) > 32:
+            self._shape_devices.pop(next(iter(self._shape_devices)))
+
+    def _shape_target(self, shape: tuple) -> int:
+        devs = self._shape_devices.get(shape)
+        if not devs:
+            return self._dispatch_size
+        return max(1, len(devs))
 
     @property
     def free_slots(self) -> int:
@@ -236,129 +290,220 @@ class GpuInferEngine:
     def assign(self, device_id: str) -> int:
         if device_id in self._devices:
             return self._devices[device_id]
+        tracker = _build_tracker(self._tracker_args)
         slot = self._free_slots.pop(0)
         self._devices[device_id] = slot
-        self._trackers[device_id] = _build_tracker(self._tracker_args)
+        self._generation_seq += 1
+        self._generations[device_id] = self._generation_seq
+        self._trackers[device_id] = tracker
         logger.info(
             f"[{self.engine_id}] 槽位分配: {device_id} -> slot{slot} "
             f"(本引擎设备 {len(self._devices)}/{self._slots_total})"
         )
         return slot
 
+    def _wake_collector(self) -> None:
+        if self._queue is not None and not self._wake_pending and not self._stopping:
+            self._wake_pending = True
+            self._queue.put_nowait(_WAKE)
+
     def unassign(self, device_id: str) -> None:
         slot = self._devices.pop(device_id, None)
         if slot is None:
             return
-        self._trackers.pop(device_id, None)  # 跟踪状态随设备消失, 不留给下一路
+        self._generations.pop(device_id, None)
+        self._trackers.pop(device_id, None)
+        for shape, devices in list(self._shape_devices.items()):
+            devices.pop(device_id, None)
+            if not devices:
+                self._shape_devices.pop(shape, None)
         self._free_slots.append(slot)
         self._free_slots.sort()
+        self._wake_collector()
         logger.info(f"[{self.engine_id}] 槽位释放: {device_id} slot{slot}")
+
+    async def reset_device(self, device_id: str) -> None:
+        """流重连后重置跟踪器。旧代请求不能再更新新跟踪器或交付结果。"""
+        if device_id not in self._devices:
+            raise EngineBusy("device not assigned")
+        tracker = _build_tracker(self._tracker_args)
+        self._generation_seq += 1
+        self._generations[device_id] = self._generation_seq
+        self._trackers[device_id] = tracker
+        self._wake_collector()
 
     # ---- 推理提交 ----
 
     async def submit(self, device_id: str, frame: np.ndarray, scale: tuple) -> InferOutcome:
-        """提交一帧; 队列饱和时抛 EngineBusy (调用方丢本帧)."""
-        if self._queue is None or self._loop is None:
-            raise EngineBusy("engine not started")
-        if self._stopping:
-            raise EngineBusy("engine stopping")
-        if self._queue.qsize() >= self._max_pending:
+        """一个设备最多一个请求；上限覆盖入口、待组批和在途。"""
+        if self._queue is None or self._loop is None or self._stopping:
+            raise EngineBusy("engine not started or stopping")
+        if device_id not in self._devices:
+            raise EngineBusy("device not assigned")
+        if device_id in self._outstanding or len(self._outstanding) >= self._max_pending:
             self.drops_busy += 1
-            raise EngineBusy(
-                f"{self.engine_id} queue full ({self._queue.qsize()}/{self._max_pending})"
-            )
+            raise EngineBusy(f"{self.engine_id} request capacity full or device busy")
         fut = self._loop.create_future()
-        self._queue.put_nowait(
-            _Req(device_id, frame, scale, enqueued_at=time.monotonic(), future=fut)
-        )
-        return await fut
+        req = _Req(device_id, frame, scale, enqueued_at=time.monotonic(),
+                   future=fut, generation=self._generations[device_id])
+        self._outstanding[device_id] = req
+        self._queue.put_nowait(req)
+        try:
+            return await fut
+        except asyncio.CancelledError:
+            req.cancelled.set()
+            self._wake_collector()
+            raise
+
+    def _invalid_reason(self, req: _Req, now: float) -> Optional[str]:
+        if req.cancelled.is_set() or req.future.cancelled():
+            return "request cancelled"
+        if self._generations.get(req.device_id) != req.generation:
+            return "device generation changed"
+        if now - req.enqueued_at > self._max_queue_age_s:
+            return "request expired"
+        return None
+
+    def _release_req(self, req: _Req, err: Optional[BaseException] = None) -> None:
+        if self._outstanding.get(req.device_id) is req:
+            self._outstanding.pop(req.device_id, None)
+        if err is not None and not req.future.done():
+            req.future.set_exception(err)
 
     async def _collector(self) -> None:
-        """组批循环: 凑够本卡设备数或等满 batch_timeout 即执行一批.
-
-        按帧形状分组: 同一次 predict 的多图必须 letterbox 后形状一致, 否则
-        ultralytics 组批时 stack 失败. 单路流分辨率固定, 因此同形状分组天然
-        只聚合同分辨率的设备; 不同分辨率各自成组, 不 padding 到统一画布
-        (把 16:9 塞进正方形要多算约 76% 像素, 与"高效采样"目标相悖).
-        """
+        """按 shape 组批，容量满时等待完成通知，过期/取消请求及时清理。"""
         assert self._queue is not None and self._loop is not None
-        pending: dict = {}    # frame.shape -> [请求]
-        deadline: dict = {}   # frame.shape -> 该组开始等待时刻 + 组批窗口
-        while True:
-            timeout = None
-            if deadline:
-                timeout = max(0.0, min(deadline.values()) - self._loop.time())
-            item = None
-            timed_out = False
-            try:
-                if timeout is None:
-                    item = await self._queue.get()
-                else:
-                    item = await asyncio.wait_for(self._queue.get(), timeout)
-            except asyncio.TimeoutError:
-                timed_out = True
-
-            if item is _STOP:
-                for group in pending.values():
-                    self._fail_batch(group, EngineBusy("engine stopping"))
-                return
-
-            if item is not None:
-                shape = item.frame.shape
-                group = pending.setdefault(shape, [])
-                group.append(item)
-                if shape not in deadline:
-                    deadline[shape] = self._loop.time() + self._batch_timeout
-                # 提前派发阈值 = 本卡已分配设备数 (非槽位上限)
-                if len(group) >= self._dispatch_size:
-                    deadline.pop(shape, None)
-                    self._dispatch(pending.pop(shape))
+        pending: dict = {}
+        deadline: dict = {}
+        try:
+            while True:
+                self._flush_ready(pending, deadline)
+                # 在途已满时忽略已过期的组批 deadline，等待批完成或新事件，
+                # 只保留最早请求的过期时刻；避免零超时自旋占死事件循环。
+                times = [r.enqueued_at + self._max_queue_age_s
+                         for group in pending.values() for r in group]
+                if self._inflight < self._max_inflight:
+                    times.extend(deadline.values())
+                timeout = max(0.001, min(times) - time.monotonic()) if times else None
+                try:
+                    if timeout is None:
+                        item = await self._queue.get()
+                    else:
+                        item = await asyncio.wait_for(self._queue.get(), timeout)
+                except asyncio.TimeoutError:
                     continue
+                if item is _STOP:
+                    break
+                if item is _WAKE:
+                    self._wake_pending = False
+                    continue
+                reason = self._invalid_reason(item, time.monotonic())
+                if reason:
+                    if reason == "request expired":
+                        self.drops_expired += 1
+                    self._release_req(item, EngineBusy(reason))
+                    continue
+                shape = item.frame.shape
+                pending.setdefault(shape, []).append(item)
+                self._pending_count += 1
+                deadline.setdefault(shape, item.enqueued_at + self._batch_timeout)
+                self._note_shape(shape, item.device_id)
+        finally:
+            for group in pending.values():
+                for req in group:
+                    self._release_req(req, EngineBusy("engine stopping"))
+            self._pending_count = 0
+            while not self._queue.empty():
+                item = self._queue.get_nowait()
+                if isinstance(item, _Req):
+                    self._release_req(item, EngineBusy("engine stopping"))
 
-            if timed_out:
-                now = self._loop.time()
-                for shape in [s for s, d in deadline.items() if d <= now]:
-                    deadline.pop(shape, None)
-                    self._dispatch(pending.pop(shape))
+    def _flush_ready(self, pending: dict, deadline: dict) -> None:
+        now = time.monotonic()
+        for shape, group in list(pending.items()):
+            kept = []
+            for req in group:
+                reason = self._invalid_reason(req, now)
+                if reason:
+                    self._pending_count -= 1
+                    if reason == "request expired":
+                        self.drops_expired += 1
+                    self._release_req(req, EngineBusy(reason))
+                else:
+                    kept.append(req)
+            if kept:
+                pending[shape] = kept
+                deadline[shape] = kept[0].enqueued_at + self._batch_timeout
+            else:
+                pending.pop(shape, None)
+                deadline.pop(shape, None)
+        # 最旧就绪组优先，避免多种 shape 竞争时固定插入顺序造成饥饿。
+        for shape in sorted(pending, key=lambda key: pending[key][0].enqueued_at):
+            if self._inflight >= self._max_inflight:
+                return
+            group = pending[shape]
+            if len(group) >= self._shape_target(shape) or deadline[shape] <= now:
+                deadline.pop(shape, None)
+                pending.pop(shape)
+                self._pending_count -= len(group)
+                self._dispatch(group)
 
     def _dispatch(self, batch: list) -> None:
-        """把一批提交到该引擎的单线程 executor, 并在完成回调里派发结果/异常."""
         if not batch:
             return
+        self._inflight += 1
+        dispatched = time.monotonic()
+        for req in batch:
+            req.dispatched_at = dispatched
 
         def _on_done(fut, _batch=batch):
-            # 回调在事件循环线程执行: 结果与异常都在此派发给各请求方
             if fut.cancelled():
                 self._fail_batch(_batch, EngineBusy("batch cancelled"))
-                return
-            err = fut.exception()
-            if err is not None:
-                self._fail_batch(_batch, err)
-                return
-            self._finish_batch(_batch, fut.result())
+            elif fut.exception() is not None:
+                self._fail_batch(_batch, fut.exception())
+            else:
+                self._finish_batch(_batch, fut.result())
+            self._wake_collector()
 
         try:
             fut = asyncio.wrap_future(
                 self._executor.submit(self._run_batch, batch), loop=self._loop
             )
-        except Exception as e:  # noqa: BLE001  (executor 已关闭等)
+        except Exception as e:  # noqa: BLE001
             self._fail_batch(batch, e)
+            self._wake_collector()
             return
         fut.add_done_callback(_on_done)
 
     def _finish_batch(self, batch: list, results) -> None:
-        for item, res in zip(batch, results or []):
-            if item.future is not None and not item.future.done():
-                item.future.set_result(res)
+        self._inflight = max(0, self._inflight - 1)
+        if len(results) != len(batch):
+            for item in batch:
+                self._release_req(item, RuntimeError("batch result count mismatch"))
+            return
+        for item, res in zip(batch, results):
+            reason = self._invalid_reason(item, item.enqueued_at)  # 不对已完成推理应用排队时限
+            if item.expired:
+                reason = "request expired"
+                self.drops_expired += 1
+            if self._stopping:
+                reason = "engine stopping"
+            if reason:
+                self._release_req(item, EngineBusy(reason))
+            else:
+                if not item.future.done():
+                    item.future.set_result(res)
+                self._release_req(item)
 
     def _fail_batch(self, batch: list, err: BaseException) -> None:
+        self._inflight = max(0, self._inflight - 1)
         for item in batch:
-            if item.future is not None and not item.future.done():
-                item.future.set_exception(err)
+            self._release_req(item, err)
 
     # ---- 单线程内执行 (模型/predictor/跟踪器只在本线程被触碰) ----
 
     def _run_batch(self, batch: list) -> list:
+        started_at = time.monotonic()
         frames = [it.frame for it in batch]
         conf = float(get_rule("tracking", "yolo_conf", default=settings.yolo_conf))
         iou = float(get_rule("tracking", "yolo_iou", default=settings.yolo_iou))
@@ -375,7 +520,6 @@ class GpuInferEngine:
             verbose=False,
         )
         infer_ms = (time.monotonic() - t0) * 1000.0
-        done_at = time.monotonic()
         # 结果必须与请求一一对应: 数量不符说明 ultralytics 行为与预期不符,
         # 一旦错位会把别路的检测喂给本路 tracker (静默污染计数), 故直接报错
         if len(results) != len(batch):
@@ -385,39 +529,51 @@ class GpuInferEngine:
 
         outcomes = []
         for req, res in zip(batch, results):
+            track_start = time.monotonic()
+            req.expired = started_at - req.enqueued_at > self._max_queue_age_s
+            # 先捕获旧 tracker 引用再检查代际：重连可立即替换映射，不等待
+            # 运行中的 update；即使随后发生重连，本线程也只会触碰旧对象，
+            # 完成回调再次检查代际并丢弃旧结果。
+            tracker = self._trackers.get(req.device_id)
+            valid = (tracker is not None and not req.cancelled.is_set()
+                     and self._generations.get(req.device_id) == req.generation
+                     and not req.expired)
+            tracks = self._tracks_for(req, res, tracker) if valid else []
             outcomes.append(InferOutcome(
-                raw_tracks=self._tracks_for(req, res),
+                raw_tracks=tracks,
                 batch_size=len(batch),
-                wait_ms=max(0.0, (done_at - req.enqueued_at) * 1000.0),
+                wait_ms=max(0.0, (req.dispatched_at - req.enqueued_at) * 1000.0),
+                executor_wait_ms=max(0.0, (started_at - req.dispatched_at) * 1000.0),
                 infer_ms=infer_ms,
+                track_ms=(time.monotonic() - track_start) * 1000.0,
             ))
 
         self.batches += 1
+        self.batch_sizes[len(batch)] = self.batch_sizes.get(len(batch), 0) + 1
         self.last_infer_ms = infer_ms
         self.total_infer_ms += infer_ms
         return outcomes
 
-    def _tracks_for(self, req: _Req, res) -> list:
+    def _tracks_for(self, req: _Req, res, tracker) -> list:
         """单路结果: 官方跟踪器 update -> 还原到流原始分辨率坐标的 RawTrack 列表."""
         boxes = res.boxes
-        if boxes is None or len(boxes) == 0:
-            # 与官方 on_predict_postprocess_end 一致: 空检测不调用 update
-            return []
-        tracker = self._trackers.get(req.device_id)
-        if tracker is None:
-            return []
-        # 显式按 (xyxy, conf, cls) 拼 (N,6): 不依赖 boxes.data 是否含额外列,
-        # 也正是 ultralytics 传给 tracker.update() 的格式
-        det = np.concatenate(
-            [
-                boxes.xyxy.cpu().numpy(),
-                boxes.conf.cpu().numpy()[:, None],
-                boxes.cls.cpu().numpy()[:, None],
-            ],
-            axis=1,
-        ).astype(np.float32)
+        empty = boxes is None or len(boxes) == 0
+        # 空检测也必须 update：BYTETracker 的 frame_id、失踪和淘汰逻辑都
+        # 由 update 推进；跳过会让 track_buffer 失效并保留陈旧轨迹。
+        if empty:
+            det = np.empty((0, 6), dtype=np.float32)
+        else:
+            # 显式按 (xyxy, conf, cls) 拼 (N,6)，不依赖 boxes.data 额外列。
+            det = np.concatenate(
+                [
+                    boxes.xyxy.cpu().numpy(),
+                    boxes.conf.cpu().numpy()[:, None],
+                    boxes.cls.cpu().numpy()[:, None],
+                ],
+                axis=1,
+            ).astype(np.float32)
         tracks = tracker.update(self._wrap_det(det, req.frame), req.frame)
-        if tracks is None or len(tracks) == 0:
+        if empty or tracks is None or len(tracks) == 0:
             return []
         sx, sy = req.scale
         out = []
@@ -541,7 +697,16 @@ class GpuInferEngine:
             "slots": self._slots_total,
             "model_loaded": self._model is not None,
             "vram_mb": round(self.vram_mb(), 1),
+            "vram_scope": "device_total" if self._cuda_index is not None else "cpu",
             "queue": self._queue.qsize() if self._queue is not None else 0,
+            "pending": self._pending_count,
+            "outstanding": len(self._outstanding),
+            "max_queue_age_s": self._max_queue_age_s,
+            "batch_timeout_ms": round(self._batch_timeout * 1000.0, 1),
+            "drops_expired": self.drops_expired,
+            "batch_sizes": dict(self.batch_sizes),
+            "inflight": self._inflight,
+            "shapes": len(self._shape_devices),
             "batches": self.batches,
             "drops_busy": self.drops_busy,
             "last_infer_ms": round(self.last_infer_ms, 1),
@@ -568,10 +733,40 @@ def _build_tracker(args):
     from ultralytics.trackers import BOTSORT, BYTETracker
 
     tracker_type = getattr(args, "tracker_type", "botsort")
-    cls = {"bytetrack": BYTETracker, "botsort": BOTSORT}.get(tracker_type)
-    if cls is None:
+    base_cls = {"bytetrack": BYTETracker, "botsort": BOTSORT}.get(tracker_type)
+    if base_cls is None:
         raise TrackerApiError(f"未知 tracker_type: {tracker_type}")
+
+    class LocalIdTracker(base_cls):
+        # 不调用 Ultralytics 的全局 ID 重置；所有实例共用单调生成器，
+        # 既兼容 8.3 的 track.next_id，也兼容 8.4 的 self._ids。
+        def __init__(self, *args, **kwargs):
+            self._local_track_ids = _TRACK_ID_SEQUENCE
+            super().__init__(*args, **kwargs)
+
+        def reset_id(self):
+            # 新版 BYTETracker.update 会使用 self._ids；旧版则使用 init_track
+            # 绑定的 next_id。沿用当前号段的生成器而不回绕，避免 tracker
+            # 构造或 reset 时与其他 tracker 或旧轨迹 ID 碰撞。
+            self._ids = self._local_track_ids
+
+        def init_track(self, *args, **kwargs):
+            tracks = super().init_track(*args, **kwargs)
+            for track in tracks:
+                track.next_id = self._next_local_id
+            return tracks
+
+        def _next_local_id(self):
+            return next(self._local_track_ids)
+
+        def update(self, *args, **kwargs):
+            super().update(*args, **kwargs)
+            # 上游 8.3/8.4 返回 float32，整数 ID 超过 2**24 会舍入并碰撞。
+            # 按上游相同的活跃轨迹顺序从原始整数重新构造 float64 结果。
+            return np.asarray([track.result for track in self.tracked_stracks
+                               if track.is_activated], dtype=np.float64)
+
     try:
-        return cls(args=args, frame_rate=30)
+        return LocalIdTracker(args=args, frame_rate=30)
     except TypeError:
-        return cls(args=args)
+        return LocalIdTracker(args=args)

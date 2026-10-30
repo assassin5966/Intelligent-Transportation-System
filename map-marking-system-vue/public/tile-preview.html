@@ -4,7 +4,8 @@
 <head>
     <meta charset="UTF-8">
     <title>离线瓦片预览 · 大同古城（浅色 / 深色主题对比）</title>
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+    <!-- 离线友好: leaflet 本地化, 不依赖外网 CDN。需将 leaflet 1.9.4 的 css/js 放到 public/vendor/leaflet/ (随离线 tar 一起交付) -->
+    <link rel="stylesheet" href="./vendor/leaflet/leaflet.css">
     <style>
         html,
         body {
@@ -166,7 +167,7 @@
         </div>
     </div>
 
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="./vendor/leaflet/leaflet.js"></script>
     <script>
         const CENTER = [40.09325, 113.3025];   // 大同古城中心
         const WALL = [                          // 古城墙四角（来自「古城范围.xlsx」）

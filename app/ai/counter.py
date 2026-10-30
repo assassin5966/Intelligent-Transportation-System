@@ -78,7 +78,7 @@ class LineCrossingCounter:
         self.min_distance_threshold = 50  # set_frame_size 重算
         self.endpoint_sensitivity = 0.05
         self.hold_frames = 3  # 滞留确认帧数 (跨线后需在新侧连续保持)
-        self.min_motion = 2  # 最小位移(像素), 小于此值视为抖动
+        self.min_motion = 2  # 最小位移(像素) @ base_fps; 运行时换算为速度 px/s
         self.count_only: Optional[str] = None  # None=双向, "enter"=只计Enter, "exit"=只计Exit
 
         # 滞回防抖: 侧别反转需超过此距离 (像素), 带内抖动不触发反转
@@ -90,10 +90,11 @@ class LineCrossingCounter:
 
         # fps 解耦: hold_frames 按 25fps 基准换算为滞留时长 (秒), 运行时按
         # current_time 差分累计, 低帧率流不再因帧数不足而确认过慢/漏计.
-        # 注: min_motion 仍为 px/帧 量纲 (与 fps 耦合), 当前流均为 ~25fps 暂不缩放.
+        # min_motion 同理换算成速度 (px/s), 改解码采样帧率不改变计数口径.
         self.base_fps = 25.0
         self._last_process_time: Optional[float] = None
         self._frame_dt: float = 1.0 / self.base_fps  # 帧间隔估计 (秒, EMA)
+        self.crossing_detector.min_speed = self.min_motion * self.base_fps
 
         # ID 切换检测参数 (可配置, 适配不同帧率/分辨率)
         self.id_switch_speed_ratio = 3.0  # 速度超过历史平均 N 倍视为 ID 切换
@@ -220,6 +221,7 @@ class LineCrossingCounter:
 
     def _recompute_clip(self):
         """将计数线裁剪到 ROI 多边形内, 更新有效区间与裁剪后端点."""
+        intervals = self.roi_detector.clip_line_intervals_to_roi(self._p1, self._p2)
         if self.roi_detector._roi_px is None or self._line_len_sq < 1e-6:
             self._clip_t0 = 0.0
             self._clip_t1 = 1.0
@@ -233,6 +235,7 @@ class LineCrossingCounter:
         # 同步更新 CrossingDetector 的裁剪区间
         self.crossing_detector.clip_t0 = self._clip_t0
         self.crossing_detector.clip_t1 = self._clip_t1
+        self.crossing_detector.clip_intervals = intervals
 
     def set_roi(self, polygon: Optional[List[Point]]):
         """设置 ROI 感兴趣区域多边形 (归一化 [x,y] 顶点列表, >=3 个顶点).
@@ -316,8 +319,8 @@ class LineCrossingCounter:
     def _in_segment(self, point) -> bool:
         return self.crossing_detector._in_segment(point)
 
-    def _angle_filter(self, prev_point, curr_point) -> bool:
-        return self.crossing_detector._angle_filter(prev_point, curr_point)
+    def _angle_filter(self, prev_point, curr_point, dt: Optional[float] = None) -> bool:
+        return self.crossing_detector._angle_filter(prev_point, curr_point, dt)
 
     def _filter_endpoint_false_positive(self, track) -> bool:
         """端点附近误判过滤: 仅当轨迹连续两帧都停滞在线段端点附近时过滤."""
@@ -386,28 +389,48 @@ class LineCrossingCounter:
             min_avg_speed=self.id_switch_min_avg_speed,
             history_window=self.id_switch_history_window,
         )
+        self.crossing_detector.min_speed = self.min_motion * self.base_fps
         self.crossing_detector.min_motion = self.min_motion
 
-    def process_tracks(self, track_result, camera_id: str = "CAM001", current_time: Optional[float] = None) -> List[CrossingEvent]:
+    def process_tracks(self, track_result, camera_id: str = "CAM001", current_time: Optional[float] = None,
+                       current_wall_time: Optional[float] = None, *, commit_events: bool = True) -> List[CrossingEvent]:
         """处理一批跟踪轨迹, 返回越线事件.
 
-        current_time: 当前时间戳 (秒); 离线处理传视频时间, 实时流默认 datetime.now().
+        current_time: 严格递增的单调时间；离线处理可传视频时间。
+        current_wall_time: 本帧接收时的 Unix 时间，用于估算跨线事件发生时刻。
         """
         if current_time is None:
             current_time = datetime.now().timestamp()
+        if current_wall_time is None:
+            current_wall_time = datetime.now().timestamp()
+        if not math.isfinite(current_time) or not math.isfinite(current_wall_time):
+            raise ValueError('counter timestamps must be finite')
+        if self._last_process_time is not None and current_time <= self._last_process_time:
+            raise ValueError('counter timestamps must be strictly increasing')
         events: List[CrossingEvent] = []
 
-        # 帧间 dt (滞留时长累计用): current_time 差分; 首帧/断流重连/时间回退时用估计值
+        # 兼容没有逐轨迹时间的旧 Track；正常路径使用实际相邻观测间隔。
         raw_dt = self._frame_dt
         if self._last_process_time is not None:
             dt = current_time - self._last_process_time
-            if 0.0 < dt < 2.0:
-                raw_dt = dt
-                self._frame_dt = 0.9 * self._frame_dt + 0.1 * dt
+            raw_dt = dt
+            self._frame_dt = 0.9 * self._frame_dt + 0.1 * dt
         self._last_process_time = current_time
 
         # 热重载业务规则 (每帧检查文件 mtime, 变化才生效)
         self._apply_business_rules()
+
+        for expired_id in getattr(track_result, 'expired_track_ids', []):
+            self.state_manager.forget_track(str(expired_id))
+            self.debounce_validator.reset_track(str(expired_id))
+
+        for old_id, new_id in getattr(track_result, 'stitched_ids', []):
+            self.state_manager.transfer_track(old_id, new_id)
+            for mapping in (self.debounce_validator.track_confirm_side,
+                            self.debounce_validator.track_hold_time):
+                mapping.pop(new_id, None)
+                if old_id in mapping:
+                    mapping[new_id] = mapping.pop(old_id)
 
         for track in track_result.tracks:
             track_id = track.track_id
@@ -426,14 +449,23 @@ class LineCrossingCounter:
 
             prev_point = track.history[-2]
             curr_point = track.center
+            history_times = getattr(track, 'history_times', None)
+            observation_dt = raw_dt
+            if history_times and len(history_times) == len(track.history):
+                observation_dt = history_times[-1] - history_times[-2]
+            # 超过失联窗口不能推断未观察到的穿线过程。
+            if observation_dt <= 0 or observation_dt > 2.4:
+                self.state_manager.reset_track(track_id)
+                self.debounce_validator.reset_track(track_id)
+                self._reject('观测间隔过长或无效')
+                continue
 
-            # 1. ROI 过滤: 中心点不在多边形内的轨迹跳过计数.
-            # 跨线确认中的目标 (CROSSING) 不受 ROI 中断: 贴线 ROI 场景下目标
-            # 跨线后可能移出 ROI, 若直接跳过将永久漏计且状态残留 CROSSING.
-            # ROI 仅作为"进入计数"闸门, 一旦开始跨线确认则放行至落定.
+            # 两次观测都可能在窄 ROI 外。只要运动线段实际穿过 ROI 内的有效
+            # 计数线，就允许进入确认；仍由速度、方向和防抖规则判定。
+            outside_crossing = self.crossing_detector.detect_crossing(prev_point, curr_point, observation_dt)
             if not self.roi_detector.point_in_roi(curr_point) and (
                 self.state_manager.get_state(track_id) != "CROSSING"
-            ):
+            ) and outside_crossing is None:
                 self._reject("ROI外")
                 continue
 
@@ -447,12 +479,11 @@ class LineCrossingCounter:
             # 3. 跨线检测
             prev_off = self._offset(prev_point)
             curr_off = self._offset(curr_point)
-            detected = self.crossing_detector.detect_crossing(prev_point, curr_point)
+            detected = outside_crossing
             if detected is None and prev_off * curr_off < 0:
-                # offset 已异号 (几何上跨了线) 却未检出: 被夹角过滤 (min_motion) 拒绝.
-                # 慢速车流/低有效帧率下易发生, 属静默漏计
+                reason = "速度不足" if not self._angle_filter(prev_point, curr_point, observation_dt) else "交点在线段外"
                 self._reject(
-                    "夹角过滤",
+                    reason,
                     prev_off=round(prev_off, 1), curr_off=round(curr_off, 1),
                     min_motion=self.min_motion,
                     step=round(math.hypot(curr_point[0] - prev_point[0],
@@ -471,6 +502,11 @@ class LineCrossingCounter:
                 )
                 # 记录真实交点 (运动线段与计数线的精确交点), 供事件坐标使用
                 self.state_manager.set_cross_point(track_id, cross_point)
+                denom = prev_off - curr_off
+                fraction = max(0.0, min(1.0, prev_off / denom)) if abs(denom) > 1e-9 else 1.0
+                self.state_manager.track_cross_wall_times[track_id] = (
+                    current_wall_time - observation_dt * (1.0 - fraction)
+                )
                 # 仅首次跨线记录起始位置 (跨线前), 用于最终方向判定
                 if self.state_manager.get_state(track_id) != "CROSSING":
                     self.state_manager.start_crossing(
@@ -497,7 +533,7 @@ class LineCrossingCounter:
             # 6. 滞留确认 (含滞回防抖; 时间量纲, hold_frames 按 25fps 基准换算)
             hold_result = self.debounce_validator.confirm_holding(
                 track_id, curr_off, self._hysteresis_offset,
-                self.hold_frames / self.base_fps, raw_dt,
+                self.hold_frames / self.base_fps, observation_dt,
             )
             if hold_result == "pending":
                 self._reject("滞留未满", curr_off=round(curr_off, 1))
@@ -538,22 +574,25 @@ class LineCrossingCounter:
 
             # 9. 去重 (同事件: 时间窗+跨线点聚类) + 反向冷却 + count_only
             cross_point = self.state_manager.get_cross_point(track_id)
-            if not self.state_manager.can_count(
+            reject_reason = self.state_manager.count_reject_reason(
                 track_id, entry_exit, current_time,
                 self.reverse_crossing_cooldown, self.count_only,
                 cross_point=cross_point,
-            ):
-                if self.count_only is not None and entry_exit != self.count_only:
-                    self._reject("单向模式", entry_exit=entry_exit)  # 设备 count_only 配置按设计吞掉反向事件
-                else:
-                    self._reject("去重/冷却", entry_exit=entry_exit)
+            )
+            if reject_reason:
+                self._reject(reject_reason, entry_exit=entry_exit)
                 self.state_manager.set_state(track_id, "TRACKING")
                 continue
 
             # 10. 生成事件 (cross_point 用真实交点, 无记录时回退 curr_point)
+            if track.class_name not in ("person", "bicycle", "motorcycle", "car", "truck", "bus"):
+                self._reject("未知类别", class_name=track.class_name)
+                self.state_manager.reset_track(track_id)
+                continue
             event = self.event_generator.generate(
                 track, camera_id, cross_point or curr_point,
                 direction_str, entry_exit, self.line_name,
+                timestamp=self.state_manager.track_cross_wall_times.get(track_id, current_wall_time),
             )
             events.append(event)
             self._trace(
@@ -563,14 +602,19 @@ class LineCrossingCounter:
             )
 
             # 双向计数: 记录 track_id+direction+交点, 允许反方向再计一次
-            self.state_manager.mark_counted(
-                track_id, entry_exit, current_time, cross_point,
-            )
-            self.state_manager.set_state(track_id, "TRACKING")
+            if commit_events:
+                self.commit_events([event], current_time)
 
         # 清理过期轨迹
         self._cleanup_old_tracks(current_time)
         return events
+
+    def commit_events(self, events: List[CrossingEvent], current_time: float) -> None:
+        """事件可靠落盘后才确认内存去重状态；离线调用仍可直接提交。"""
+        for event in events:
+            entry_exit = "enter" if event.direction == "outer_to_inner" else "exit"
+            self.state_manager.mark_counted(event.track_id, entry_exit, current_time, event.cross_point)
+            self.state_manager.set_state(event.track_id, "TRACKING")
 
     def _cleanup_old_tracks(self, current_time: Optional[float] = None):
         """清理长时间无跨线的轨迹状态; 按 TTL 淘汰已计数轨迹."""
@@ -613,3 +657,5 @@ class LineCrossingCounter:
         self._reject_stats.clear()
         self.trace_records.clear()
         self._trace_ctx = {"frame": None, "track_id": None}
+        self._last_process_time = None
+        self._frame_dt = 1.0 / self.base_fps

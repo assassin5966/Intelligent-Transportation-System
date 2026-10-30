@@ -26,6 +26,10 @@ services:
     environment:
       - REDIS_URL=redis://redis:6379/0
       - BACKEND_URL=http://backend:8000
+      - EVENT_OUTBOX_PATH=/app/event-outbox/events.sqlite3
+      - EVENT_DELIVERY_PROTOCOL=${EVENT_DELIVERY_PROTOCOL:-legacy}
+      - BUSINESS_TIMEZONE=${BUSINESS_TIMEZONE:-Asia/Shanghai}
+      - TZ=${BUSINESS_TIMEZONE:-Asia/Shanghai}
       - PYTHONUNBUFFERED=1
       # 计数可观测性 (排查漏计/误计): 控制台日志级别 / 运行统计周期 / 逐事件明细
       # LOG_LEVEL=DEBUG 时 docker logs 可看到详细日志 (文件日志 logs/*.log 始终 DEBUG)
@@ -36,15 +40,21 @@ services:
       - MOCK_ENABLED=${MOCK_ENABLED:-false}
       # CPU 批量推理 (INFER_MODE=auto 时无 GPU 自动转 cpu_batch)
       - INFER_MODE=${INFER_MODE:-auto}
+      - INFER_ENGINES_PER_GPU=${INFER_ENGINES_PER_GPU:-1}
       - INFER_CPU_ENGINES=${INFER_CPU_ENGINES:-2}
       - INFER_CPU_THREADS=${INFER_CPU_THREADS:-0}
       - INFER_IMGSZ=${INFER_IMGSZ:-960}
+      - INFER_MAX_QUEUE_AGE_S=${INFER_MAX_QUEUE_AGE_S:-2}
       - DECODE_MAX_FPS=${DECODE_MAX_FPS:-8}
+      - DECODE_FPS_SAMPLING=${DECODE_FPS_SAMPLING:-interval}
+      - STREAM_STALL_TIMEOUT_S=${STREAM_STALL_TIMEOUT_S:-15}
+      - CLOCK_JUMP_TOLERANCE_S=${CLOCK_JUMP_TOLERANCE_S:-2}
     volumes:
       - ./app:/app/app:cached
       - ./models:/app/models:cached
       - ./configs:/app/configs:cached
       - ./logs:/app/logs
+      - event-outbox:/app/event-outbox
       - ./data:/app/data:cached   # mock_simulator 读设备种子 (device_geo.json)
       - model-cache:/root/.cache
     depends_on:
@@ -75,6 +85,9 @@ services:
     environment:
       - REDIS_URL=redis://redis:6379/0
       - AI_SERVICE_URL=http://ai:8001
+      - EVENT_LEDGER_ENABLED=${EVENT_LEDGER_ENABLED:-false}
+      - BUSINESS_TIMEZONE=${BUSINESS_TIMEZONE:-Asia/Shanghai}
+      - TZ=${BUSINESS_TIMEZONE:-Asia/Shanghai}
       - PYTHONUNBUFFERED=1
       # WVP-GB28181 对接 (WVP/ZLM 已外部部署; 启用需 WVP_ENABLED=true 且 WVP_API_URL 指向外部 WVP)
       - WVP_ENABLED=${WVP_ENABLED:-false}
@@ -82,6 +95,7 @@ services:
       - WVP_USERNAME=${WVP_USERNAME:-admin}
       - WVP_PASSWORD=${WVP_PASSWORD:-admin}
       - WVP_SYNC_INTERVAL=${WVP_SYNC_INTERVAL:-30}
+      - WVP_PLAY_RETRY_MAX_S=${WVP_PLAY_RETRY_MAX_S:-120}
       - WVP_PLAY_PROTOCOL=${WVP_PLAY_PROTOCOL:-flv}
       - WVP_STREAM_SUB=${WVP_STREAM_SUB:-true}
       # 前端播放地址翻译 (/api/devices/glm-5.3_common/play); 空值走自动推导/原样返回
@@ -104,10 +118,14 @@ services:
       - ./configs:/app/configs:cached
       - ./static:/app/static:cached
       - ./data:/app/data:cached
+      - ./scripts:/app/scripts:ro
+      - event-outbox:/app/event-outbox:ro
       - ./logs:/app/logs
     depends_on:
-      - redis
-      - mysql
+      redis:
+        condition: service_started
+      mysql:
+        condition: service_healthy  # 等 MySQL 真正可连接, 否则启动建表失败
     healthcheck:
       # mock 模式下 ai 的设备注册/事件/拥挤上报都依赖 backend, 必须等其就绪
       test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
@@ -137,13 +155,22 @@ services:
       - "3307:3306"
     volumes:
       - mysql-data:/var/lib/mysql
+    # 健康检查: 供 backend depends_on condition=service_healthy 使用
+    # (MySQL 首次初始化需 10~30s; 不等健康则后端启动时建表会失败 -> device_info 表缺失)
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p$$MYSQL_ROOT_PASSWORD"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
 
   # ---------- Redis: 实时状态 (当前车辆/人员数量、告警、设备配置) ----------
   redis:
     image: redis:7-alpine
     container_name: dt-redis
     restart: unless-stopped
-    command: ["redis-server", "--appendonly", "yes"]
+    # 后端应答前同步 AOF；去重账本禁止被内存淘汰（故障时返回错误，队列保留待重试）。
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "always", "--maxmemory-policy", "noeviction"]
     ports:
       - "16379:6379"
     volumes:
@@ -174,6 +201,7 @@ services:
       - backend
 
 volumes:
+  event-outbox:
   redis-data:
   model-cache:
   mysql-data:

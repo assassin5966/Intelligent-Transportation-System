@@ -1,7 +1,10 @@
 <template>
   <div class="chart-card prediction-chart">
     <div class="chart-toolbar">
-      <span class="chart-title">📈 时序预测</span>
+      <span class="chart-title">📈 时序预测
+        <em style="margin-left:6px;padding:1px 6px;border:1px solid rgba(120,160,220,.4);border-radius:4px;font-size:10px;font-style:normal;color:#8fa8cf"
+          title="预测由后端全局时序模型产出，不随景区筛选拆分">全局模型</em>
+      </span>
       <div class="chart-filters">
         <button class="tool-btn mini" @click="run">🔮 触发预测</button>
         <button class="tool-btn mini" @click="health">💓 健康检查</button>

@@ -50,6 +50,7 @@ class TrackResult(BaseModel):
 
 
 class CrossingEvent(BaseModel):
+    event_id: Optional[str] = None
     event_type: str
     track_id: str
     class_name: str
@@ -62,6 +63,7 @@ class CrossingEvent(BaseModel):
 
 
 class EventIn(BaseModel):
+    event_id: Optional[str] = Field(default=None, min_length=1, max_length=128, description="事件唯一 ID；旧客户端可省略")
     device_id: str = Field(..., description="设备ID")
     event_type: str = Field(..., description="VehicleEnter/VehicleExit/PersonEnter/PersonExit")
     occurred_at: datetime = Field(..., description="事件发生时间")

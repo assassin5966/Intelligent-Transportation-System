@@ -36,3 +36,7 @@ python-dotenv>=1.0.0
 loguru>=0.7.2
 tenacity>=8.3.0
 pyyaml>=6.0
+
+# === 实时位置接入 (Apache Pulsar, 对接《实时位置数据接入规范V1.0》) ===
+# Pulsar Python 客户端(封装 C++ client); 离线部署需随镜像预装(见 docs/GPS_LOCATION_INTEGRATION.md)
+pulsar-client>=3.0.0

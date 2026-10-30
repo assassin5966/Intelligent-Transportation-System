@@ -15,7 +15,20 @@
  *   setOption({ ... })  // 传入完整 ECharts option
  */
 import { ref, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
-import * as echarts from 'echarts'
+// 按需引入 ECharts（大屏仅用折线图 + grid/tooltip/legend/markLine），
+// 相比全量 'echarts' 可显著缩小主 bundle，缩短大屏首屏加载/解析时间
+import * as echarts from 'echarts/core'
+import { LineChart } from 'echarts/charts'
+import {
+  GridComponent,
+  TooltipComponent,
+  LegendComponent,
+  TitleComponent,
+  MarkLineComponent
+} from 'echarts/components'
+import { CanvasRenderer } from 'echarts/renderers'
+
+echarts.use([LineChart, GridComponent, TooltipComponent, LegendComponent, TitleComponent, MarkLineComponent, CanvasRenderer])
 
 // —— 深色大屏科技感主题配色（与 main.css CSS 变量对齐）——
 export const CHART_THEME = {

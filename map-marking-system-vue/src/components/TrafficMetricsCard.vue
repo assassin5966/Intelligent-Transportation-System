@@ -1,7 +1,9 @@
 <template>
-  <!-- ① 全局信息：交通通行指标（全部监控设备合计，来自实时统计 §4.1） -->
+  <!-- ① 全局信息：交通通行指标（随右上角景区筛选；未选景区 = 全部监控设备合计） -->
   <div class="card zoomable">
-    <div class="card-hd">🚦 交通通行指标 <span class="tag">全部监控设备合计</span></div>
+    <div class="card-hd">🚦 交通通行指标
+      <span class="tag">{{ scenic.state.scenic ? scenic.state.scenic + ' · 设备合计' : '全部监控设备合计' }}</span>
+    </div>
     <div class="card-bd">
       <div class="metric">
         <span class="k">在场车辆</span>
@@ -36,11 +38,43 @@
 import { computed } from 'vue'
 import { useRealtime } from '../composables/useRealtime.js'
 import { useDevices } from '../composables/useDevices.js'
+import { useScenic } from '../composables/useScenic.js'
 
 const rt = useRealtime()
 const dev = useDevices().state
+const scenic = useScenic()
 
-const s = computed(() => rt.state.stats || {})
+/**
+ * 指标数据源：
+ *   - 未选景区：直接用后端 /ws stats.data（全局合计，零额外计算）
+ *   - 选了景区：按该景区设备集合（dev.devices 已被 useDevices 过滤）汇总 statsById，
+ *     保证与地图上可见的设备完全一致。
+ */
+const s = computed(() => {
+  const g = rt.state.stats || {}
+  if (!scenic.state.scenic) return g
+  const acc = {
+    current_vehicles: 0,
+    current_persons: 0,
+    today_vehicle_in: 0,
+    today_vehicle_out: 0,
+    today_person_in: 0,
+    today_person_out: 0,
+    active_devices: 0
+  }
+  dev.devices.forEach((d) => {
+    if (d.status === 'online') acc.active_devices++
+    const st = dev.statsById[d.id]
+    if (!st) return
+    acc.current_vehicles += Number(st.current_vehicles) || 0
+    acc.current_persons += Number(st.current_persons) || 0
+    acc.today_vehicle_in += Number(st.today_vehicle_in) || 0
+    acc.today_vehicle_out += Number(st.today_vehicle_out) || 0
+    acc.today_person_in += Number(st.today_person_in) || 0
+    acc.today_person_out += Number(st.today_person_out) || 0
+  })
+  return acc
+})
 
 // 异常设备数（ws 无数据/未在线 -> abnormal，前端标灰展示）
 const abnormalCount = computed(() => dev.devices.filter((d) => d.status === 'abnormal').length)

@@ -92,14 +92,18 @@ async def query_hourly(
     start_hour: int,
     end_date: date,
     end_hour: int,
+    device_ids: Optional[list[str]] = None,
 ) -> list[dict]:
     """查询长期小时数据 (长期报表), 支持天+时精确范围 [start_date:start_hour, end_date:end_hour].
 
     - 指定 device_id: 返回该设备每小时数据
-    - 不指定: 按日期+小时聚合所有设备 (全局汇总, 等价于 Redis 的 hourly:all)
+    - 指定 device_ids: 只聚合这些设备 (景区等分组汇总); 空列表直接返回空
+    - 都不指定: 按日期+小时聚合所有设备 (全局汇总, 等价于 Redis 的 hourly:all)
 
     start_date 缺省小时取 0, end_date 缺省小时取 23 即按整日查询 (兼容旧用法).
     """
+    if device_ids is not None and not device_ids:
+        return []
     pool = await get_pool()
     async with pool.acquire() as conn:
         async with conn.cursor(aiomysql.DictCursor) as cur:
@@ -117,6 +121,20 @@ async def query_hourly(
                 ORDER BY stat_date, hour
                 """
                 await cur.execute(sql, (device_id, *args))
+            elif device_ids:
+                marks = ",".join(["%s"] * len(device_ids))
+                sql = f"""
+                SELECT stat_date, hour,
+                       SUM(vehicle_in) AS vehicle_in,
+                       SUM(vehicle_out) AS vehicle_out,
+                       SUM(person_in) AS person_in,
+                       SUM(person_out) AS person_out
+                FROM {_TABLE}
+                WHERE device_id IN ({marks}) AND {cond}
+                GROUP BY stat_date, hour
+                ORDER BY stat_date, hour
+                """
+                await cur.execute(sql, (*device_ids, *args))
             else:
                 sql = f"""
                 SELECT stat_date, hour,

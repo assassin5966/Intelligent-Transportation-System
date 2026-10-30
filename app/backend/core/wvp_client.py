@@ -82,51 +82,64 @@ class WVPClient:
             raise WVPError(f"WVP 接口返回错误 {path}: {body}")
         return body
 
-    async def list_devices(self) -> list[dict]:
-        """分页拉取全部国标设备. 返回 [{deviceId, name, online, ...}]."""
-        if not self.enabled:
-            return []
-        devices: list[dict] = []
+    async def _list_all(self, path: str, alternate: str, identity: str) -> list[dict]:
+        """Only return a snapshot when every advertised page is complete."""
+        items: list[dict] = []
+        seen = set()
         page = 1
         count = 100
+        expected_total = None
         while True:
-            body = await self._request(
-                "GET", "/api/device/query/devices", params={"page": page, "count": count}
-            )
-            data = body.get("data", {})
-            batch = data.get("list") or data.get("deviceList") or []
-            # 2.7.2 在线字段为 onLine(大写L), 归一化为 online 供 wvp_sync 判断
-            for d in batch:
-                if isinstance(d, dict) and "online" not in d and "onLine" in d:
-                    d["online"] = d["onLine"]
-            devices.extend(batch)
-            total = data.get("total", 0)
-            if len(devices) >= total or not batch:
-                break
+            if page > 10000:
+                raise WVPError(f"WVP 分页超限: {path}")
+            body = await self._request("GET", path, params={"page": page, "count": count})
+            data = body.get("data") if isinstance(body, dict) else None
+            if not isinstance(data, dict):
+                raise WVPError(f"WVP 分页响应无效: {path}")
+            batch = data.get("list") if "list" in data else data.get(alternate)
+            if not isinstance(batch, list):
+                raise WVPError(f"WVP 分页列表无效: {path}")
+            raw_total = data.get("total")
+            if raw_total is not None:
+                try:
+                    total = int(raw_total)
+                except (TypeError, ValueError) as exc:
+                    raise WVPError(f"WVP 分页总数无效: {path}") from exc
+                if total < 0 or (expected_total is not None and total != expected_total):
+                    raise WVPError(f"WVP 分页总数变化: {path}")
+                expected_total = total
+            elif expected_total is not None:
+                raise WVPError(f"WVP 分页总数缺失: {path}")
+            for item in batch:
+                if not isinstance(item, dict) or not isinstance(item.get(identity), str) or not item[identity] or item[identity] in seen:
+                    raise WVPError(f"WVP 分页条目无效或重复: {path}")
+                seen.add(item[identity])
+            items.extend(batch)
+            if expected_total is not None:
+                if len(items) > expected_total or (not batch and len(items) < expected_total):
+                    raise WVPError(f"WVP 分页不完整: {path}")
+                if len(items) == expected_total:
+                    return items
+            elif len(batch) < count:
+                return items
             page += 1
+
+    async def list_devices(self) -> list[dict]:
+        """分页拉取全部国标设备，缺页或异常响应不视为完整空列表。"""
+        if not self.enabled:
+            return []
+        devices = await self._list_all("/api/device/query/devices", "deviceList", "deviceId")
+        for d in devices:
+            if "online" not in d and "onLine" in d:
+                d["online"] = d["onLine"]
         return devices
 
     async def list_channels(self, device_id: str) -> list[dict]:
         """拉取指定设备的通道列表. 返回 [{channelId, name, ...}]."""
         if not self.enabled:
             return []
-        channels: list[dict] = []
-        page = 1
-        count = 100
-        while True:
-            body = await self._request(
-                "GET",
-                f"/api/device/query/devices/{device_id}/channels",
-                params={"page": page, "count": count},
-            )
-            data = body.get("data", {})
-            batch = data.get("list") or data.get("channelList") or []
-            channels.extend(batch)
-            total = data.get("total", 0)
-            if len(channels) >= total or not batch:
-                break
-            page += 1
-        return channels
+        return await self._list_all(f"/api/device/query/devices/{device_id}/channels",
+                                    "channelList", "channelId")
 
     async def start_play(self, device_id: str, channel_id: str) -> Optional[dict]:
         """开始点播, 返回 {flv, rtsp, stream_id}. 失败返回 None.

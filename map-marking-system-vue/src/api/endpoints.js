@@ -311,12 +311,14 @@ export function reportCongestion(payload) {
  * @param {string} [deviceId] 指定设备 ID；不传返回全局合计（按日期+小时聚合所有设备）
  * @param {string} startDate  开始时间：YYYY-MM-DD（整日起）或 YYYY-MM-DD:HH（精确到小时），必填
  * @param {string} endDate    结束时间：YYYY-MM-DD（整日至 23 点）或 YYYY-MM-DD:HH，必填且不早于开始
- * @returns {Promise<{device_id:string|null, start:string, end:string, records:HourlyHistoryRecord[]}>}
+ * @param {string} [scenic]   景区名；按 device_info.region 圈定设备集合后聚合（deviceId 优先）
+ * @returns {Promise<{device_id:string|null, scenic:string|null, scenic_devices:number|null, start:string, end:string, records:HourlyHistoryRecord[]}>}
  * @throws {ApiError} 422 时间格式非法/开始晚于结束；503 MySQL 归档未启用或查询失败
  */
-export function getHourlyHistory(deviceId, startDate, endDate) {
+export function getHourlyHistory(deviceId, startDate, endDate, scenic) {
   const query = { start_date: startDate, end_date: endDate }
   if (deviceId) query.device_id = deviceId
+  if (scenic) query.scenic = scenic
   return get('/api/stats/hourly/history', query)
 }
 

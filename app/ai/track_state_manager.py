@@ -24,6 +24,7 @@ class TrackStateManager:
         self.track_crossing_start_pos: Dict[str, List[float]] = {}
         # 跨线交点: track_id -> [x, y] (运动线段与计数线的真实交点, 供事件坐标)
         self.track_cross_points: Dict[str, List[float]] = {}
+        self.track_cross_wall_times: Dict[str, float] = {}
         # 双向计数去重: "track_id|direction" -> (计数时间戳, 跨线交点)
         self.counted_tracks: Dict[str, Tuple[float, Optional[List[float]]]] = {}
         # 真重复判定窗口: 同方向同点短时间内再次跨线视为同一物理事件的重复确认
@@ -128,6 +129,12 @@ class TrackStateManager:
         Returns:
             True 表示可以计数, False 表示应跳过
         """
+        return self.count_reject_reason(track_id, entry_exit, current_time,
+                                        reverse_crossing_cooldown, count_only, cross_point) is None
+
+    def count_reject_reason(self, track_id, entry_exit, current_time,
+                            reverse_crossing_cooldown, count_only=None, cross_point=None):
+        """按实际判断顺序返回唯一拒绝原因；None 表示可计数。"""
         dedup_key = f"{track_id}|{entry_exit}"
 
         # 同事件去重: 时间窗 + 跨线点聚类
@@ -136,7 +143,7 @@ class TrackStateManager:
             prev_time, prev_point = prev
             if (current_time - prev_time <= self.dedup_window
                     and self._same_spot(cross_point, prev_point)):
-                return False
+                return "同轨迹重复"
 
         # 反向跨线冷却: 同一轨迹反向事件需间隔冷却时间
         opposite_dir = "exit" if entry_exit == "enter" else "enter"
@@ -144,13 +151,13 @@ class TrackStateManager:
         if opposite_key in self.counted_tracks:
             time_since_opposite = current_time - self.counted_tracks[opposite_key][0]
             if time_since_opposite < reverse_crossing_cooldown:
-                return False
+                return "反向冷却"
 
         # 单向计数模式: 只产出指定方向事件
         if count_only is not None and entry_exit != count_only:
-            return False
+            return "方向禁用"
 
-        return True
+        return None
 
     def _same_spot(
         self,
@@ -190,6 +197,44 @@ class TrackStateManager:
         self.track_states[track_id] = "TRACKING"
         self.track_crossing_start_pos.pop(track_id, None)
         self.track_cross_points.pop(track_id, None)
+        self.track_cross_wall_times.pop(track_id, None)
+
+    def forget_track(self, track_id: str):
+        self.reset_track(track_id)
+        self.track_states.pop(track_id, None)
+        self.track_crossing_history.pop(track_id, None)
+        for direction in ('enter', 'exit'):
+            self.counted_tracks.pop(f'{track_id}|{direction}', None)
+
+    def transfer_track(self, old_id: str, new_id: str):
+        """轨迹缝合时转移待确认状态和去重记录，避免换 ID 后重复计数。
+
+        注意: 不能无条件 forget_track(new_id) —— 新 ID 自身可能刚计过一次数
+        (ID 复用 / 连续缝合链: 2086->2105->2108, 2105 又被复用), 直接清掉会让
+        同一物理目标重新获得计数资格。现场实证: 永泰东门3口 track=2105 在 9.97s
+        内两次 VehicleExit, 交点仅差 8px(本应被 dedup_window 拦掉), 就是缝合时把
+        `2105|exit` 这条去重基线清没了导致的。这里改为按"保留更新的那条记录"合并。
+        """
+        # forget_track 会清 counted_tracks, 先备份新 ID 自己的去重记录
+        kept = {}
+        for direction in ('enter', 'exit'):
+            rec = self.counted_tracks.get(f'{new_id}|{direction}')
+            if rec is not None:
+                kept[direction] = rec
+        self.forget_track(new_id)
+        for mapping in (self.track_states, self.track_crossing_history,
+                        self.track_crossing_start_pos, self.track_cross_points,
+                        self.track_cross_wall_times):
+            if old_id in mapping:
+                mapping[new_id] = mapping.pop(old_id)
+        for direction in ('enter', 'exit'):
+            old_key, new_key = f'{old_id}|{direction}', f'{new_id}|{direction}'
+            old_rec = self.counted_tracks.pop(old_key, None)
+            new_rec = kept.get(direction)
+            if old_rec is not None and (new_rec is None or old_rec[0] >= new_rec[0]):
+                self.counted_tracks[new_key] = old_rec
+            elif new_rec is not None:
+                self.counted_tracks[new_key] = new_rec
 
     def cleanup(self, current_time: Optional[float] = None, ttl: float = 300):
         """清理长时间无跨线的轨迹状态; 按 TTL 淘汰已计数轨迹.
@@ -216,6 +261,7 @@ class TrackStateManager:
             self.track_states.pop(track_id, None)
             self.track_crossing_start_pos.pop(track_id, None)
             self.track_cross_points.pop(track_id, None)
+            self.track_cross_wall_times.pop(track_id, None)
 
         # 已计数轨迹按 TTL 淘汰: 7x24 流长期运行防止内存无限增长;
         # 流重连后跟踪器 ID 从头分配, 淘汰旧 ID 避免新轨迹被误判为已计数而漏计.
@@ -234,4 +280,5 @@ class TrackStateManager:
         self.track_states.clear()
         self.track_crossing_start_pos.clear()
         self.track_cross_points.clear()
+        self.track_cross_wall_times.clear()
         self.counted_tracks.clear()

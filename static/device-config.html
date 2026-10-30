@@ -40,16 +40,56 @@
   .error { color: #e74c3c; }
   .ok { color: #27ae60; }
   label { font-size: 13px; color: #aaa; }
+  /* 统一导航菜单 */
+  .nav { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 18px; }
+  .nav a {
+    display: inline-flex; align-items: center;
+    padding: 9px 18px; font-size: 14px; font-weight: 500;
+    color: #c8d6e5; text-decoration: none;
+    background: #2a2a4e; border: 1px solid #3a3a5e; border-radius: 8px;
+    transition: all .2s ease;
+  }
+  .nav a:hover { background: #34345c; border-color: #0d7377; color: #8be9fd; transform: translateY(-1px); }
+  .nav a.active {
+    background: linear-gradient(135deg, #0d7377, #14a085);
+    border-color: #14a085; color: #fff; font-weight: 600;
+    box-shadow: 0 2px 10px rgba(13,115,119,.45);
+  }
+  /* 全局工具栏: 左侧导航 + 右上角全局景区查询条件 */
+  .topbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 18px; }
+  .topbar .nav { margin-bottom: 0; }
+  .global-filter { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+  .global-filter label { font-size: 13px; color: #aaa; white-space: nowrap; }
+  .global-filter select {
+    min-width: 158px; padding: 8px 12px; font-size: 14px;
+    background: #2a2a4e; color: #e0e0e0; border: 1px solid #3a3a5e; border-radius: 8px;
+  }
+  .global-filter select:focus { outline: none; border-color: #14a085; }
+  .global-filter .cnt { font-size: 12px; color: #8fa8cf; }
 </style>
 </head>
 <body>
 
 <h1>设备计数配置工具</h1>
 
-<div class="nav" style="margin-bottom:12px;">
-  <a href="/static/device-config.html">设备计数配置</a>
-  <a href="/static/device-info.html">设备信息管理</a>
-  <a href="/static/business-rules.html">业务规则配置</a>
+<div class="topbar">
+  <div class="nav">
+    <a href="/static/device-config.html" class="active">设备计数配置</a>
+    <a href="/static/device-info.html">设备信息管理</a>
+    <a href="/static/business-rules.html">业务规则配置</a>
+    <a href="/static/intersection-config.html">路口数据卡配置</a>
+    <a href="/static/hardware-monitor.html">硬件监控</a>
+  </div>
+  <div class="global-filter">
+    <label for="globalScenic">景区</label>
+    <select id="globalScenic" title="全局查询条件: 按景区筛选设备列表" onchange="onGlobalScenicChange(this.value)">
+      <option value="">全部景区</option>
+      <option value="大同古城">大同古城</option>
+      <option value="云冈石窟">云冈石窟</option>
+      <option value="悬空寺">悬空寺</option>
+    </select>
+    <span id="globalScenicCount" class="cnt"></span>
+  </div>
 </div>
 
 <div class="row">
@@ -80,6 +120,7 @@
   <input id="maxPersons" type="number" min="1" step="1" value="" style="width:70px" title="ROI 内人数≥此值 且 人流速度过低时判定人流拥挤; 同时配置车辆和人流则加权综合">
   <button id="enableBtn" disabled onclick="doEnable()">启流计数</button>
   <button id="previewBtn" disabled onclick="togglePreview()">▶ 预览</button>
+  <button id="overlayBtn" onclick="toggleOverlay()" style="background:#5a4a2e;">叠加标注</button>
   <button id="clearBtn" disabled onclick="clearCanvas()">清除画线</button>
   <span style="width:1px;height:28px;background:#444;display:inline-block;margin:0 8px;"></span>
   <button id="roiModeBtn" onclick="toggleRoiMode()" style="background:#5a4a2e;">ROI 模式</button>
@@ -96,11 +137,12 @@
 
 <div class="hint">
   <b>计数线：</b>① 选择设备 -> 自动截帧 ② 在画面上点击两个点画计数线 ③ 再点一个点作为锚点（锚点所在侧=内侧=Enter方向）<br>
-  <b>ROI 区域：</b>点击「ROI 模式」切换到多边形绘制，点击画面添加顶点（至少3个），右键/双击完成多边形，仅 ROI 内轨迹参与计数<br>
+  <b>ROI 区域：</b>点击「ROI 模式」绘制多边形，至少3个顶点；绿线是有效计数段，灰色虚线在 ROI 外不计数<br>
   画完后点「启流计数」提交配置并启动 AI 推理管道。
 </div>
 
 <script src="config.js"></script>
+<script src="global-scenic.js"></script>
 <script>
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
@@ -117,6 +159,65 @@ let isRoiMode = false;
 // 后端地址默认取 static/config.js 配置; 未配置则同源(页面由后端 /static 提供)
 baseUrl = ((window.OPS_CONFIG && window.OPS_CONFIG.API_BASE) || window.location.origin).replace(/\/$/, '');
 document.getElementById('baseUrl').value = baseUrl;
+
+/* ---------- 全局景区 (右上角统一查询条件) ----------
+ * 设备本身不存景区。解析链：① 与 device_info 档案同名 → 档案 region；
+ * ② 设备名包含路口名 → 该路口的 scenic（如 永泰东门1口 ⊃ 永泰东门）；
+ * ③ 与档案名互相包含 → 档案 region；④ 都匹配不上 → 不归属任何景区（仅「全部景区」可见）。 */
+window.globalScenicApiBase = () => baseUrl;
+window.applyGlobalScenic = function () { scenicRegionMap = null; scenicInterList = null; loadDevices(true); };
+
+let scenicRegionMap = null;   // 设备名(规范化) -> 景区 (device_info.region)
+let scenicInterList = null;   // [{norm, scenic}] 路口名(规范化)按长度倒序, 用于包含匹配
+
+function normDevName(s) {
+  return String(s || '').replace(/\s+/g, '').toLowerCase();
+}
+
+async function loadScenicRegionMap(force) {
+  if (scenicRegionMap && !force) return scenicRegionMap;
+  try {
+    const [infoRes, interRes] = await Promise.all([
+      api('/api/device-info'),
+      api('/api/intersections').catch(() => ({ json: [] }))
+    ]);
+    const rows = Array.isArray(infoRes.json) ? infoRes.json : [];
+    const map = {};
+    rows.forEach(r => {
+      const k = normDevName(r.name);
+      if (k) map[k] = String(r.region || '').trim() || '大同古城';
+    });
+    scenicRegionMap = map;
+    const inters = Array.isArray(interRes.json) ? interRes.json : [];
+    scenicInterList = inters
+      .filter(i => i && i.name)
+      .map(i => ({ norm: normDevName(i.name), scenic: String(i.scenic || '').trim() || '大同古城' }))
+      .filter(it => it.norm)
+      .sort((a, b) => b.norm.length - a.norm.length);
+  } catch (e) {
+    console.warn('[device-config] 读取设备景区失败, 暂不按景区筛选:', e && e.message);
+    scenicRegionMap = {};
+    scenicInterList = [];
+  }
+  return scenicRegionMap;
+}
+
+function scenicOfDevice(nameOrId) {
+  const n = normDevName(nameOrId);
+  if (!n) return '';
+  if (scenicRegionMap[n]) return scenicRegionMap[n];               // ① 档案同名
+  for (const it of (scenicInterList || [])) {                      // ② 包含路口名 → 路口景区
+    if (n.indexOf(it.norm) !== -1) return it.scenic;
+  }
+  for (const k of Object.keys(scenicRegionMap)) {                  // ③ 与档案名互相包含
+    if (k.indexOf(n) !== -1 || n.indexOf(k) !== -1) return scenicRegionMap[k];
+  }
+  return '';
+}
+
+function currentScenic() {
+  return (typeof window.getGlobalScenic === 'function' && window.getGlobalScenic()) || '';
+}
 
 function api(path, options = {}) {
   return fetch(baseUrl + path, options).then(async r => {
@@ -150,30 +251,64 @@ async function doSync() {
   }
 }
 
+/* 并发保护: 页面加载时 loadDevices 会被触发两次(底部初始化 + global-scenic 选项加载后
+ * 的 applyGlobalScenic)，两次 fetch + clear→await(景区映射)→append 交错会把列表渲染两遍
+ * (设备按钮翻倍)。用代数号让「过期」调用直接丢弃，只有最新一次允许触碰 DOM。 */
+let _loadGen = 0;
 async function loadDevices(silent = false) {
+  const gen = ++_loadGen;
   baseUrl = document.getElementById('baseUrl').value;
   if (!silent) setStatus('加载设备列表...');
   try {
     const res = await api('/api/devices');
+    if (gen !== _loadGen) return;   // 已有更新的加载，本次结果作废（勿清空/追加）
     const devices = res.json;
     const list = document.getElementById('deviceList');
     list.innerHTML = '';
-    if (!devices.length) { if (!silent) setStatus('暂无设备'); return; }
-    devices.forEach(d => {
+    /* 全局景区条件: 三级名称匹配解析设备归属景区 (见 scenicOfDevice 注释) */
+    const scenic = currentScenic();
+    let visible = devices;
+    if (scenic) {
+      await loadScenicRegionMap();
+      if (gen !== _loadGen) return; // await 之后列表可能已被新一轮接管，再次校验
+      visible = devices.filter(d => (scenicOfDevice(d.name || '') || scenicOfDevice(d.id || '')) === scenic);
+    }
+    if (!visible.length) {
+      if (!silent) {
+        setStatus(scenic
+          ? `景区「${scenic}」下暂无设备（共 ${devices.length} 台，可在右上角切换为「全部景区」）`
+          : '暂无设备');
+      }
+      return;
+    }
+    visible.forEach(d => {
       const btn = document.createElement('button');
       btn.className = 'dev-btn ' + (d.status || '');
-      btn.textContent = `${d.id} [${d.status || '?'}]`;
+      // 名称即身份: 新设备 id=name 直接可读; 旧 GB 编号设备回退显示 name 字段
+      const syncWarnings = {channel_unknown: '通道状态未知', ai_list_unknown: 'AI 状态未知',
+                            registration_unconfirmed: '点位关系待核对'};
+      const syncWarning = syncWarnings[d.wvp_sync_status] || '';
+      btn.textContent = `${d.name || d.id} [${d.status || '?'}]${syncWarning ? ' ⚠' + syncWarning : ''}`;
+      btn.title = `${d.name || ''}\n${d.id}\nAI: ${d.ai_status || '未知'}\n同步: ${syncWarning || d.wvp_sync_status || '未知'}`;
+      // 保持当前选中设备的高亮 (启流后 loadDevices 刷新列表时不丢选中态)
+      if (currentDevice && d.id === currentDevice.id) btn.classList.add('active');
       // 任何状态均可选中: 画线/ROI 配置正是未启流(offline/synced)设备要做的事,
       // 预览/启流失败时状态栏会给出具体原因, 不在此处拦截
       btn.onclick = () => selectDevice(d);
       list.appendChild(btn);
     });
-    if (!silent) setStatus(`共 ${devices.length} 台设备，点击设备进行配置`);
+    if (!silent) {
+      setStatus(scenic
+        ? `景区「${scenic}」共 ${visible.length} / ${devices.length} 台设备，点击设备进行配置`
+        : `共 ${devices.length} 台设备，点击设备进行配置`);
+    }
   } catch (e) { if (!silent) setStatus('加载失败: ' + e.message, 'error'); }
 }
 
 async function selectDevice(d) {
   currentDevice = d;
+  latestTracks = null;
+  crossingFlash = null;
   document.querySelectorAll('.dev-btn').forEach(b => b.classList.remove('active'));
   event.target.classList.add('active');
   clicks = [];
@@ -204,8 +339,7 @@ async function selectDevice(d) {
     const url = URL.createObjectURL(blob);
     img = new Image();
     img.onload = () => {
-      canvas.width = img.naturalWidth;
-      canvas.height = img.naturalHeight;
+      resizeCanvas(img.naturalWidth, img.naturalHeight);
       // 显示设备已有 ROI
       if (d.roi_coords) {
         const parts = d.roi_coords.split(',').map(Number);
@@ -216,9 +350,28 @@ async function selectDevice(d) {
           document.getElementById('clearRoiBtn').disabled = false;
         }
       }
+      // 回显设备已有计数线 + 锚点 (重新选中已启流设备时, 避免绘制"丢失")
+      if (d.line_coords) {
+        const lp = d.line_coords.split(',').map(Number);
+        if (lp.length === 4 && lp.every(n => !isNaN(n))) {
+          clicks.push({ x: lp[0] * canvas.width, y: lp[1] * canvas.height });
+          clicks.push({ x: lp[2] * canvas.width, y: lp[3] * canvas.height });
+          if (d.anchor_coords) {
+            const ap = d.anchor_coords.split(',').map(Number);
+            if (ap.length === 2 && ap.every(n => !isNaN(n))) {
+              clicks.push({ x: ap[0] * canvas.width, y: ap[1] * canvas.height });
+            }
+          }
+          if (clicks.length >= 3) {
+            document.getElementById('enableBtn').disabled = false;
+            coordsEl.textContent = `计数线: ${d.line_coords}  锚点: ${d.anchor_coords}`;
+          }
+        }
+      }
       redraw();
       const roiInfo = roiClicks.length ? ` ROI: ${roiClicks.length}顶点` : '';
-      setStatus(`截帧成功 ${img.naturalWidth}x${img.naturalHeight}，请点击画面画线${roiInfo}`, 'success');
+      const lineInfo = clicks.length >= 3 ? ' 计数线+锚点已回显' : '';
+      setStatus(`截帧成功 ${img.naturalWidth}x${img.naturalHeight}，请点击画面画线${roiInfo}${lineInfo}`, 'success');
       document.getElementById('clearBtn').disabled = false;
       document.getElementById('previewBtn').disabled = false;
     };
@@ -227,7 +380,7 @@ async function selectDevice(d) {
 }
 
 canvas.addEventListener('click', (e) => {
-  if (!img) return;
+  if (!img && !previewOn) return; // 预览中允许画线 (实时画面为底)
   const rect = canvas.getBoundingClientRect();
   const scaleX = canvas.width / rect.width;
   const scaleY = canvas.height / rect.height;
@@ -289,9 +442,19 @@ function finishRoi() {
   document.getElementById('enableBtn').disabled = clicks.length < 3;
 }
 
+// 画布尺寸变化时等比换算已画点位, 保持归一化坐标不变 (截帧图与实时视频分辨率可能不同)
+function resizeCanvas(w, h) {
+  if (!w || !h || (canvas.width === w && canvas.height === h)) return;
+  const sx = w / canvas.width, sy = h / canvas.height;
+  clicks.forEach(c => { c.x *= sx; c.y *= sy; });
+  roiClicks.forEach(c => { c.x *= sx; c.y *= sy; });
+  canvas.width = w;
+  canvas.height = h;
+}
+
 function redraw() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  if (img) ctx.drawImage(img, 0, 0); // 非预览时画截帧底图; 预览时 video 在底层播放
+  if (img && !previewOn) ctx.drawImage(img, 0, 0); // 非预览时画截帧底图; 预览时 canvas 透明, video 在底层播放
 
   // 绘制 ROI 多边形
   if (roiClicks.length >= 3) {
@@ -349,12 +512,29 @@ function redraw() {
     });
     // 画线
     if (clicks.length >= 2) {
+      if (roiClicks.length >= 3) {
+        ctx.beginPath();
+        ctx.moveTo(clicks[0].x, clicks[0].y);
+        ctx.lineTo(clicks[1].x, clicks[1].y);
+        ctx.strokeStyle = '#aaa';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([5, 5]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.save();
+        ctx.beginPath();
+        ctx.moveTo(roiClicks[0].x, roiClicks[0].y);
+        for (let i = 1; i < roiClicks.length; i++) ctx.lineTo(roiClicks[i].x, roiClicks[i].y);
+        ctx.closePath();
+        ctx.clip();
+      }
       ctx.beginPath();
       ctx.moveTo(clicks[0].x, clicks[0].y);
       ctx.lineTo(clicks[1].x, clicks[1].y);
       ctx.strokeStyle = '#00ff00';
       ctx.lineWidth = 3;
       ctx.stroke();
+      if (roiClicks.length >= 3) ctx.restore();
     }
     // 锚点连线（虚线）
     if (clicks.length >= 3) {
@@ -452,16 +632,14 @@ async function togglePreview() {
     }
     await videoEl.play();
     previewOn = true;
-    img = null; // 预览时 video 作底层, canvas 只叠加画线
-    canvas.classList.add('overVideo');
+    canvas.classList.add('overVideo'); // canvas 透明叠加在 video 上, 可继续画线
     videoEl.style.display = 'block';
-    videoEl.addEventListener('loadedmetadata', () => {
-      canvas.width = videoEl.videoWidth;
-      canvas.height = videoEl.videoHeight;
-      redraw();
-    }, { once: true });
+    const fitVideo = () => { resizeCanvas(videoEl.videoWidth, videoEl.videoHeight); redraw(); };
+    videoEl.addEventListener('loadedmetadata', fitVideo, { once: true });
+    if (videoEl.videoWidth) fitVideo(); // metadata 可能已就绪 (如 Safari 原生 HLS)
     document.getElementById('previewBtn').textContent = '■ 停止预览';
     setStatus(`预览播放中 (${protocol.toUpperCase()}): ${play_url}`, 'success');
+    if (overlayOn) ensureOverlayLoop();
   } catch (e) { setStatus('预览失败: ' + e.message, 'error'); }
 }
 
@@ -473,8 +651,111 @@ function stopPreview() {
   if (previewPlayer) { try { previewPlayer.destroy(); } catch (e) {} previewPlayer = null; }
   previewOn = false;
   canvas.classList.remove('overVideo');
+  if (img) resizeCanvas(img.naturalWidth, img.naturalHeight); // 恢复截帧坐标系
+  redraw();
   document.getElementById('previewBtn').textContent = '▶ 预览';
   setStatus('已停止预览');
+}
+
+// ---- 计数过程叠加: AI 管线 tracks WS -> canvas 画检测框/轨迹线 (预览中查看) ----
+let overlayOn = false;
+let overlayRaf = null;
+let aiWs = null;
+let latestTracks = null;   // 当前设备最近一帧 tracks 消息
+let crossingFlash = null;  // {at, x, y} 越线事件闪烁
+
+function aiWsBase() {
+  if (window.OPS_CONFIG && window.OPS_CONFIG.AI_WS) return window.OPS_CONFIG.AI_WS;
+  let host = location.hostname;
+  try { host = new URL(baseUrl).hostname; } catch (e) {}
+  return `ws://${host}:8001`; // AI 分析服务 (settings.ai_port, docker 已映射 8001)
+}
+
+function connectAiWs() {
+  if (aiWs && aiWs.readyState <= 1) return; // CONNECTING/OPEN 复用
+  try { aiWs = new WebSocket(aiWsBase() + '/ws'); } catch (e) { return; }
+  aiWs.onmessage = (e) => {
+    let m; try { m = JSON.parse(e.data); } catch { return; }
+    if (!currentDevice || m.device_id !== currentDevice.id) return;
+    if (m.type === 'tracks') latestTracks = m;
+    if (m.type === 'crossing_event' && Array.isArray(m.cross_point)) {
+      crossingFlash = { at: performance.now(), x: m.cross_point[0], y: m.cross_point[1] };
+    }
+  };
+  aiWs.onclose = () => { aiWs = null; };
+}
+
+function toggleOverlay() {
+  overlayOn = !overlayOn;
+  const btn = document.getElementById('overlayBtn');
+  btn.textContent = overlayOn ? '关闭叠加' : '叠加标注';
+  btn.style.background = overlayOn ? '#0d7377' : '#5a4a2e';
+  if (overlayOn) {
+    connectAiWs();
+    ensureOverlayLoop();
+    setStatus(previewOn ? '叠加标注: AI 检测框/轨迹实时画在预览画面上' : '叠加标注已开启, 点「预览」后生效', 'ok');
+  } else {
+    latestTracks = null;
+    redraw();
+    setStatus('已关闭叠加标注');
+  }
+}
+
+function ensureOverlayLoop() {
+  if (overlayRaf) return;
+  const loop = () => {
+    if (!overlayOn) { overlayRaf = null; return; }
+    if (previewOn) { redraw(); drawAnnotations(); }
+    overlayRaf = requestAnimationFrame(loop);
+  };
+  overlayRaf = requestAnimationFrame(loop);
+}
+
+function drawAnnotations() {
+  const m = latestTracks;
+  if (m) {
+    ctx.lineWidth = 2;
+    ctx.lineCap = 'round';
+    ctx.font = '12px monospace';
+    for (const t of (m.tracks || [])) {
+      const color = t.class_name === 'person' ? '#00ff88' : '#ffaa00';
+      const [x1, y1, x2, y2] = t.bbox;
+      // 检测框
+      ctx.strokeStyle = color;
+      ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+      // 轨迹线 (历史中心点连线)
+      const hist = t.history || [];
+      if (hist.length > 1) {
+        ctx.globalAlpha = 0.85;
+        ctx.beginPath();
+        ctx.moveTo(hist[0][0], hist[0][1]);
+        for (let i = 1; i < hist.length; i++) ctx.lineTo(hist[i][0], hist[i][1]);
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+      // 轨迹 ID 标签 (深色底提高可读性)
+      const ly = Math.max(14, y1 - 6);
+      const label = String(t.track_id);
+      const lw = ctx.measureText(label).width + 8;
+      ctx.fillStyle = 'rgba(0,0,0,0.55)';
+      ctx.fillRect(x1, ly - 12, lw, 15);
+      ctx.fillStyle = color;
+      ctx.fillText(label, x1 + 4, ly);
+    }
+  }
+  // 越线事件: cross_point 扩散圆环闪烁 600ms
+  if (crossingFlash) {
+    const age = (performance.now() - crossingFlash.at) / 600;
+    if (age < 1) {
+      ctx.strokeStyle = '#ff3355';
+      ctx.lineWidth = 3;
+      ctx.globalAlpha = 1 - age;
+      ctx.beginPath();
+      ctx.arc(crossingFlash.x, crossingFlash.y, 8 + age * 26, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    } else crossingFlash = null;
+  }
 }
 
 async function doEnable() {
@@ -492,6 +773,7 @@ async function doEnable() {
   if (countOnly) body.count_only = countOnly;
   if (roiClicks.length >= 3) {
     body.roi_coords = roiClicks.map(c => `${(c.x/canvas.width).toFixed(4)},${(c.y/canvas.height).toFixed(4)}`).join(',');
+    body.allow_multi_roi = true;
   }
   // 最大车辆数 (车辆拥挤判断阈值): 填写正整数时提交, 留空则不开启
   if (maxVehiclesRaw !== '' && maxVehiclesRaw !== null) {

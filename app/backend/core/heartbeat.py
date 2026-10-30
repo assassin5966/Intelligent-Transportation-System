@@ -55,7 +55,7 @@ async def _check_devices() -> None:
 
         if offline_seconds > _OFFLINE_THRESHOLD and status != "offline":
             # 标记离线
-            await redis.hset(_DEVICE_KEY_PREFIX + device_id, "status", "offline")
+            await redis.hset(_DEVICE_KEY_PREFIX + device_id, mapping={"status": "offline", "ai_status": "heartbeat_timeout"})
             await _trigger_offline_alert(device_id, offline_seconds)
             logger.warning(f"[离线] 设备 {device_id} 已离线 ({offline_seconds:.0f}s 无心跳)")
 

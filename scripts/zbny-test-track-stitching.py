@@ -40,6 +40,7 @@ def inject_old_track(tracker: ByteTracker, tid=1, cls="car",
         [100.0, 500.0], [130.0, 500.0], [160.0, 500.0], [160.0, 500.0], [160.0, 500.0]
     ]
     tracker.track_history[tid] = [tuple(p) for p in hist]
+    tracker._state.track_times[tid] = [i * .04 for i in range(len(hist))]
     tracker.track_class[tid] = cls
     tracker._state._miss_count[tid] = miss
     return tid
@@ -47,7 +48,14 @@ def inject_old_track(tracker: ByteTracker, tid=1, cls="car",
 
 def stitch(tracker, new_tid, cls="car", bbox=None):
     bbox = bbox or [900.0, 450.0, 980.0, 520.0]  # 对角线 ~106, 中心 (940, 485)
-    return tracker._state._stitch_history(new_tid, cls, bbox)
+    # 直接注入的轨迹以每帧 0.04 秒表示，miss 帧后下一帧发生观测。
+    candidates = tracker._state.track_times
+    if not candidates:
+        return []
+    old_tid = next(iter(candidates))
+    now = candidates[old_tid][-1] + (tracker._state._miss_count.get(old_tid, 0) + 1) * .04
+    history, _, _ = tracker._state._stitch_history(new_tid, cls, bbox, now, {new_tid})
+    return history
 
 
 def case(name, cond):

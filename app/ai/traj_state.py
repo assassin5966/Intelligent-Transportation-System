@@ -48,7 +48,8 @@ class RawTrack:
 
 
 class Track:
-    def __init__(self, track_id, class_name, bbox, center, confidence, age, velocity, history):
+    def __init__(self, track_id, class_name, bbox, center, confidence, age, velocity, history,
+                 history_times=None, new_after_gap=False):
         self.track_id = str(track_id)
         self.class_name = class_name
         self.bbox = bbox
@@ -57,12 +58,16 @@ class Track:
         self.age = age
         self.velocity = velocity
         self.history = history
+        self.history_times = history_times
+        self.new_after_gap = new_after_gap
 
 
 class TrackResult:
-    def __init__(self, frame_id, tracks):
+    def __init__(self, frame_id, tracks, expired_track_ids=None, stitched_ids=None):
         self.frame_id = frame_id
         self.tracks = tracks
+        self.expired_track_ids = expired_track_ids or []
+        self.stitched_ids = stitched_ids or []
 
 
 class TrajectoryState:
@@ -73,6 +78,8 @@ class TrajectoryState:
 
     def __init__(self, camera_type: Optional[str] = None, max_history_length: Optional[int] = None):
         self.track_history = OrderedDict()
+        self.track_times = {}
+        self._clock = None
         self.max_history_length = (
             max_history_length if max_history_length is not None else settings.track_buffer
         )
@@ -83,14 +90,16 @@ class TrajectoryState:
         # 落在清空缝隙里 → 漏计), 还可能被误接到别的旧轨迹上.
         # 超出该窗口后 ID 已更换 (ultralytics 会话内 ID 单调递增不复用), 旧历史由本表
         # 清空, 不会把新目标误接到旧轨迹上.
-        self._miss_grace = 60
+        # 时间量纲 (秒): 60 帧 @25fps = 2.4s. 若按帧数, 低帧率 (8s/帧) 下窗口会变成
+        # 几百秒, 把完全不同的目标接成一条轨迹; 高帧率下又过短.
+        self._miss_grace_s = 2.4
         self._miss_count: dict = {}
         self.frame_id = 0
         # ---- 轨迹缝合 (高速目标补计) ----
         # 高速车运动模糊导致漏检数帧: 旧轨迹在 miss 宽限期内保留 (本表), 以新 ID
         # 重现时若位置可外推衔接则缝合历史. 判据从严 (宁漏不误):
-        #   类别一致 + 消失 <= gap 帧 + 匀速外推落点在新 bbox 邻域 + 速度量级合理
-        self._stitch_gap_frames = 12   # 允许接续的最大消失帧数
+        #   类别一致 + 消失 <= gap 秒 + 匀速外推落点在新 bbox 邻域 + 速度量级合理
+        self._stitch_gap_s = 0.48      # 12 帧 @25fps; 按时间换算, 与帧率解耦
         self._stitch_max_jump = 2.0    # 外推点距新 bbox 中心 <= 对角线 × 系数
         self._stitch_cos = 0.5         # 缝隙位移方向与旧轨迹末速方向余弦下限
         self._stitched_from: set = set()  # 已被缝合的旧 ID (观测/断言用)
@@ -104,13 +113,13 @@ class TrajectoryState:
 
     # ---- 轨迹缝合 ----
 
-    def _stitch_history(self, track_id, class_name: str, bbox) -> list:
+    def _stitch_history(self, track_id, class_name: str, bbox, current_time: float, active_ids: set) -> tuple:
         """新轨迹尝试接续一条消失中的同类别旧轨迹, 返回拼接后历史 (可为空).
 
         衔接判据 (宁漏不误):
-          1. 旧轨迹"消失中"(本帧无检测) 且消失 <= _stitch_gap_frames 帧;
+          1. 旧轨迹"消失中"(本帧无检测) 且距上次观测不超过缝合秒数;
           2. 类别一致;
-          3. 旧轨迹末端以最后速度匀速外推 (消失帧数 + 1) 帧后的位置,
+          3. 旧轨迹末端以最近实际时间速度外推到当前观测时刻,
              落在新检测 bbox 中心 <= bbox 对角线 × _stitch_max_jump 邻域内;
           4. 旧轨迹末位 -> 新位置的缝隙位移方向与旧轨迹末速方向一致
              (余弦 >= _stitch_cos), 排除反向/横向误接.
@@ -121,20 +130,20 @@ class TrajectoryState:
             if tid == track_id or len(hist) < 3:
                 continue
             # 只接续"消失中"的轨迹 (上一帧无检测): 在场轨迹的 ID 是真实分配的
-            if tid in self._current_track_ids:
+            if tid in self._current_track_ids or tid in active_ids:
                 continue
-            miss = self._miss_count.get(tid, 0)
-            if miss == 0 or miss > self._stitch_gap_frames:
+            times = self.track_times.get(tid, [])
+            if not times or not 0 < current_time - times[-1] <= self._stitch_gap_s:
                 continue
             # 类别一致 (车不接人的轨迹)
             if self.track_class.get(tid) != class_name:
                 continue
-            v = self._calculate_velocity(hist)
+            v = self._calculate_velocity_per_second(hist, times)
             speed = math.hypot(v[0], v[1])
             if speed < 1e-6:
                 continue
             # 匀速外推: 旧轨迹最后位置 + 末速度 × (消失帧数 + 1)
-            n = miss + 1
+            n = current_time - times[-1]
             ex = hist[-1][0] + v[0] * n
             ey = hist[-1][1] + v[1] * n
             x1, y1, x2, y2 = bbox
@@ -153,13 +162,15 @@ class TrajectoryState:
             cos_sim = (gx * v[0] + gy * v[1]) / (gl * speed)
             if cos_sim < self._stitch_cos:
                 continue
-            candidates.append((gap, tid, hist))
+            candidates.append((gap, tid, hist, times))
         if not candidates:
-            return []
+            return [], [], None
         # 取外推衔接误差最小的候选
-        _, best_tid, old_hist = min(candidates, key=lambda c: c[0])
+        _, best_tid, old_hist, old_times = min(candidates, key=lambda c: c[0])
         old_hist = list(old_hist)
+        old_times = list(old_times)
         del self.track_history[best_tid]
+        self.track_times.pop(best_tid, None)
         self.track_class.pop(best_tid, None)  # 旧轨迹已不存在, 类别记录一并清理
         self._mark_stitched(best_tid)
         self._miss_count.pop(best_tid, None)
@@ -167,7 +178,7 @@ class TrajectoryState:
             f"轨迹缝合: 旧轨迹 {best_tid} 接续到新轨迹 {track_id} "
             f"(继承 {len(old_hist)} 点历史, 类别 {class_name})"
         )
-        return old_hist
+        return old_hist, old_times, best_tid
 
     # ---- 主流程 ----
 
@@ -182,16 +193,37 @@ class TrajectoryState:
         while len(self._stitched_from_order) > _STITCHED_FROM_MAX:
             self._stitched_from.discard(self._stitched_from_order.popleft())
 
-    def apply(self, raw_tracks: list, max_history_length: Optional[int] = None) -> TrackResult:
+    def apply(
+        self,
+        raw_tracks: list,
+        max_history_length: Optional[int] = None,
+        dt: Optional[float] = None,
+        current_time: Optional[float] = None,
+    ) -> TrackResult:
         """把单路原始检测结果转成带历史/速度的 TrackResult (含轨迹缝合).
 
         max_history_length: 跟踪历史最大长度 (热重载 track_buffer 时由调用方传入).
+        current_time: 单调接收时间；传入时必须严格递增。
+        dt: 兼容离线调用的帧间隔；没有 current_time 时按 dt 累加，缺省 25fps。
+        缺失宽限期与缝合窗口依据每条轨迹的最后观测时间计算。
         """
         if max_history_length is not None:
             self.max_history_length = max_history_length
+        if current_time is None:
+            step_dt = dt if dt is not None else 1.0 / 25.0
+            if not math.isfinite(step_dt) or step_dt <= 0:
+                raise ValueError('dt must be positive and finite')
+            current_time = (self._clock or 0.0) + step_dt
+        if not math.isfinite(current_time) or (self._clock is not None and current_time <= self._clock):
+            raise ValueError('trajectory timestamps must be finite and strictly increasing')
+        self._clock = current_time
         self.frame_id += 1
 
         tracks = []
+        expired_track_ids = []
+        stitched_ids = []
+        active_ids = {raw.track_id for raw in raw_tracks
+                      if not self._allowed_classes or raw.class_name in self._allowed_classes}
         current_track_ids = set()
 
         for raw in raw_tracks:
@@ -205,16 +237,29 @@ class TrajectoryState:
             x1, y1, x2, y2 = bbox
             center = [(x1 + x2) / 2, (y1 + y2) / 2]
 
+            new_after_gap = False
+            old_times = self.track_times.get(track_id, [])
+            if old_times and current_time - old_times[-1] > self._miss_grace_s:
+                self.track_history.pop(track_id, None)
+                self.track_times.pop(track_id, None)
+                self.track_class.pop(track_id, None)
+                self._miss_count.pop(track_id, None)
+                new_after_gap = True
+                expired_track_ids.append(str(track_id))
             if track_id not in self.track_history:
                 # 轨迹缝合: 尝试接续一条消失中的同类别旧轨迹 (高速车漏检补计)
-                self.track_history[track_id] = self._stitch_history(
-                    track_id, class_name, bbox
-                )
+                history, times, old_tid = self._stitch_history(track_id, class_name, bbox, current_time, active_ids)
+                self.track_history[track_id] = history
+                self.track_times[track_id] = times
+                if old_tid is not None:
+                    stitched_ids.append((str(old_tid), str(track_id)))
             self.track_class[track_id] = class_name
 
             self.track_history[track_id].append(center)
+            self.track_times[track_id].append(current_time)
             if len(self.track_history[track_id]) > self.max_history_length:
                 self.track_history[track_id].pop(0)
+                self.track_times[track_id].pop(0)
 
             history = self.track_history[track_id]
             velocity = self._calculate_velocity(history)
@@ -228,13 +273,16 @@ class TrajectoryState:
                 age=len(history),
                 velocity=velocity,
                 history=history,
+                history_times=list(self.track_times[track_id]),
+                new_after_gap=new_after_gap,
             ))
             current_track_ids.add(track_id)
 
-        self._cleanup_history(current_track_ids)
+        expired_track_ids.extend(self._cleanup_history(current_track_ids, current_time))
         self._current_track_ids = current_track_ids
 
-        return TrackResult(frame_id=self.frame_id, tracks=tracks)
+        return TrackResult(frame_id=self.frame_id, tracks=tracks, expired_track_ids=expired_track_ids,
+                           stitched_ids=stitched_ids)
 
     def _calculate_velocity(self, history):
         if len(history) < 2:
@@ -253,19 +301,32 @@ class TrajectoryState:
 
         return [avg_vx, avg_vy]
 
-    def _cleanup_history(self, current_track_ids):
+    def _calculate_velocity_per_second(self, history, times):
+        if len(history) < 2 or len(times) != len(history):
+            return [0.0, 0.0]
+        start = max(0, len(history) - 3)
+        elapsed = times[-1] - times[start]
+        if elapsed <= 0:
+            return [0.0, 0.0]
+        return [(history[-1][0] - history[start][0]) / elapsed,
+                (history[-1][1] - history[start][1]) / elapsed]
+
+    def _cleanup_history(self, current_track_ids, current_time: float):
         to_remove = []
         for tid in self.track_history:
             if tid in current_track_ids:
                 self._miss_count[tid] = 0
                 continue
             self._miss_count[tid] = self._miss_count.get(tid, 0) + 1
-            if self._miss_count[tid] > self._miss_grace:
+            times = self.track_times.get(tid, [])
+            if not times or current_time - times[-1] > self._miss_grace_s:
                 to_remove.append(tid)
         for tid in to_remove:
             del self.track_history[tid]
+            self.track_times.pop(tid, None)
             self._miss_count.pop(tid, None)
             self.track_class.pop(tid, None)
+        return [str(tid) for tid in to_remove]
 
     def get_track_history(self, track_id):
         return self.track_history.get(track_id, [])

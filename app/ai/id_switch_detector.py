@@ -78,18 +78,25 @@ class IDSwitchDetector:
             return False
 
         h = track.history
+        times = getattr(track, 'history_times', None)
+        # 配置阈值保留历史的每 25fps 帧位移口径；变帧率时先换算，避免
+        # 遮挡后的较长间隔被误判为速度突增。
+        def step_distance(i):
+            distance = math.hypot(h[i][0] - h[i - 1][0], h[i][1] - h[i - 1][1])
+            if times and len(times) == len(h):
+                elapsed = times[i] - times[i - 1]
+                if elapsed > 0:
+                    return distance / (elapsed * 25.0)
+            return distance
         hist_speeds = [
-            math.hypot(h[i][0] - h[i - 1][0], h[i][1] - h[i - 1][1])
+            step_distance(i)
             for i in range(1, len(h) - 1)
         ]
         if not hist_speeds:
             return False
 
         avg_speed = sum(hist_speeds) / len(hist_speeds)
-        curr_speed = math.hypot(
-            h[-1][0] - h[-2][0],
-            h[-1][1] - h[-2][1],
-        )
+        curr_speed = step_distance(len(h) - 1)
 
         # 速度突变: 超过历史平均 N 倍且差距足够 (阈值随 bbox 尺度自适应)
         min_pixel = self._adaptive_min_pixel(track)

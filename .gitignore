@@ -12,7 +12,6 @@ dist/
 build/
 .trae/*
 !.trae/documents/
-models/
 
 # ---- 测试 / 类型 / 缓存 ----
 .pytest_cache/
@@ -22,10 +21,12 @@ models/
 htmlcov/
 coverage.xml
 
-# ---- 环境与密钥 ----
-.env
-.env.*
-!.env.example
+# ---- 环境与密钥 (含明文密码, 不入库) ----
+/.env
+/.env.local
+/.env.gpu
+/.env.mock
+/.env.example
 *.key
 
 # ---- IDE ----
@@ -34,13 +35,14 @@ coverage.xml
 *.swp
 
 # ---- 运行时数据卷 (容器挂载, 不入库) ----
-data/
 logs/
 redis-data/
 *.log
 output/
 
-# ---- 模型权重 (体积大, 按需单独管理) ----
+# ---- 模型权重 / 数据集 (体积大, 按需单独管理) ----
+models/
+data/
 *.pt
 *.onnx
 *.engine
@@ -61,6 +63,7 @@ CLAUDE.md
 *.tar.gz
 # ---- 部署产物 (镜像包/挂载文件, 拷贝到内网用, 不入库) ----
 deploy/
+docker_rpms/
 
 # ---- 地图瓦片 (可重新下载, 不入库) ----
 tile-server/tiles/
@@ -97,7 +100,6 @@ VissVideos.rar
 *.pcapng
 
 # ---- 严格脱敏: 命中 IP/国标编码的文件一律不入库 (本地保留, 已 git rm --cached) ----
-/README.md
 /.env.example
 /mock_wvp.py
 /static/config.js
@@ -121,3 +123,9 @@ docs/GPU服务器离线排查方案.txt
 docs/GPU环境排查方案.txt
 .trae/documents/GPU服务器离线排查方案.md
 .trae/documents/GPU环境排查方案.md
+
+# ---- sim 本地调试产物 / 凭据 (不入库) ----
+sim/media/
+sim/token.txt
+sim/*.err
+sim/media/_filter_test.txt

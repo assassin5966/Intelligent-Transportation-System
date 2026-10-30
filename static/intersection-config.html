@@ -1,0 +1,1710 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>路口数据卡配置 - 运维工具</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: system-ui, sans-serif; background: #1a1a2e; color: #e0e0e0; padding: 20px; }
+  h1 { font-size: 18px; margin-bottom: 16px; color: #8be9fd; }
+  /* 统一导航菜单 */
+  .nav { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 18px; }
+  .nav a {
+    display: inline-flex; align-items: center;
+    padding: 9px 18px; font-size: 14px; font-weight: 500;
+    color: #c8d6e5; text-decoration: none;
+    background: #2a2a4e; border: 1px solid #3a3a5e; border-radius: 8px;
+    transition: all .2s ease;
+  }
+  .nav a:hover { background: #34345c; border-color: #0d7377; color: #8be9fd; transform: translateY(-1px); }
+  .nav a.active {
+    background: linear-gradient(135deg, #0d7377, #14a085);
+    border-color: #14a085; color: #fff; font-weight: 600;
+    box-shadow: 0 2px 10px rgba(13,115,119,.45);
+  }
+  /* 全局工具栏: 左侧导航 + 右上角全局景区查询条件 */
+  .topbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 18px; }
+  .topbar .nav { margin-bottom: 0; }
+  .global-filter { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+  .global-filter label { font-size: 13px; color: #aaa; white-space: nowrap; }
+  .global-filter select {
+    min-width: 158px; padding: 8px 12px; font-size: 14px;
+    background: #2a2a4e; color: #e0e0e0; border: 1px solid #3a3a5e; border-radius: 8px;
+  }
+  .global-filter select:focus { outline: none; border-color: #14a085; }
+  .global-filter .cnt { font-size: 12px; color: #8fa8cf; }
+  .row { display: flex; gap: 12px; margin-bottom: 14px; align-items: center; flex-wrap: wrap; }
+  input, select, button {
+    padding: 6px 12px; border: 1px solid #444; border-radius: 4px;
+    background: #2a2a4e; color: #e0e0e0; font-size: 14px;
+  }
+  input:disabled, select:disabled { opacity: .55; cursor: not-allowed; background: #232340; }
+  input:focus, select:focus { outline: none; border-color: #8be9fd; }
+  button { cursor: pointer; background: #0d7377; border: none; }
+  button:hover { background: #14a085; }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  button.danger { background: #c0392b; }
+  button.danger:hover { background: #e74c3c; }
+  button.ghost { background: transparent; border: 1px solid #444; }
+  button.ghost:hover { background: #2a2a4e; }
+  .panel { background: #232344; border: 1px solid #333; border-radius: 8px; padding: 16px; margin-bottom: 18px; }
+  .panel h2 { font-size: 14px; color: #8be9fd; margin-bottom: 12px; }
+  label { font-size: 13px; color: #aaa; }
+  .hint { font-size: 12px; color: #888; margin-top: 8px; line-height: 1.6; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { border: 1px solid #333; padding: 6px 10px; text-align: left; }
+  th { background: #2a2a4e; color: #8be9fd; white-space: nowrap; }
+  tr:hover td { background: #2a2a4e; }
+  .empty { text-align: center; color: #888; padding: 20px; }
+  .loading { text-align: center; color: #f1c40f; padding: 20px; animation: lpulse 1.1s ease-in-out infinite; }
+  /* 列表操作列：图标按钮（播放预览 / 载入编辑 / 删除） */
+  .tb-actions { display: inline-flex; align-items: center; gap: 6px; }
+  button.icon-btn {
+    width: 30px; height: 28px; padding: 0; display: inline-flex;
+    align-items: center; justify-content: center;
+    background: #2a2a4e; border: 1px solid #3a3a5e; border-radius: 5px; color: #8be9fd;
+  }
+  button.icon-btn:hover { background: #34345c; border-color: #14a085; color: #fff; }
+  button.icon-btn svg { display: block; pointer-events: none; }
+  button.icon-btn.danger { background: #c0392b; border-color: #a93226; color: #fff; }
+  button.icon-btn.danger:hover { background: #e74c3c; border-color: #e74c3c; }
+  /* 槽位绑定设备: 可搜索组合框 */
+  .combo { position: relative; flex: 1; min-width: 170px; }
+  .combo-input {
+    width: 100%; padding: 6px 10px; border: 1px solid #444; border-radius: 4px;
+    background: #2a2a4e; color: #e0e0e0; font-size: 14px; box-sizing: border-box;
+  }
+  .combo-input:focus { outline: none; border-color: #8be9fd; }
+  .combo-list {
+    position: absolute; z-index: 50; left: 0; right: 0; top: 100%; margin-top: 2px;
+    max-height: 240px; overflow-y: auto; background: #232344; border: 1px solid #3a3a5e;
+    border-radius: 6px; box-shadow: 0 6px 20px rgba(0,0,0,.45);
+  }
+  .combo-item { padding: 7px 10px; font-size: 13px; color: #e0e0e0; cursor: pointer; white-space: nowrap; }
+  .combo-item:hover { background: #2f2f57; color: #8be9fd; }
+  .combo-empty { padding: 8px 10px; font-size: 12px; color: #888; }
+  /* 槽位行内组合框占位宽度与旧 select 一致 */
+  .slot-row .combo { flex: 1 1 170px; }
+  @keyframes lpulse { 0%,100% { opacity: .45; } 50% { opacity: 1; } }
+  #status { margin-top: 12px; font-size: 14px; min-height: 24px; padding: 10px 14px; border-radius: 6px; transition: all 0.3s; font-weight: 500; }
+  #status.success { color: #2ecc71; background: rgba(46,204,113,0.18); border: 1px solid rgba(46,204,113,0.5); }
+  #status.error { color: #ff5e5e; background: rgba(231,76,60,0.18); border: 1px solid rgba(231,76,60,0.5); }
+  #status.info { color: #aaa; background: transparent; border: none; }
+  #status.pending { color: #f1c40f; background: rgba(241,196,15,0.15); border: 1px solid rgba(241,196,15,0.4); }
+  #status.success::before { content: '✓ '; font-weight: bold; }
+  #status.error::before { content: '✗ '; font-weight: bold; }
+  #status.pending::before { content: '⏳ '; }
+
+  /* ===== 布局 (单页模式): 左(路口信息+车道编辑) 右(数据卡实时预览) ===== */
+  .layout { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
+  .col-left { flex: 1.5 1 560px; min-width: 520px; }
+  .col-prev { flex: 1 1 480px; min-width: 440px; }
+
+  /* ===== 数据卡 (参照现场卡片样式) ===== */
+  .rot-outer { overflow: auto; padding: 30px 10px; }
+  .rot-box { display: inline-block; transition: transform .45s ease; transform-origin: center center; }
+  .icard { background: #0d1f42; border: 1px solid #1e4d8c; border-radius: 10px; padding: 14px 16px; width: max-content; min-width: 320px; color: #dfe9ff; box-shadow: 0 4px 18px rgba(0,0,0,.45); }
+  .icard-head { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 6px 10px; }
+  .icard-title { font-size: 20px; font-weight: 700; color: #fff; letter-spacing: 1px; }
+  /* 标题与副信息合并为一行: icard-sub 为行内 span */
+  .icard-sub { font-size: 12px; color: #9fb6dd; margin-left: 10px; font-weight: 400; }
+  .badges { display: flex; flex-direction: row; align-items: center; gap: 6px; }
+  .badge-main { background: #27c93f; color: #04310f; font-weight: 700; font-size: 12px; padding: 3px 12px; border-radius: 10px; }
+  .badge-main.t-exit { background: #ff5252; color: #3d0505; }
+  .badge-main.t-both { background: #29b6f6; color: #062a3d; }
+  .badge-video { background: #0a1a33; border: 1px solid #1e4d8c; color: #7a86a8; font-size: 11px; padding: 2px 10px; border-radius: 10px; cursor: pointer; user-select: none; }
+  .badge-video::before { content: ''; display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: #7a86a8; margin-right: 6px; }
+  .badge-video:hover { border-color: #37d67a; color: #37d67a; }
+  .badge-video.on { background: rgba(46,204,113,.16); border-color: #2ecc71; color: #7cfc9a; }
+  .badge-video.on::before { background: #2ecc71; box-shadow: 0 0 6px rgba(46,204,113,.85); }
+  /* 小数据卡带容器: 与断面图组成 body, 按行车方向对立面落位（col=水平一排/row=竖向一列） */
+  .icard-body { display: flex; gap: 10px; margin: 12px 0 0; align-items: stretch; }
+  .icard-body.col { flex-direction: column; }
+  /* 东西向(竖向断面): 小数据卡为竖列，居中于路面竖向中线（不再默认 top 居顶导致加车道后明显偏上） */
+  .icard-body.row .stat-row { flex-direction: column; width: 128px; flex: none; justify-content: center; }
+  .icard-body.row .road-stage { flex: 1; min-width: 0; }
+  .icard-body.row .stat-box { flex: none; }
+  /* minis-last: 卡带排到断面之后（DOM 中卡带在前, 用 order 对调） */
+  .icard-body.minis-last .stat-row { order: 2; }
+  .icard-body.minis-last .road-stage { order: 1; }
+  .stat-row { display: flex; gap: 8px; flex: 1; min-width: 0; }
+  .stat-box { flex: 1; border: 1px solid; border-radius: 6px; padding: 7px 9px; font-size: 11px; min-width: 0; }
+  .stat-box.person { border-color: #2f9dd8; color: #bfe3ff; }
+  .stat-box.vehicle { border-color: #2fbf71; color: #c9f3da; }
+  .stat-title { font-weight: 600; line-height: 1.5; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .stat-dot { color: #37d67a; margin-right: 4px; }
+  .stat-tag { display: inline-block; border: 1px solid currentColor; border-radius: 4px; padding: 0 5px; margin-left: 5px; font-size: 10px; opacity: .9; }
+  /* 所有「便道」字样：统一放大并加粗（断面图标签 / 小数据卡标签与名称 / 副标题 / 表单复选框中的便道） */
+  .btd { font-size: 1.3em; font-weight: 700; letter-spacing: .5px; }
+  .stat-metric { margin-top: 5px; color: #8fa8cf; white-space: nowrap; }
+  .stat-val { font-weight: 700; color: #eaf2ff; font-size: 12px; }
+  .stat-box.person .stat-val { color: #7fd0ff; }
+  .stat-box.vehicle .stat-val { color: #79e6a6; }
+
+  /* 道路断面图 */
+  /* 路面：人行道 + 车道同处一个 flex 行/列，等权 flex:1 → 便道宽度 = 车道宽度（统一一致）。
+     路面本身按内容宽度排开(width:max-content)，不拉伸占满舞台，避免右侧裸出空白。 */
+  .road { flex: none; display: flex; background: #0a1428; position: relative;
+    border: 2px solid #cfd8e6; border-radius: 4px; min-height: 168px; }
+  /* 横放断面（南北向）: 车道竖条并排, 需要足够高度容纳竖向大箭头与两端车道名 */
+  .road.ew { flex-direction: row; min-height: 280px; width: max-content; }
+  /* 竖放断面（东西向）: 车道横条堆叠; 恢复占满舞台宽度（东西向按车道高度出尺寸，宽度铺满不裸空） */
+  .road.ns { flex-direction: column; width: 100%; }
+  .sidewalk { flex: 1; min-width: 0; position: relative; border: 1px solid #3a4a66;
+    background: repeating-linear-gradient(45deg, #141d30 0 6px, #0d1524 6px 12px); }
+  .sidewalk .sw-label { position: absolute; bottom: 5px; left: 50%; transform: translateX(-50%);
+    font-size: 11px; color: #7f93b5; }
+  .road.ns .sidewalk .sw-label { bottom: auto; left: 5px; top: 50%; transform: translateY(-50%); }
+  .road.ew .sidewalk .sw-label { bottom: auto; top: 50%; transform: translate(-50%, -50%); }
+  .lane { flex: 1; min-width: 0; position: relative; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 12px; }
+  .road.ew .lane + .lane { border-left: 1px dashed #8fa3c0; }
+  .road.ns .lane + .lane { border-top: 1px dashed #8fa3c0; }
+  .road.ns .lane { flex-direction: row; min-height: 44px; justify-content: flex-start; padding: 0 14px; gap: 18px; }
+  /* 车辆行驶方向箭头 + 摄像头：同属一个旋转组 .arrow-wrap（基准朝下），
+     整体旋转到真实行驶方向；箭头中心锚在计数线 52%/52%（原 44% 下移，为尾部上方腾出间距），
+     摄像头恒位于箭头尾部（行驶起点一侧）外侧且留出明显净距，与旋转方向无关。 */
+  .arrow-wrap { position: absolute; left: 52%; top: 52%; transform: translate(-50%, -50%) rotate(var(--arrow-rot, -90deg)); }
+  .arrow { position: absolute; left: 50%; top: 50%; width: 36px; height: 92px; transform: translate(-50%, -50%); }
+  .arrow::before { content: ''; position: absolute; left: 50%; top: 0; width: 8px; height: 64px;
+    margin-left: -4px; border-radius: 4px; background: #ff9100; box-shadow: 0 0 10px rgba(255,145,0,.7); }
+  .arrow::after { content: ''; position: absolute; left: 50%; bottom: 0; width: 36px; height: 28px;
+    margin-left: -18px; background: #ff9100; clip-path: polygon(50% 100%, 0 0, 100% 0);
+    filter: drop-shadow(0 0 7px rgba(255,145,0,.7)); }
+  /* 摄像头：旋转组内置于箭头尾部外侧（local 上方 = 箭头尾部一侧）。
+     箭头全长 92px → 尾尖在 -46px；摄像头半高 13px 置于 -67px → 与尾尖净距 ≈ 8px。 */
+  .cam-ic { position: absolute; left: 50%; top: -67px; transform: translate(-50%, -50%); }
+  .lane-label { position: absolute; top: 5px; left: 50%; transform: translateX(-50%);
+    font-size: 11px; color: #c7d5ee; white-space: nowrap; z-index: 3; }
+  /* 车道名统一挂在车道尾部（箭头指向的对立面）：
+     NS 竖放 → 行内靠左/靠右；EW 横放 → 列内靠上/靠下 */
+  .road.ns .lane-label { position: static; transform: none; }
+  .lane.tail-left .lane-label { margin: 0 auto 0 0; }
+  .lane.tail-right .lane-label { margin: 0 0 0 auto; }
+  .lane.tail-top .lane-label { top: 5px; bottom: auto; }
+  .lane.tail-bottom .lane-label { top: auto; bottom: 5px; }
+  /* 车道示意图舞台: 断面图始终正置渲染, 不做 CSS 旋转 */
+  .road-stage { display: flex; justify-content: center; align-items: center; }
+  /* 计数线：逐车道绘制（人行道不含），相邻车道线段自然衔接成一条贯穿线 */
+  .lane::before { content: ''; position: absolute; z-index: 2; pointer-events: none; }
+  .road.ew .lane::before { left: 0; right: 0; top: 52%; border-top: 2px dashed #ff4d4d; }
+  .road.ns .lane::before { top: 0; bottom: 0; left: 52%; border-left: 2px dashed #ff4d4d; }
+  .road.no-count .lane::before { display: none; }
+
+  /* 车道编辑器 */
+  .lane-edit-row { display: flex; gap: 3px; align-items: center; margin-bottom: 8px; flex-wrap: nowrap; }
+  .lane-edit-row .mv { padding: 4px 4px; font-size: 11px; flex-shrink: 0; }
+  .lane-edit-row input { flex: 1 1 30px; min-width: 26px; width: auto; font-size: 12px; }
+  .lane-edit-row select { flex: 0 1 auto; min-width: 0; padding: 5px 2px; font-size: 12px; }
+  .lane-edit-row .cam-in { flex: 1 1 34px; min-width: 26px; }
+  .lane-edit-row .idx { color: #8be9fd; font-size: 12px; width: 20px; text-align: center; flex-shrink: 0; }
+
+  /* 槽位编辑器：单行不换行，序号/类型固定宽，名称与设备按比例伸缩 */
+  .slot-row { display: flex; gap: 6px; align-items: center; margin-bottom: 8px; flex-wrap: nowrap; }
+  .slot-row .idx { color: #8be9fd; font-size: 12px; width: 28px; text-align: center; flex-shrink: 0; }
+  .slot-row select.kind { width: 72px; flex-shrink: 0; padding: 6px 6px; }
+  .slot-row input { flex: 1 1 90px; min-width: 0; width: auto; }
+  .slot-row select.dev { flex: 2 1 170px; min-width: 0; }
+  .slot-row .mv { padding: 4px 9px; font-size: 12px; flex-shrink: 0; }
+  .slot-row .mv:hover { background: #c0392b; border-color: #c0392b; }
+  /* 绑定设备组合框加宽：输入框占满容器，下拉列表按内容自适应宽度（不再被 170px 截断） */
+  .slot-row .combo { flex: 2 1 240px; min-width: 170px; }
+  .slot-row .combo-input { flex: none; width: 100%; min-width: 0; text-overflow: ellipsis; }
+  .slot-row .combo-list { left: 0; right: auto; width: max-content; min-width: 100%;
+    max-width: min(520px, 48vw); }
+  .slot-row .combo-item { white-space: normal; line-height: 1.45; }
+  .seg { display: inline-flex; border: 1px solid #3a3a5e; border-radius: 6px; overflow: hidden; }
+  .seg button { border-radius: 0; background: #2a2a4e; padding: 5px 12px; font-size: 12px; border: none; border-right: 1px solid #3a3a5e; }
+  .seg button:last-child { border-right: none; }
+  .seg button.on { background: #0d7377; color: #fff; }
+
+  /* 槽位 + 车道编辑 双栏并排 (路口信息面板内, 压缩整体高度) */
+  .duo { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; margin-top: 10px; }
+  .duo-l { flex: 1.25 1 450px; min-width: 0; }
+  .duo-r { flex: 1 1 300px; min-width: 280px; border-left: 1px solid #333; padding-left: 16px; }
+  .duo h3 { font-size: 13px; color: #8be9fd; margin: 0 0 10px; font-weight: 600; }
+  @media (max-width: 1100px) { .duo-r { border-left: none; padding-left: 0; } }
+
+  /* ===== 悬浮提示 toast ===== */
+  #toast { position: fixed; top: 18px; left: 50%; transform: translateX(-50%) translateY(-80px);
+    padding: 11px 20px; border-radius: 8px; font-size: 14px; font-weight: 600; z-index: 100;
+    opacity: 0; transition: all .35s ease; pointer-events: none; box-shadow: 0 6px 24px rgba(0,0,0,.4); }
+  #toast.show { transform: translateX(-50%) translateY(0); opacity: 1; }
+  #toast.success { background: #1e6b3a; color: #c9f3da; border: 1px solid #2ecc71; }
+  #toast.error { background: #6b1e1e; color: #ffc9c9; border: 1px solid #ff5e5e; }
+
+  .list-count { font-size: 12px; color: #8fa8cf; margin-left: 8px; }
+  .btn-add { font-size: 14px; padding: 8px 18px; }
+
+  /* ===== 大屏显示 滑块开关 (颜色鲜明: 绿=显示 / 灰=隐藏) ===== */
+  .switch { position: relative; display: inline-block; width: 50px; height: 26px; flex: none; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .switch .slider {
+    position: absolute; cursor: pointer; inset: 0; background: #5a5a72;
+    border-radius: 26px; transition: background .25s, box-shadow .25s;
+  }
+  .switch .slider::before {
+    content: ''; position: absolute; height: 20px; width: 20px; left: 3px; bottom: 3px;
+    background: #fff; border-radius: 50%; transition: transform .25s; box-shadow: 0 1px 3px rgba(0,0,0,.5);
+  }
+  .switch input:checked + .slider { background: #2ecc71; box-shadow: 0 0 8px rgba(46,204,113,.55); }
+  .switch input:checked + .slider::before { transform: translateX(24px); }
+  .switch input:focus + .slider { outline: 2px solid rgba(46,204,113,.45); outline-offset: 1px; }
+  .vis-label { font-size: 13px; transition: color .2s; }
+  .vis-label.on { color: #2ecc71; font-weight: 600; }
+  .vis-label.off { color: #888; }
+
+  /* ===== 右侧预览下方: 绑定设备视频列表（列表样式 + 关键数据） ===== */
+  .vid-list { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
+  .vid-row { display: flex; gap: 10px; align-items: stretch; background: #1b1b38;
+    border: 1px solid #3a3a5e; border-radius: 8px; padding: 6px; }
+  .vid-row .vid-thumb2 { position: relative; flex: 0 0 168px; background: #000;
+    border-radius: 6px; overflow: hidden; align-self: flex-start; }
+  .vid-row video { width: 168px; aspect-ratio: 16/9; display: block; object-fit: cover; background: #000; }
+  .vid-row .vid-msg { width: 168px; padding: 38px 8px; text-align: center; color: #f1c40f; font-size: 11px; }
+  .vid-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; justify-content: center; }
+  .vid-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .vid-dev { font-size: 13px; color: #dfe9ff; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .vid-badge { flex: none; font-size: 11px; padding: 1px 8px; border-radius: 9px; border: 1px solid #555; color: #999; }
+  .vid-badge.on { color: #2ecc71; border-color: #2ecc71; }
+  .vid-badge.off { color: #e74c3c; border-color: #e74c3c; }
+  .vid-kind { flex: none; font-size: 11px; padding: 1px 8px; border-radius: 9px; }
+  .vid-kind.veh { color: #7cfc9a; background: rgba(46,204,113,.12); }
+  .vid-kind.per { color: #6fb9ff; background: rgba(111,185,255,.12); }
+  .vid-metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+  .vid-cell { background: #232344; border: 1px solid #33335a; border-radius: 6px; padding: 4px 8px; min-width: 0; }
+  .vid-cell b { display: block; font-size: 13px; color: #8be9fd; font-weight: 600;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .vid-cell span { font-size: 10px; color: #7a86a8; }
+  .vid-wait { color: #7a86a8; font-size: 12px; padding: 4px 2px; }
+  .vid-empty { text-align: center; color: #7a86a8; font-size: 13px; padding: 26px 10px;
+    border: 1px dashed #3a3a5e; border-radius: 8px; }
+  .vid-headbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 20px; }
+  .vid-headbar h2 { margin: 0; }
+  .btn-vid-close { flex: none; background: transparent; border: 1px solid #3a3a5e; color: #9fb6dd;
+    font-size: 12px; padding: 4px 12px; border-radius: 6px; cursor: pointer; }
+  .btn-vid-close:hover { background: #2a2a4e; color: #dfe9ff; border-color: #5a5a8e; }
+
+  /* ===== 播放预览 模态框 (已绑定设备的车道显示卡: 实时画面 + 小数据卡) ===== */
+  .modal-mask { position: fixed; inset: 0; background: rgba(0,0,0,.72); z-index: 200;
+    display: none; align-items: flex-start; justify-content: center; overflow: auto; padding: 28px 16px; }
+  .modal-mask.show { display: flex; }
+  .modal-box { width: min(1180px, 96vw); background: #232344; border: 1px solid #3a3a5e;
+    border-radius: 12px; box-shadow: 0 12px 50px rgba(0,0,0,.6); }
+  .modal-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 18px; border-bottom: 1px solid #333; }
+  .modal-head h3 { font-size: 16px; color: #8be9fd; margin: 0; }
+  .modal-head .sub { font-size: 12px; color: #8fa8cf; margin-left: 10px; }
+  .modal-close { background: transparent; border: 1px solid #444; padding: 5px 14px; font-size: 13px; }
+  .modal-close:hover { background: #2a2a4e; }
+  .modal-body { padding: 16px 18px 22px; }
+  .modal-loading, .modal-empty { text-align: center; color: #f1c40f; padding: 40px; line-height: 1.8; }
+  .gate-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 16px; }
+  .gate-card { background: #1d1d3a; border: 1px solid #333; border-radius: 10px; overflow: hidden; display: flex; flex-direction: column; }
+  .gate-card-head { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; border-bottom: 1px solid #2c2c4e; gap: 8px; }
+  .gate-card-head .gname { font-size: 14px; font-weight: 600; color: #dfe9ff; }
+  .gate-card-head .gdev { font-size: 11px; color: #9fb6dd; }
+  .gate-card .no-dev, .gate-card .no-stream { padding: 44px 12px; text-align: center; color: #888; font-size: 13px; }
+  .gate-stats { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px 10px; padding: 10px 12px 12px; }
+  .gate-stat { background: #15152e; border: 1px solid #2a2a4e; border-radius: 6px; padding: 6px 8px; min-width: 0; }
+  .gate-stat .gs-t { font-size: 11px; color: #8fa8cf; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .gate-stat .gs-v { font-size: 16px; font-weight: 700; color: #dfe9ff; }
+  .gate-stat.veh .gs-v { color: #2ecc71; }
+  .gate-stat.per .gs-v { color: #29b6f6; }
+  .gate-stat.warn .gs-v { color: #f1c40f; }
+</style>
+</head>
+<body>
+
+<h1>路口数据卡配置</h1>
+
+<div class="topbar">
+  <div class="nav">
+    <a href="/static/device-config.html">设备计数配置</a>
+    <a href="/static/device-info.html">设备信息管理</a>
+    <a href="/static/business-rules.html">业务规则配置</a>
+    <a href="/static/intersection-config.html" class="active">路口数据卡配置</a>
+    <a href="/static/hardware-monitor.html">硬件监控</a>
+  </div>
+  <div class="global-filter">
+    <label for="globalScenic">景区</label>
+    <select id="globalScenic" title="全局查询条件: 按景区筛选本页数据" onchange="onGlobalScenicChange(this.value)">
+      <option value="">全部景区</option>
+      <option value="大同古城">大同古城</option>
+      <option value="云冈石窟">云冈石窟</option>
+      <option value="悬空寺">悬空寺</option>
+    </select>
+    <span id="globalScenicCount" class="cnt"></span>
+  </div>
+</div>
+
+<!-- ===== 编辑区: 左(路口信息+车道编辑) 右(数据卡实时预览) ===== -->
+<div class="layout">
+  <!-- 模块1: 路口信息 -->
+  <div class="col-left">
+    <div class="panel">
+      <h2>路口信息</h2>
+            <div class="row">
+              <label>路口名称</label>
+              <input id="fName" placeholder="如 永泰东门" style="flex:1" oninput="onInfoChange()">
+            </div>
+            <div class="row">
+              <label>所属景区</label>
+              <select id="fScenic" style="flex:1" onchange="onInfoChange()">
+                <option value="大同古城" selected>大同古城</option>
+                <option value="云冈石窟">云冈石窟</option>
+                <option value="悬空寺">悬空寺</option>
+              </select>
+            </div>
+            <div class="row">
+              <label>经度</label>
+              <input id="fLng" placeholder="113.312601" style="flex:1" oninput="onInfoChange()">
+            </div>
+            <div class="row">
+              <label>纬度</label>
+              <input id="fLat" placeholder="40.090217" style="flex:1" oninput="onInfoChange()">
+            </div>
+            <div class="row">
+              <label>车道数量</label>
+              <select id="fLaneCount" style="flex:1" onchange="onLaneCountChange()">
+                <option value="1">1</option>
+                <option value="2">2</option>
+                <option value="3">3</option>
+                <option value="4" selected>4</option>
+                <option value="5">5</option>
+                <option value="6">6</option>
+                <option value="7">7</option>
+                <option value="8">8</option>
+                <option value="9">9</option>
+                <option value="10">10</option>
+              </select>
+            </div>
+            <div class="row">
+              <label>车道宽度(m)</label>
+              <input id="fLaneWidth" type="number" step="0.1" min="1" max="20" placeholder="3.5"
+                     style="flex:1" title="车道宽度(米), 示意图车道宽度实时联动"
+                     oninput="onLaneWidthInput()">
+            </div>
+            <div class="row">
+              <label>车道类型</label>
+              <select id="fLaneType" style="flex:1" onchange="onLaneTypeChange()">
+                <option value="single" selected>单向</option>
+                <option value="dual">双向</option>
+              </select>
+            </div>
+            <div class="row">
+              <label>行驶方向</label>
+              <input id="fDirection" placeholder="如 向北" style="flex:1" oninput="onInfoChange()">
+            </div>
+            <div class="row">
+              <label>方向样式</label>
+              <select id="fOrientation" disabled style="flex:1" title="方向样式由「示意图旋转」自动决定：0°/180° = 南北方向，90°/270° = 东西方向">
+                <option value="EW" selected>东西方向</option>
+                <option value="NS">南北方向</option>
+              </select>
+            </div>
+            <div class="row">
+              <label>示意图旋转</label>
+              <span class="seg" id="segRot">
+                <button data-v="0" class="on" onclick="onRotation(this)">0°</button>
+                <button data-v="90" onclick="onRotation(this)">90°</button>
+                <button data-v="180" onclick="onRotation(this)">180°</button>
+                <button data-v="270" onclick="onRotation(this)">270°</button>
+              </span>
+            </div>
+            <div class="row">
+              <label>徽章</label>
+              <select id="fBadge" style="flex:1" onchange="onInfoChange()">
+                <option value="入口" selected>入口</option>
+                <option value="出口">出口</option>
+                <option value="出入口">出入口</option>
+                <option value="">无</option>
+              </select>
+            </div>
+            <div class="row">
+              <label>卡口类型</label>
+              <input id="fKakou" value="车行卡口" style="flex:1" oninput="onInfoChange()">
+            </div>
+            <div class="row">
+              <label><input type="checkbox" id="fSwLeft" checked onchange="onInfoChange()"> 左侧<span class="btd">便道</span></label>
+              <label><input type="checkbox" id="fSwRight" checked onchange="onInfoChange()"> 右侧<span class="btd">便道</span></label>
+              <label><input type="checkbox" id="fCountLine" checked onchange="onInfoChange()"> 计数线</label>
+            </div>
+            <div class="row">
+              <label>大屏显示</label>
+              <span style="flex:1;display:flex;align-items:center;gap:10px">
+                <label class="switch" title="开启 = 数据卡显示在大屏前端；关闭 = 大屏隐藏此路口卡片">
+                  <input type="checkbox" id="fVisible" checked onchange="onVisibleChange()">
+                  <span class="slider"></span>
+                </label>
+                <span id="fVisibleText" class="vis-label on">在大屏前端显示该数据卡（已开启）</span>
+              </span>
+            </div>
+            <div class="duo">
+              <div class="duo-l">
+                <h3>槽位 (可增删)</h3>
+                <div id="slotEditor" style="display:grid;gap:6px"></div>
+                <button class="ghost" onclick="addSlot()" style="margin-top:6px">＋ 添加槽位</button>
+                <div class="hint" style="margin-top:8px">
+                  新增路口默认提供 4 个槽位，均可增删（数量不限）。每条槽位：
+                  名称（显示在卡上）、类型（车卡=车辆 / 便道=人流，决定计数单位与角标颜色）、
+                  绑定设备（留空则按设备名/分类自动认领）。槽位列表与大屏小数据卡一一对应（保存后按此渲染）；
+                  全部删除则大屏回退自动认领 4 槽。「景区」下拉会过滤可选设备列表。
+                </div>
+              </div>
+              <div class="duo-r">
+                <h3>车道编辑 (次序 / 方向 / 摄像头)</h3>
+                <div id="laneEditor"></div>
+                <div class="hint">◀ ▶ 调整车道次序；「正向」箭头指向行车方向（示意图旋转 = 行车罗盘：0°北朝上、90°东朝右、180°南朝下、270°西朝左），「反向」相反；摄像头名称用于统计格分组展示（相邻同名摄像头合并为一格）。</div>
+              </div>
+            </div>
+
+            <!-- 保存/重置 + 状态 + 说明 -->
+            <div class="row" style="margin-top:4px">
+              <button id="saveBtn" onclick="save()">保存路口</button>
+              <button class="ghost" onclick="resetForm()">重置</button>
+            </div>
+            <div id="status"></div>
+            <div class="hint">
+              「示意图旋转」= 行车方向罗盘角：0°=北向（箭头朝上）、90°=东向（朝右）、180°=南向（朝下）、270°=西向（朝左）。
+              断面按真实方位渲染（与大屏数据卡一致）：南北向 → 竖放断面（便道在左右），小数据卡水平一排、挂在行车方向对立面（尾部）；
+              东西向 → 横放断面（便道在上下），小数据卡竖向一列、挂在行车方向对立面。车道名统一挂在车道的尾部（箭头的末尾/箭尖一侧）。
+              车道类型「双向」默认前一半正向、后一半反向，「单向」全部正向；车道数量 (1~10) 决定断面图车道数，
+              车道宽度 (米) 实时决定示意图中每条车道的宽度/行高。
+              所有样式（车道顺序/方向/便道/计数线）保存在数据卡样式中；出入口徽章（入口/出口/出入口）作为独立字段入库。
+            </div>
+          </div>
+  </div>
+
+  <!-- 模块3: 数据卡实时预览 -->
+  <div class="col-prev">
+    <div class="panel">
+      <h2>数据卡实时预览 <span style="color:#666;font-weight:400;font-size:12px">（修改配置即时生效）</span></h2>
+      <div class="rot-outer"><div class="rot-box" id="rotBox"></div></div>
+      <div id="vidModule" style="display:none">
+        <div class="vid-headbar">
+          <h2>绑定设备视频 <span style="color:#666;font-weight:400;font-size:12px">（点预览卡右上角「视频」按钮关闭 · 关闭即停止拉流）</span></h2>
+          <button class="btn-vid-close" id="btnVidClose" onclick="closeVidModule()">关闭视频 ✕</button>
+        </div>
+        <div id="vidGrid" class="vid-list"><div class="vid-empty">点预览卡右上角「视频」按钮，按列表加载槽位绑定设备的实时画面与关键数据</div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== 已保存路口 ===== -->
+<div class="panel">
+  <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
+    <h2 style="margin-bottom:0">已保存路口 <span id="listCount" class="list-count"></span></h2>
+    <div class="row" style="margin-bottom:0">
+      <button class="ghost" onclick="resetForm()">＋ 新增路口</button>
+      <button class="ghost" id="btnRefresh" onclick="loadList()">刷新列表</button>
+    </div>
+  </div>
+  <div id="savedList" style="margin-top:14px"></div>
+</div>
+
+<div id="toast"></div>
+
+<!-- ===== 播放预览 模态框 (已绑定设备的车道显示卡: 实时画面 + 小数据卡预览) ===== -->
+<div class="modal-mask" id="previewModal" onclick="if(event.target===this)closePreview()">
+  <div class="modal-box">
+    <div class="modal-head">
+      <div><h3 id="previewTitle">播放预览</h3><span class="sub" id="previewSub">实时画面 + 小数据卡预览（仅展示已绑定设备的车道卡）</span></div>
+      <button class="modal-close" onclick="closePreview()">关闭 ✕</button>
+    </div>
+    <div class="modal-body" id="previewBody"></div>
+  </div>
+</div>
+
+<script src="config.js"></script>
+<script src="global-scenic.js"></script>
+<script>
+const statusEl = document.getElementById('status');
+let baseUrl = '';
+let editingId = null;   // null=新增; 数字=更新
+let cfg = null;         // 当前编辑的完整配置
+
+baseUrl = ((window.OPS_CONFIG && window.OPS_CONFIG.API_BASE) || window.location.origin).replace(/\/$/, '');
+
+/* ---------- 全局景区 (右上角统一查询条件 + 本页「所属景区」下拉) ---------- */
+window.globalScenicApiBase = () => baseUrl;
+let globalScenicFilter = '';   // '' = 全部景区
+
+window.applyGlobalScenic = function (v) {
+  globalScenicFilter = v || '';
+  loadList();                  // 按景区刷新「已保存路口」列表
+};
+
+/* 下拉选项由 /api/intersections/scenic-options 提供 (基线 ∪ 设备区域 ∪ 路口景区) */
+window.onScenicOptionsLoaded = function (opts) {
+  fillScenicFormOptions(opts);
+};
+
+function ensureScenicOption(sel, value) {
+  if (!sel || !value) return;
+  if (Array.from(sel.options).some(o => o.value === value)) return;
+  const opt = document.createElement('option');
+  opt.value = value; opt.textContent = value;
+  sel.appendChild(opt);
+}
+
+function fillScenicFormOptions(opts) {
+  const sel = document.getElementById('fScenic');
+  if (!sel) return;
+  const keep = (cfg && cfg.scenic) || sel.value || '大同古城';
+  const list = (opts && opts.length) ? opts : ['大同古城'];
+  sel.innerHTML = list.map(o => `<option value="${o}">${o}</option>`).join('');
+  ensureScenicOption(sel, keep);
+  sel.value = keep;
+}
+
+function api(path, options = {}) {
+  return fetch(baseUrl + path, options).then(async r => {
+    const text = await r.text();
+    let body;
+    try { body = JSON.parse(text); } catch { body = text; }
+    if (!r.ok) throw new Error(typeof body === 'string' ? body : body.detail || r.statusText);
+    return body;
+  });
+}
+
+function setStatus(msg, cls = 'info') {
+  statusEl.textContent = msg;
+  statusEl.className = cls;
+}
+
+let toastTimer = null;
+function showToast(msg, cls = 'success') {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'show ' + cls;
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.className = t.className.replace('show', '').trim(); }, 2600);
+}
+
+const LANE_TYPE_TEXT = {
+  single: '单向', dual: '双向'
+};
+const CN_NUM = ['', '一', '二', '三', '四', '五', '六', '七', '八', '九', '十'];
+const CAM_SVG = '<svg class="cam-ic" width="36" height="26" viewBox="0 0 18 13">' +
+  '<rect x="0" y="2" width="11" height="9" rx="1.5" fill="#ff5252"/>' +
+  '<path d="M12 5 L17 2.5 V10.5 L12 8 Z" fill="#ff5252"/>' +
+  '<circle cx="5.5" cy="6.5" r="2.2" fill="#0a1428"/></svg>';
+
+/* 列表操作列图标（内联 SVG，随按钮色 currentColor；文字信息放 title/aria-label） */
+const ICON_PLAY = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M10 8.2l6 3.8-6 3.8z" fill="currentColor" stroke="none"/></svg>';
+const ICON_EDIT = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>';
+const ICON_DEL = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>';
+
+/* 默认行驶方向: 双向 = 前一半正向 + 后一半反向; 单向 = 全部正向 */
+function defaultDir(i, n, laneType) {
+  if (laneType === 'dual') return i < Math.floor(n / 2) ? 'forward' : 'backward';
+  return 'forward';
+}
+
+/* 摄像头分组默认规则: n>=2 时前一半=摄像头A、后一半=摄像头B (与 lanes[].camera 及大屏槽位联动同规则) */
+function defaultCamGroup(i, n) {
+  return n >= 2 ? (i < Math.floor(n / 2) ? '摄像头A' : '摄像头B') : '';
+}
+
+/* 槽位（可增删）编辑器：cfg.slots = [{ label, kind:'veh'|'per', device }]
+ * 大屏小数据卡按此列表渲染，数量不限；旧版对象形态 { per0, vehA, vehB, per1 } 载入时自动转数组 */
+function slotsToArray(slots) {
+  if (Array.isArray(slots)) return slots;
+  if (slots && typeof slots === 'object') {
+    const legacyLabel = { per0: '左侧便道·人流', vehA: '摄像头A', vehB: '摄像头B', per1: '右侧便道·人流' };
+    return Object.entries(slots).map(([k, v]) => ({
+      label: legacyLabel[k] || k,
+      kind: k.indexOf('per') === 0 ? 'per' : 'veh',
+      device: v || ''
+    }));
+  }
+  return [];
+}
+
+/* 新增/空白配置的默认槽位：固定 4 条，均可增删改 */
+function defaultSlots() {
+  return [
+    { label: '左侧便道·人流', kind: 'per', device: '' },
+    { label: '摄像头A', kind: 'veh', device: '' },
+    { label: '摄像头B', kind: 'veh', device: '' },
+    { label: '右侧便道·人流', kind: 'per', device: '' }
+  ];
+}
+
+function deviceOptionLabel(d) {
+  return ((d && (d.name || d.id)) || '') + ((d && d.category) ? ' · ' + d.category : '');
+}
+
+function fillSlotDeviceSelects() {
+  // 兼容保留: 已无 <select> 设备下拉, 统一走可搜索组合框; 此处仅刷新各组合框输入框回显.
+  renderAllCombos();
+}
+
+/* ---------- 槽位绑定：可搜索设备组合框 (数据源: /api/device-info/options) ---------- */
+let _slotDevices = [];          // 当前景区全量设备 (初始/景区切换时加载)
+let _comboResults = {};         // { [i]: [...] } 各槽位最近一次(可含检索)结果, 仅用于渲染该槽位下拉
+let _comboTimers = {};          // 各槽位检索防抖定时器
+
+function findDev(name) {
+  let d = (_slotDevices || []).find((x) => x.name === name);
+  if (!d) {
+    for (const k in (_comboResults || {})) {
+      const f = (_comboResults[k] || []).find((x) => x.name === name);
+      if (f) { d = f; break; }
+    }
+  }
+  return d || null;
+}
+
+function slotDeviceLabel(name) {
+  if (!name) return '';
+  const d = findDev(name);
+  return d ? deviceOptionLabel(d) : name;   // 绑定值不在当前列表(如其它景区) → 显示原名
+}
+
+function escAttr(s) {
+  return String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+}
+
+function renderComboList(i, filter) {
+  const box = document.getElementById('combo-list-' + i);
+  if (!box) return;
+  const base = _comboResults[i] || _slotDevices || [];
+  const f = (filter || '').trim().toLowerCase();
+  const items = base.filter((d) => {
+    if (!f) return true;
+    const hay = ((d.name || '') + ' ' + (d.category || '') + ' ' + (d.point_id || '')).toLowerCase();
+    return hay.includes(f);
+  });
+  if (!items.length) {
+    box.innerHTML = '<div class="combo-empty">无匹配设备</div>';
+    return;
+  }
+  box.innerHTML = items.map((d) =>
+    `<div class="combo-item" onmousedown="pickCombo(${i},'${escAttr(d.name)}')">${deviceOptionLabel(d)}</div>`
+  ).join('');
+}
+
+function onComboInput(i, val) {
+  const box = document.getElementById('combo-list-' + i);
+  if (box) box.style.display = 'block';
+  _comboResults[i] = _slotDevices;            // 先用已加载全量做即时本地过滤
+  renderComboList(i, val);
+  debounceComboServer(i, val);                // 防抖调用服务端名称检索, 刷新该槽位结果
+}
+
+function openCombo(i) {
+  const box = document.getElementById('combo-list-' + i);
+  if (box) {
+    box.style.display = 'block';
+    /* 打开(获得焦点)时展示全量设备列表：输入框里此时是「已绑定设备的完整标签」，
+       拿它当过滤词必然匹配不上(标签含 " · " 连接符)，会误显「无匹配设备」。
+       用户键入时才走 onComboInput 的过滤。 */
+    renderComboList(i, '');
+  }
+}
+
+function pickCombo(i, name) {
+  if (!cfg.slots[i]) return;
+  cfg.slots[i].device = name || '';           // 绑定值 = 设备名称 (与大屏运行时 device_info 名称匹配一致)
+  const input = document.getElementById('combo-input-' + i);
+  if (input) { input.value = name ? slotDeviceLabel(name) : ''; input.title = input.value; }
+  const box = document.getElementById('combo-list-' + i);
+  if (box) box.style.display = 'none';
+  renderPreview();                            // 绑定变更 → 预览卡实时联动
+}
+
+function closeCombo(i) {
+  // 延迟关闭, 确保 onmousedown 选择先生效
+  setTimeout(() => {
+    const box = document.getElementById('combo-list-' + i);
+    if (box) box.style.display = 'none';
+    const input = document.getElementById('combo-input-' + i);
+    if (input && cfg.slots[i]) input.value = slotDeviceLabel(cfg.slots[i].device);
+  }, 150);
+}
+
+function debounceComboServer(i, val) {
+  clearTimeout(_comboTimers[i]);
+  _comboTimers[i] = setTimeout(async () => {
+    const scenicSel = document.getElementById('fScenic');
+    const scenic = scenicSel ? scenicSel.value : '';
+    try {
+      const list = await api('/api/device-info/options?scenic=' + encodeURIComponent(scenic)
+        + '&q=' + encodeURIComponent(val));
+      if (Array.isArray(list)) {
+        _comboResults[i] = list;
+        renderComboList(i, val);              // 用服务端检索结果重新渲染(若下拉仍打开)
+      }
+    } catch (e) { /* 检索失败不阻断, 保留本地过滤结果 */ }
+  }, 250);
+}
+
+function renderAllCombos() {
+  const slots = Array.isArray(cfg.slots) ? cfg.slots : [];
+  slots.forEach((s, i) => {
+    const input = document.getElementById('combo-input-' + i);
+    if (input) { input.value = slotDeviceLabel(s.device); input.title = input.value; }
+  });
+}
+
+function renderSlotEditor() {
+  const box = document.getElementById('slotEditor');
+  if (!box) return;
+  const slots = Array.isArray(cfg.slots) ? cfg.slots : [];
+  box.innerHTML = slots.length ? slots.map((s, i) => `
+    <div class="slot-row">
+      <span class="idx">#${i + 1}</span>
+      <select class="kind" onchange="setSlot(${i},'kind',this.value)">
+        <option value="veh" ${s.kind !== 'per' ? 'selected' : ''}>车卡</option>
+        <option value="per" ${s.kind === 'per' ? 'selected' : ''}>便道</option>
+      </select>
+      <input value="${String(s.label || '').replace(/"/g, '&quot;')}" placeholder="槽位名称" onchange="setSlot(${i},'label',this.value)">
+      <div class="combo" id="combo-${i}">
+        <input type="text" class="combo-input" id="combo-input-${i}" autocomplete="off"
+               placeholder="搜索/选择设备…" value="${slotDeviceLabel(s.device)}"
+               title="${slotDeviceLabel(s.device)}"
+               onfocus="openCombo(${i})" oninput="onComboInput(${i}, this.value)" onblur="closeCombo(${i})">
+        <div class="combo-list" id="combo-list-${i}" style="display:none"></div>
+      </div>
+      <button class="mv ghost" title="删除槽位" onclick="delSlot(${i})">✕</button>
+    </div>`).join('') : '<div class="empty">无槽位：大屏将回退为自动认领的 4 槽</div>';
+}
+
+function setSlot(i, key, val) {
+  if (!cfg.slots[i]) return;
+  cfg.slots[i][key] = val;
+  renderPreview();   // 槽位数值变动 → 预览卡实时联动
+}
+
+function addSlot() {
+  if (!Array.isArray(cfg.slots)) cfg.slots = [];
+  cfg.slots.push({ label: '槽位' + (cfg.slots.length + 1), kind: 'veh', device: '' });
+  renderSlotEditor(); renderPreview();   // 槽位数量变动 → 预览卡实时联动
+}
+
+function delSlot(i) {
+  cfg.slots.splice(i, 1);
+  renderSlotEditor(); renderPreview();
+}
+
+function defaultLanes(n, laneType) {
+  const half = Math.floor(n / 2);
+  const lanes = [];
+  for (let i = 0; i < n; i++) {
+    lanes.push({
+      label: '车道' + CN_NUM[i + 1],
+      dir: defaultDir(i, n, laneType),
+      camera: defaultCamGroup(i, n)
+    });
+  }
+  return lanes;
+}
+
+/* 方向样式由卡片旋转自动推导：0°/180° = 南北(NS)，90°/270° = 东西(EW) */
+function rotationToOrientation(rot) {
+  return (parseInt(rot, 10) === 90 || parseInt(rot, 10) === 270) ? 'EW' : 'NS';
+}
+
+function blankCfg() {
+  return {
+    name: '', kakou: '车行卡口', direction: '向北',
+    lane_count: 4, lane_width: 2.5, lane_type: 'single',
+    orientation: 'NS', rotation: 0, badge: '入口',
+    scenic: (typeof window.getGlobalScenic === 'function' && window.getGlobalScenic()) || '大同古城',
+    longitude: null, latitude: null,
+    sidewalk_left: true, sidewalk_right: true, count_line: true,
+    hidden: false,
+    slots: defaultSlots(),
+    lanes: defaultLanes(4, 'single')
+  };
+}
+
+/* ---------- 槽位绑定：设备下拉（来自 device_info 表，按景区过滤 + 名称检索） ---------- */
+async function loadSlotDevices() {
+  const scenicSel = document.getElementById('fScenic');
+  const scenic = scenicSel ? scenicSel.value : '';
+  let list = [];
+  try {
+    list = await api('/api/device-info/options?scenic=' + encodeURIComponent(scenic));
+  } catch (e) { list = []; }
+  if (!Array.isArray(list)) list = [];
+  _slotDevices = list;
+  _comboResults = {};        // 景区切换清空各槽位检索缓存
+  renderAllCombos();         // 刷新组合框输入框回显 (设备进入列表后名称可解析)
+}
+
+/* ---------- 表单 <-> 配置 ---------- */
+function syncFromForm() {
+  cfg.name = document.getElementById('fName').value.trim();
+  cfg.scenic = document.getElementById('fScenic').value;
+  cfg.longitude = parseFloat(document.getElementById('fLng').value);
+  if (isNaN(cfg.longitude)) cfg.longitude = null;
+  cfg.latitude = parseFloat(document.getElementById('fLat').value);
+  if (isNaN(cfg.latitude)) cfg.latitude = null;
+  cfg.lane_count = parseInt(document.getElementById('fLaneCount').value, 10);
+  cfg.lane_width = parseFloat(document.getElementById('fLaneWidth').value);
+  if (isNaN(cfg.lane_width)) cfg.lane_width = null;
+  cfg.lane_type = document.getElementById('fLaneType').value;
+  cfg.direction = document.getElementById('fDirection').value.trim();
+  cfg.orientation = rotationToOrientation(cfg.rotation);   // 方向样式随旋转自动推导，不可手选
+  cfg.badge = document.getElementById('fBadge').value;
+  cfg.kakou = document.getElementById('fKakou').value.trim() || '车行卡口';
+  cfg.sidewalk_left = document.getElementById('fSwLeft').checked;
+  cfg.sidewalk_right = document.getElementById('fSwRight').checked;
+  cfg.count_line = document.getElementById('fCountLine').checked;
+  cfg.hidden = !document.getElementById('fVisible').checked;
+  // 槽位列表由槽位编辑器（renderSlotEditor/setSlot/addSlot/delSlot）直接维护 cfg.slots
+  if (!Array.isArray(cfg.slots)) cfg.slots = slotsToArray(cfg.slots);
+}
+
+function applyToForm() {
+  document.getElementById('fName').value = cfg.name || '';
+  const scenicSel = document.getElementById('fScenic');
+  ensureScenicOption(scenicSel, cfg.scenic || '大同古城');
+  scenicSel.value = cfg.scenic || '大同古城';
+  document.getElementById('fLng').value = cfg.longitude == null ? '' : cfg.longitude;
+  document.getElementById('fLat').value = cfg.latitude == null ? '' : cfg.latitude;
+  document.getElementById('fLaneCount').value = String(cfg.lane_count);
+  document.getElementById('fLaneWidth').value = cfg.lane_width == null ? '' : cfg.lane_width;
+  const ltVal = (cfg.lane_type === 'dual') ? 'dual' : 'single';
+  document.getElementById('fLaneType').value = ltVal;
+  document.getElementById('fDirection').value = cfg.direction || '';
+  document.getElementById('fOrientation').value = rotationToOrientation(cfg.rotation);
+  document.getElementById('fBadge').value = cfg.badge || '';
+  document.getElementById('fKakou').value = cfg.kakou || '车行卡口';
+  document.getElementById('fSwLeft').checked = !!cfg.sidewalk_left;
+  document.getElementById('fSwRight').checked = !!cfg.sidewalk_right;
+  document.getElementById('fCountLine').checked = cfg.count_line !== false;
+  document.getElementById('fVisible').checked = !cfg.hidden;
+  syncVisibleLabel();
+  // 槽位列表编辑器渲染（可增删）
+  renderSlotEditor();
+  document.querySelectorAll('#segRot button').forEach(b =>
+    b.classList.toggle('on', parseInt(b.dataset.v, 10) === (cfg.rotation || 0)));
+}
+
+/* ---------- 预览渲染 ---------- */
+function sidewalkName(side) {
+  // side: 'left' | 'right'; 真实方位渲染: 南北样式(竖放断面,左右便道) → 西/东侧; 东西样式(横放断面,上下便道) → 南/北侧
+  if (cfg.orientation === 'NS') return side === 'left' ? '西侧便道' : '东侧便道';
+  return side === 'left' ? '北侧便道' : '南侧便道';
+}
+
+function btd(s) {
+  /* 把字符串里的「便道」二字整体包一层放大加粗样式，其余文字不变 */
+  return String(s == null ? '' : s).replace(/便道/g, '<span class="btd">便道</span>');
+}
+
+function buildStatRow() {
+  const boxes = [];
+  // 槽位列表优先（与大屏一致：小数据卡按 card_style.slots 渲染，空列表才回退车道/便道推导）
+  const slots = Array.isArray(cfg.slots) ? cfg.slots : [];
+  if (slots.length) {
+    slots.forEach((s) => {
+      const per = s.kind === 'per';
+      boxes.push({ cls: per ? 'person' : 'vehicle', name: s.label || (per ? '便道·人流' : '车卡'),
+                   tag: per ? '便道' : '车卡',
+                   device: (s.device || '').trim(),
+                   metrics: per ? ['人次/日', '人次/h'] : ['辆/日', '辆/h'] });
+    });
+    return boxes.map(b => `
+    <div class="stat-box ${b.cls}"${b.device ? ` data-device="${escAttr(b.device)}"` : ''}>
+      <div class="stat-title"><span class="stat-dot">●</span>${btd(b.name)}${String(b.name||'').includes(b.tag)?'':`<span class="stat-tag">${btd(b.tag)}</span>`}</div>
+      ${b.metrics.map((m, mi) => `<div class="stat-metric"><span class="stat-val" data-metric="${mi === 0 ? 'day' : 'hour'}">—</span> <span class="stat-unit" data-unit="${mi === 0 ? 'day' : 'hour'}">${m}</span></div>`).join('')}
+    </div>`).join('');
+  }
+  if (cfg.sidewalk_left) {
+    boxes.push({ cls: 'person', name: sidewalkName('left') + '-人流', tag: '便道',
+                 metrics: ['人次/日', '人次/h'] });
+  }
+  // 相邻同名摄像头合并为一格, span 显示车道号区间
+  const lanes = cfg.lanes;
+  let i = 0;
+  while (i < lanes.length) {
+    const cam = (lanes[i].camera || '').trim();
+    let j = i;
+    if (cam) {
+      while (j + 1 < lanes.length && (lanes[j + 1].camera || '').trim() === cam) j++;
+      const span = i === j ? String(i + 1) : `${i + 1}-${j + 1}`;
+      boxes.push({ cls: 'vehicle', name: `${cam}-车道 ${span}`, tag: '车卡',
+                   metrics: ['辆/日', '辆/h'] });
+    } else {
+      boxes.push({ cls: 'vehicle', name: lanes[i].label, tag: '车卡',
+                   metrics: ['辆/日', '辆/h'] });
+    }
+    i = j + 1;
+  }
+  if (cfg.sidewalk_right) {
+    boxes.push({ cls: 'person', name: sidewalkName('right') + '-人流', tag: '便道',
+                 metrics: ['人次/日', '人次/h'] });
+  }
+  return boxes.map(b => `
+    <div class="stat-box ${b.cls}">
+      <div class="stat-title"><span class="stat-dot">●</span>${btd(b.name)}${String(b.name||'').includes(b.tag)?'':`<span class="stat-tag">${btd(b.tag)}</span>`}</div>
+      ${b.metrics.map((m, mi) => `<div class="stat-metric"><span class="stat-val" data-metric="${mi === 0 ? 'day' : 'hour'}">—</span> <span class="stat-unit" data-unit="${mi === 0 ? 'day' : 'hour'}">${m}</span></div>`).join('')}
+    </div>`).join('');
+}
+
+function arrowRotDeg(dir) {
+  /* 箭头基准朝下; 按「示意图旋转」(= 行车方向罗盘: 0°=北 90°=东 180°=南 270°=西) +「正/反向」算旋转角,
+     断面按真实方位渲染（与大屏数据卡一致）: 北→朝上(180) 东→朝右(270) 南→朝下(0) 西→朝左(90); 反向一律 +180 */
+  const rot = ((parseInt(cfg.rotation, 10) || 0) % 360)
+  let deg = rot === 0 ? 180 : rot === 90 ? 270 : rot === 180 ? 0 : 90
+  if (dir === 'backward') deg += 180
+  return ((deg % 360) + 360) % 360
+}
+
+/* 车道名挂在车道尾部 = 箭头的末尾（箭尖）一侧:
+   CSS rotate(deg) 作用于「基准朝下」的箭头 → 0 朝下 / 90 朝左 / 180 朝上 / 270 朝右 */
+function tailClassOf(deg) {
+  const n = ((deg % 360) + 360) % 360;
+  const head = n === 0 ? 'down' : n === 90 ? 'left' : n === 180 ? 'up' : 'right';
+  /* 箭头朝向名 → 车道名所在侧类名: down→bottom / up→top / left→left / right→right */
+  const side = { down: 'bottom', up: 'top', left: 'left', right: 'right' }[head];
+  return 'tail-' + side;   /* 类名沿用 tail-*，语义 = 车道名所在侧 = 箭尖侧 */
+}
+
+function buildRoad() {
+  /* 断面按真实方位渲染（与大屏数据卡一致）:
+     南北向(NS) → 竖放断面: 便道左右、车道竖条并排、箭头上下 → 用 ew(row) 布局;
+     东西向(EW) → 横放断面: 便道上下、车道横条堆叠、箭头左右 → 用 ns(column) 布局。
+     故布局类名与 orientation 相反。 */
+  const o = cfg.orientation.toLowerCase() === 'ew' ? 'ns' : 'ew';
+  const lanePx = cfg.lane_width ? Math.max(24, Math.min(400, Math.round(cfg.lane_width * 26))) : null;
+  /* 车道/便道统一用固定基准，使「车道宽度(米)」在南北/东西两个方向都真实生效
+     （不再因 flex:1 等比拉伸而被覆盖；卡片宽度随条数×基准变宽，见 .icard 改为 min-width） */
+  /* 车道/便道统一用固定基准，使「车道宽度(米)」在南北/东西两个方向都真实生效。
+     同时给横排(ew)显式 width、竖排(ns)显式 height，作为固有尺寸参与 max-content 计算，
+     这样路面与数据卡会随车道宽度真实变宽，且不会因 flex 收缩而塌成 0。 */
+  const laneSize = lanePx
+    ? (o === 'ew' ? `flex:0 0 ${lanePx}px; width:${lanePx}px;` : `flex:0 0 ${lanePx}px; height:${lanePx}px;`)
+    : '';
+  /* 箭头与摄像头同处 .arrow-wrap 旋转组：整体旋转到真实行驶方向，摄像头恒贴近箭头尾部 */
+  const lanesHtml = cfg.lanes.map(l => `
+    <div class="lane ${tailClassOf(arrowRotDeg(l.dir))}" style="${laneSize}">
+      <span class="arrow-wrap" style="--arrow-rot:${arrowRotDeg(l.dir)}deg">
+        <span class="arrow"></span>
+        ${(l.camera || '').trim() ? CAM_SVG : ''}
+      </span>
+      <span class="lane-label">${l.label}</span>
+    </div>`).join('');
+  const noCount = cfg.count_line ? '' : ' no-count';
+  let swL = '', swR = '';
+  if (cfg.sidewalk_left) swL = `<div class="sidewalk" style="${laneSize}"><span class="sw-label">${btd('便道')}</span></div>`;
+  if (cfg.sidewalk_right) swR = `<div class="sidewalk" style="${laneSize}"><span class="sw-label">${btd('便道')}</span></div>`;
+  return `<div class="road ${o}${noCount}">${swL}${lanesHtml}${swR}</div>`;
+}
+
+function renderPreview() {
+  const swCount = (cfg.sidewalk_left ? 1 : 0) + (cfg.sidewalk_right ? 1 : 0);
+  const swText = swCount === 2 ? '双侧便道' : swCount === 1 ? '单侧便道' : '无机非便道';
+  const dirPart = cfg.direction ? `（${cfg.direction}）` : '';
+  /* 出入口分类徽章颜色: 入口=绿 / 出口=红 / 出入口=蓝; 未知值不渲染 (规范性兜底) */
+  const BADGE_CLASS = { '入口': '', '出口': 't-exit', '出入口': 't-both' };
+  const badge = BADGE_CLASS[cfg.badge] !== undefined
+    ? `<div class="badge-main ${BADGE_CLASS[cfg.badge]}">${cfg.badge}</div>`
+    : '';
+  /* 小数据卡带：排在行车方向对立面（尾部），排列随车道方向:
+     南北向 → 水平一排（0°北/箭头向上→卡带在下方; 180°南→在上方）;
+     东西向 → 竖向一列（90°东/箭头朝右→列在左侧; 270°西→列在右侧） */
+  const rot = ((parseInt(cfg.rotation, 10) || 0) % 360);
+  const bodyMode = rot === 0 ? 'col minis-last'
+    : rot === 180 ? 'col minis-first'
+    : rot === 90 ? 'row minis-first' : 'row minis-last';
+  document.getElementById('rotBox').innerHTML = `
+    <div class="icard">
+      <div class="icard-head">
+        <div class="icard-title">${cfg.name || '路口名称'}<span class="icard-sub">${cfg.kakou} · ${LANE_TYPE_TEXT[cfg.lane_type] || cfg.lane_type || ''}${dirPart} · ${btd(swText)}</span></div>
+        <div class="badges">${badge}<div class="badge-video" title="开启绑定设备视频" onclick="onVideoClick()">视频</div></div>
+      </div>
+      <div class="icard-body ${bodyMode}">
+        <div class="stat-row">${buildStatRow()}</div>
+        <div class="road-stage" id="roadStage">${buildRoad()}</div>
+      </div>
+    </div>`;
+  /* 旋转不再对断面图做 CSS 旋转: 90°/270° 时按东西样式正置渲染(横放断面, 与参考数据卡一致),
+     0°/180° 按南北样式正置渲染(竖放断面)。标题/徽章/统计格始终不动。 */
+  /* 南北向(横排路面 .road.ew)路面为固有宽度：直接把卡片宽度锁到路面宽度(+内边距)，
+     让标题行与小数据卡带在路面宽度内换行/收缩，小车道宽度时卡片贴着路面、不再被撑宽裸空；
+     东西向路面铺满卡片宽度，无需处理。 */
+  const _box = document.getElementById('rotBox');
+  const _road = _box.querySelector('.road');
+  const _card = _box.querySelector('.icard');
+  if (_road && _card && _road.classList.contains('ew')) {
+    const roadW = Math.ceil(_road.getBoundingClientRect().width);
+    _card.style.width = (roadW + 32) + 'px'; /* 32 = 左右内边距 */
+  }
+  /* 预览渲染后, 按绑定设备填充小数据卡的实时 小时/日 统计 */
+  applyPreviewStats();
+  /* 右侧预览下方: 同步刷新「绑定设备视频」模块（关闭态不加载任何视频） */
+  renderVidList();
+  setVidBtnState();   // 预览卡 innerHTML 每次重建，重新应用「视频」按钮状态
+}
+
+/* ---------- 右侧预览下方: 绑定设备视频（默认不加载，按需开启/关闭） ---------- */
+/* 设计：
+   - 默认 _vidOn = false → 不创建 <video>、不调 /api/devices/{id}/play、完全不拉流；
+   - 只有点击预览卡右上角「视频」按钮才 openVidModule() 起播；
+   - closeVidModule() 是真正关闭：销毁 flv.js / hls.js 播放器 + 移除 <video> 元素
+     （断开拉流连接），不是 CSS 隐藏。 */
+let _vidPlayers = [];
+let _vidKey = null;   // 上次渲染的设备集合, 设备没变就不重建, 避免编辑时频繁起停流
+let _vidOn = false;   // 模块开关（默认关闭 = 不加载任何视频）
+
+const VID_OFF_HTML = '<div class="vid-empty">视频未开启 · 点击上方预览卡右上角「视频」按钮，按列表加载槽位绑定设备的实时画面与关键数据</div>';
+
+function stopVidPlayers() {
+  /* 1) 销毁播放器实例（flv.js / hls.js 随之断开拉流连接） */
+  _vidPlayers.forEach(p => { try { p.destroy(); } catch (e) {} });
+  _vidPlayers = [];
+  /* 2) 兜底停掉 <video> 元素本身（原生 HLS / 直接 src 的情况） */
+  document.querySelectorAll('#vidGrid video').forEach(v => {
+    try { v.pause(); } catch (e) {}
+    try { v.removeAttribute('src'); v.load(); } catch (e) {}
+  });
+}
+
+/* 同步「视频」徽章按钮与模块容器的显隐 */
+function setVidBtnState() {
+  const btn = document.querySelector('#rotBox .badge-video');
+  if (btn) {
+    btn.classList.toggle('on', _vidOn);
+    btn.title = _vidOn ? '关闭绑定设备视频（同时停止拉流）' : '开启绑定设备视频';
+    btn.textContent = _vidOn ? '视频 ✓' : '视频';
+  }
+  const mod = document.getElementById('vidModule');
+  if (mod) mod.style.display = _vidOn ? '' : 'none';   // 关闭态整块不出现
+}
+
+function openVidModule() {
+  if (_vidOn) return;
+  _vidOn = true;
+  _vidKey = null;          // 强制重建并起播
+  setVidBtnState();
+  renderVidList();
+  const box = document.getElementById('vidGrid');
+  if (box && box.scrollIntoView) box.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function closeVidModule() {
+  const wasOn = _vidOn;
+  _vidOn = false;
+  _vidKey = null;               // 下次开启必须重建
+  stopVidPlayers();             // 销毁播放器 + 停掉 video（真正断开拉流）
+  const grid = document.getElementById('vidGrid');
+  if (grid) grid.innerHTML = VID_OFF_HTML;   // 连 <video> 元素一并移除
+  setVidBtnState();
+  if (wasOn) showToast('已关闭绑定设备视频（已停止拉流）', 'info');
+}
+
+function renderVidList() {
+  const grid = document.getElementById('vidGrid');
+  if (!grid) return;
+  /* 关闭态：不创建任何 <video>、不发起拉流请求 */
+  if (!_vidOn) {
+    if (_vidKey !== null) { _vidKey = null; stopVidPlayers(); }
+    return;
+  }
+  /* 从当前编辑的槽位收集绑定设备(去重, 保持槽位顺序) */
+  const devs = [];
+  (cfg.slots || []).forEach(s => {
+    const d = (s.device || '').trim();
+    if (d && !devs.includes(d)) devs.push(d);
+  });
+  const key = devs.join('|');
+  if (key === _vidKey) return;   // 设备集合没变 → 保留现有播放器, 不动
+  _vidKey = key;
+  stopVidPlayers();
+  if (!devs.length) {
+    grid.innerHTML = `<div class="vid-empty">当前路口槽位未绑定设备，无法显示视频</div>`;
+    return;
+  }
+  /* 列表行: 左 = 实时画面小窗; 右 = 状态徽章 + 类型 + 关键统计(由 updateVidStats 填充) */
+  grid.innerHTML = devs.map((d, i) => `
+    <div class="vid-row" data-dev="${escAttr(d)}">
+      <div class="vid-thumb2">
+        <video id="vid-th-${i}" muted autoplay playsinline></video>
+        <div class="vid-msg" id="vid-msg-${i}" style="display:none"></div>
+      </div>
+      <div class="vid-info">
+        <div class="vid-title">
+          <span class="vid-dev" title="${escAttr(d)}">${escHtml(d)}</span>
+          <span class="vid-badge" data-f="status">—</span>
+          <span class="vid-kind" data-f="kind" style="display:none"></span>
+        </div>
+        <div class="vid-metrics" data-f="metrics"><span class="vid-wait">统计加载中…</span></div>
+      </div>
+    </div>`).join('');
+  /* 逐路起播(异步串行, 与播放预览模态一致); 失败时画面格内提示 */
+  (async () => {
+    for (let i = 0; i < devs.length; i++) {
+      const v = document.getElementById('vid-th-' + i);
+      const msg = document.getElementById('vid-msg-' + i);
+      if (!v) continue;
+      try {
+        await playStreamOnVideo(v, devs[i], _vidPlayers);
+        if (msg) msg.remove();
+      } catch (e) {
+        v.style.display = 'none';
+        if (msg) { msg.style.display = ''; msg.textContent = '播放失败: ' + e.message; }
+      }
+    }
+  })();
+  updateVidStats();
+}
+
+/* 列表行关键数据: 状态徽章 + 车卡/便道类型 + 今日/小时/当前/进出 指标。
+   指标类型(车/人)按「设备实际产生的数据」判定(同 applyPreviewStats 口径),
+   避免槽位 kind 错配时车卡被算成人流假 0。随预览统计每 3s 自动刷新。 */
+async function updateVidStats() {
+  if (!_vidOn) return;   // 视频模块关闭 → 不请求统计、不刷新列表
+  const rowEls = document.querySelectorAll('#vidGrid .vid-row[data-dev]');
+  if (!rowEls.length) return;
+  let map;
+  try { map = await getDeviceStatsMap(); } catch (e) { return; }
+  rowEls.forEach(row => {
+    const dev = row.getAttribute('data-dev');
+    const r = map[dev];
+    const badge = row.querySelector('[data-f="status"]');
+    const kindEl = row.querySelector('[data-f="kind"]');
+    const mt = row.querySelector('[data-f="metrics"]');
+    if (!badge || !mt) return;
+    if (!r) {   /* 统计表里没有该设备 */
+      badge.textContent = '无数据'; badge.className = 'vid-badge';
+      if (kindEl) kindEl.style.display = 'none';
+      mt.innerHTML = ['今日合计', '小时合计', '当前在场', '今日进/出']
+        .map(k => `<div class="vid-cell"><span>${k}</span><b>—</b></div>`).join('');
+      return;
+    }
+    const on = String(r.status || '').toLowerCase().includes('online');
+    badge.textContent = on ? '在线' : '离线';
+    badge.className = 'vid-badge ' + (on ? 'on' : 'off');
+    const hasVeh = (r.current_vehicles || 0) > 0
+      || ((r.today_vehicle_in || 0) + (r.today_vehicle_out || 0)
+         + (r.hour_vehicle_in || 0) + (r.hour_vehicle_out || 0)) > 0;
+    const per = !hasVeh;   /* 设备有车流→车卡; 无任何车流→便道·人流 */
+    if (kindEl) {
+      kindEl.style.display = '';
+      kindEl.textContent = per ? '便道·人流' : '车卡';
+      kindEl.className = 'vid-kind ' + (per ? 'per' : 'veh');
+    }
+    const dayIn = per ? (r.today_person_in || 0) : (r.today_vehicle_in || 0);
+    const dayOut = per ? (r.today_person_out || 0) : (r.today_vehicle_out || 0);
+    const hour = per
+      ? (r.hour_person_in || 0) + (r.hour_person_out || 0)
+      : (r.hour_vehicle_in || 0) + (r.hour_vehicle_out || 0);
+    const cur = per ? (r.current_persons || 0) : (r.current_vehicles || 0);
+    const unit = per ? '人' : '辆';
+    mt.innerHTML = `
+      <div class="vid-cell"><span>今日合计(${unit})</span><b>${_fmtNum(dayIn + dayOut)}</b></div>
+      <div class="vid-cell"><span>小时合计(${unit})</span><b>${_fmtNum(hour)}</b></div>
+      <div class="vid-cell"><span>当前在场(${unit})</span><b>${_fmtNum(cur)}</b></div>
+      <div class="vid-cell"><span>今日进/出</span><b>${_fmtNum(dayIn)} / ${_fmtNum(dayOut)}</b></div>`;
+  });
+}
+
+/* ---------- 右侧预览: 小数据卡按绑定设备填充 实时 小时/日 统计 ---------- */
+let _previewStats = null;          // name -> 设备统计行 缓存
+let _previewStatsTs = 0;
+let _previewTickTimer = null;
+
+function _fmtNum(n) { return (Number(n) || 0).toLocaleString('zh-CN'); }
+
+async function getDeviceStatsMap() {
+  /* 拉 /api/stats/devices 一次, 按设备名索引; 2.5s 内复用缓存, 避免频繁编辑时反复请求 */
+  const now = Date.now();
+  if (_previewStats && now - _previewStatsTs < 2500) return _previewStats;
+  const rows = await api('/api/stats/devices');
+  const map = {};
+  (rows || []).forEach(r => { if (r && r.name) map[r.name] = r; });
+  _previewStats = map; _previewStatsTs = now;
+  return map;
+}
+
+async function applyPreviewStats() {
+  /* 遍历预览中所有 data-device 的小数据卡, 用实时统计填充「日/小时」数值。
+     指标类型(车/人)按「绑定设备实际产生的数据」决定, 而非槽位静态 kind:
+     系统当前仅车流有数据, 若按 kind=per 强行展示人流, 车卡摄像头会被算成 0。 */
+  const boxes = document.querySelectorAll('#rotBox .stat-box[data-device]');
+  if (!boxes.length) return;
+  let map;
+  try { map = await getDeviceStatsMap(); } catch (e) { return; }
+  boxes.forEach(box => {
+    const dev = box.getAttribute('data-device');
+    const row = map[dev];
+    const dayEl = box.querySelector('[data-metric="day"]');
+    const hourEl = box.querySelector('[data-metric="hour"]');
+    const unitEls = box.querySelectorAll('[data-unit]');
+    if (!row) {
+      if (dayEl) dayEl.textContent = '无';
+      if (hourEl) hourEl.textContent = '无';
+      return;
+    }
+    const hasVeh = (row.current_vehicles || 0) > 0
+      || ((row.today_vehicle_in || 0) + (row.today_vehicle_out || 0)
+         + (row.hour_vehicle_in || 0) + (row.hour_vehicle_out || 0)) > 0;
+    const per = !hasVeh;   /* 设备有车流→按车卡展示; 无任何车流→按人流展示 */
+    const day = per
+      ? (row.today_person_in || 0) + (row.today_person_out || 0)
+      : (row.today_vehicle_in || 0) + (row.today_vehicle_out || 0);
+    const hour = per
+      ? (row.hour_person_in || 0) + (row.hour_person_out || 0)
+      : (row.hour_vehicle_in || 0) + (row.hour_vehicle_out || 0);
+    if (dayEl) dayEl.textContent = _fmtNum(day);
+    if (hourEl) hourEl.textContent = _fmtNum(hour);
+    unitEls.forEach(u => {
+      const isDay = u.getAttribute('data-unit') === 'day';
+      u.textContent = per ? (isDay ? '人次/日' : '人次/h') : (isDay ? '辆/日' : '辆/h');
+    });
+    /* 边框配色严格按槽位类型(便道=蓝/车卡=绿), 由 buildStatRow 渲染, 此处不覆写:
+       此前按设备实际数据 toggle person/vehicle, 会导致绑了车卡设备的便道槽位蓝边被刷成绿。 */
+  });
+}
+
+function startPreviewStats() {
+  if (_previewTickTimer) return;
+  _previewTickTimer = setInterval(() => { applyPreviewStats(); updateVidStats(); }, 3000);
+  applyPreviewStats();
+  updateVidStats();
+}
+
+/* ---------- 车道编辑器 ---------- */
+function renderLaneEditor() {
+  const box = document.getElementById('laneEditor');
+  if (!cfg.lanes.length) { box.innerHTML = '<div class="empty">无车道</div>'; return; }
+  box.innerHTML = cfg.lanes.map((l, i) => `
+    <div class="lane-edit-row">
+      <span class="idx">#${i + 1}</span>
+      <button class="mv ghost" title="前移" onclick="moveLane(${i},-1)" ${i === 0 ? 'disabled' : ''}>◀</button>
+      <button class="mv ghost" title="后移" onclick="moveLane(${i},1)" ${i === cfg.lanes.length - 1 ? 'disabled' : ''}>▶</button>
+      <input value="${l.label}" placeholder="车道标签" onchange="setLane(${i},'label',this.value)">
+      <select onchange="setLane(${i},'dir',this.value)">
+        <option value="forward" ${l.dir !== 'backward' ? 'selected' : ''}>正向</option>
+        <option value="backward" ${l.dir === 'backward' ? 'selected' : ''}>反向</option>
+      </select>
+      <input class="cam-in" value="${l.camera || ''}" placeholder="摄像头(可空)" onchange="setLane(${i},'camera',this.value)">
+    </div>`).join('');
+}
+
+function moveLane(i, delta) {
+  const j = i + delta;
+  if (j < 0 || j >= cfg.lanes.length) return;
+  [cfg.lanes[i], cfg.lanes[j]] = [cfg.lanes[j], cfg.lanes[i]];
+  renderLaneEditor(); renderPreview();
+}
+
+function setLane(i, key, val) {
+  cfg.lanes[i][key] = val.trim();
+  renderPreview();
+}
+
+/* ---------- 联动 ---------- */
+function onLaneCountChange() {
+  syncFromForm();
+  const n = cfg.lane_count;
+  const old = cfg.lanes || [];
+  const next = [];
+  for (let i = 0; i < n; i++) next.push(old[i] || { label: '车道' + CN_NUM[i + 1], dir: defaultDir(i, n, cfg.lane_type), camera: defaultCamGroup(i, n) });
+  cfg.lanes = next;
+  renderLaneEditor(); renderPreview();
+}
+
+function onLaneTypeChange() {
+  syncFromForm();
+  /* 切换车道类型时按新类型重置默认行驶方向: 双向=前一半正向+后一半反向, 单向=全部正向 */
+  const n = cfg.lanes.length;
+  cfg.lanes.forEach((l, i) => { l.dir = defaultDir(i, n, cfg.lane_type); });
+  renderLaneEditor(); renderPreview();
+}
+
+function onRotation(segBtn) {
+  cfg.rotation = parseInt(segBtn.dataset.v, 10);
+  cfg.orientation = rotationToOrientation(cfg.rotation);   // 旋转联动方向样式
+  document.getElementById('fOrientation').value = cfg.orientation;
+  document.querySelectorAll('#segRot button').forEach(b => b.classList.toggle('on', b === segBtn));
+  renderPreview();   // 选择结束后右侧预览卡即时刷新
+}
+
+function onLaneWidthInput() {
+  cfg.lane_width = parseFloat(document.getElementById('fLaneWidth').value);
+  if (isNaN(cfg.lane_width)) cfg.lane_width = null;   // 清空 = 恢复等分宽度
+  renderPreview();
+}
+
+/* ---------- 路口信息字段实时联动预览 ---------- */
+function onInfoChange() {
+  syncFromForm();
+  renderPreview();   // 名称/景区/经纬度/方向/徽章/卡口/便道/计数线 等变化即时反映到预览
+}
+
+/* 视频按钮点击：开关「绑定设备视频」模块（开启才拉流；关闭即销毁播放器并停止拉流） */
+function onVideoClick() {
+  if (_vidOn) closeVidModule(); else openVidModule();
+}
+
+/* ---------- 大屏显示 开关标签同步 ---------- */
+function syncVisibleLabel() {
+  const el = document.getElementById('fVisible');
+  const t = document.getElementById('fVisibleText');
+  if (!el || !t) return;
+  const show = el.checked;
+  t.textContent = show ? '在大屏前端显示该数据卡（已开启）' : '在大屏隐藏此数据卡（已关闭）';
+  t.className = 'vis-label ' + (show ? 'on' : 'off');
+}
+function onVisibleChange() {
+  onInfoChange();        // 维持原逻辑: cfg.hidden = !checked
+  syncVisibleLabel();    // 同步开关下方文字与颜色
+}
+
+/* ---------- CRUD ---------- */
+function cardStylePayload() {
+  return {
+    kakou: cfg.kakou, badge: cfg.badge || '',
+    sidewalk_left: cfg.sidewalk_left, sidewalk_right: cfg.sidewalk_right,
+    count_line: cfg.count_line,
+    slots: Array.isArray(cfg.slots) ? cfg.slots : [],
+    lanes: cfg.lanes.map(l => ({ label: l.label, dir: l.dir, camera: (l.camera || '').trim() }))
+  };
+}
+
+async function save() {
+  syncFromForm();
+  if (!cfg.name) { setStatus('请填写路口名称', 'error'); return; }
+  const body = {
+    name: cfg.name, lane_count: cfg.lane_count, lane_width: cfg.lane_width,
+    lane_type: cfg.lane_type,
+    direction: cfg.direction || null, orientation: cfg.orientation,
+    rotation: cfg.rotation,
+    badge: cfg.badge || null,
+    scenic: cfg.scenic || null,
+    longitude: cfg.longitude, latitude: cfg.latitude,
+    hidden: !!cfg.hidden,
+    card_style: cardStylePayload()
+  };
+  setStatus(editingId === null ? '正在保存...' : '正在更新...', 'pending');
+  try {
+    if (editingId === null) {
+      const res = await api('/api/intersections', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      editingId = res.id;
+      setStatus(`已保存路口「${cfg.name}」(id=${res.id})`, 'success');
+      showToast(`已保存路口「${cfg.name}」`, 'success');
+    } else {
+      await api(`/api/intersections/${editingId}`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      setStatus(`已更新路口「${cfg.name}」(id=${editingId})`, 'success');
+      showToast(`已更新路口「${cfg.name}」`, 'success');
+    }
+    await loadList();
+  } catch (e) {
+    setStatus('保存失败: ' + e.message, 'error');
+    showToast('保存失败: ' + e.message, 'error');
+  }
+}
+
+async function loadList() {
+  const btn = document.getElementById('btnRefresh');
+  const box = document.getElementById('savedList');
+  /* 进入 loading 态：按钮置灰 + 列表区占位，避免慢响应时「看着像卡死」 */
+  if (btn) { btn.disabled = true; btn.textContent = '刷新中…'; }
+  box.innerHTML = `<div class="loading">⏳ 正在加载路口列表…</div>`;
+  try {
+    const all = await api('/api/intersections') || [];
+    /* 全局景区查询条件: 只显示所选景区的路口 ('' = 全部) */
+    const list = globalScenicFilter ? all.filter(r => (r.scenic || '') === globalScenicFilter) : all;
+    const scope = globalScenicFilter ? ` · 景区：${globalScenicFilter}` : '';
+    document.getElementById('listCount').textContent =
+      all.length ? `共 ${list.length} / ${all.length} 个路口${scope}` : '';
+    if (!list.length) {
+      box.innerHTML = `<div class="empty">${globalScenicFilter
+        ? `景区「${globalScenicFilter}」下暂无路口，可在右上角切换为「全部景区」`
+        : '暂无路口，先点「＋ 新增路口」配置并保存'}</div>`;
+      return;
+    }
+    box.innerHTML = `<table>
+      <tr><th>ID</th><th>景区</th><th>路口名称</th><th>经纬度</th><th>车道数</th><th>车道宽度</th><th>车道类型</th><th>方向样式</th><th>旋转</th><th>大屏显示</th><th>操作</th></tr>
+      ${list.map(r => `<tr>
+        <td>${r.id}</td>
+        <td>${r.scenic || '—'}</td>
+        <td>${r.name}</td>
+        <td>${r.longitude != null ? r.longitude + ', ' + r.latitude : '—'}</td>
+        <td>${r.lane_count}</td>
+        <td>${r.lane_width != null ? r.lane_width + ' m' : '—'}</td>
+        <td>${LANE_TYPE_TEXT[r.lane_type] || r.lane_type}</td>
+        <td>${r.orientation === 'NS' ? '南北方向' : '东西方向'}</td>
+        <td>${r.rotation}°</td>
+        <td><label class="switch" title="点击切换 大屏显示/隐藏"><input type="checkbox" id="vis-${r.id}" ${r.hidden ? '' : 'checked'} onchange="toggleHidden(${r.id}, ${r.hidden ? 1 : 0}, '${r.name}')"><span class="slider"></span></label></td>
+        <td>
+          <div class="tb-actions">
+            <button class="icon-btn" title="播放预览（已绑定设备的车道卡实时画面）" aria-label="播放预览" onclick="previewGate(${r.id}, '${r.name}')">${ICON_PLAY}</button>
+            <button class="icon-btn" title="载入编辑" aria-label="载入编辑" onclick="loadRecord(${r.id})">${ICON_EDIT}</button>
+            <button class="icon-btn danger" title="删除" aria-label="删除" onclick="delRecord(${r.id}, '${r.name}')">${ICON_DEL}</button>
+          </div>
+        </td>
+      </tr>`).join('')}</table>`;
+    return list;
+  } catch (e) {
+    box.innerHTML = `<div class="empty">加载失败: ${e.message}</div>`;
+    showToast('路口列表加载失败: ' + e.message, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '刷新列表'; }
+  }
+}
+
+async function loadRecord(id) {
+  try {
+    const r = await api(`/api/intersections/${id}`);
+    editingId = r.id;
+    const rot = r.rotation || 0;
+    cfg = {
+      name: r.name, kakou: (r.card_style && r.card_style.kakou) || '车行卡口',
+      direction: r.direction || '', lane_count: r.lane_count,
+      lane_width: r.lane_width == null ? null : r.lane_width,
+      lane_type: r.lane_type,
+      orientation: rotationToOrientation(rot), rotation: rot,
+      scenic: r.scenic || '大同古城',
+      longitude: r.longitude == null ? null : r.longitude,
+      latitude: r.latitude == null ? null : r.latitude,
+      hidden: !!r.hidden,
+      badge: r.badge || (r.card_style && r.card_style.badge) || '',
+      sidewalk_left: !r.card_style || r.card_style.sidewalk_left !== false,
+      sidewalk_right: !r.card_style || r.card_style.sidewalk_right !== false,
+      count_line: !r.card_style || r.card_style.count_line !== false,
+      slots: slotsToArray(r.card_style && r.card_style.slots),
+      lanes: (r.card_style && Array.isArray(r.card_style.lanes) && r.card_style.lanes.length
+        ? r.card_style.lanes : defaultLanes(r.lane_count, r.lane_type))
+    };
+    applyToForm(); renderLaneEditor(); renderPreview();
+    setStatus(`已载入路口「${r.name}」(id=${r.id})，修改后点「保存路口」更新`, 'info');
+  } catch (e) {
+    showToast('载入失败: ' + e.message, 'error');
+  }
+}
+
+/* 表格里快捷切换「大屏显示」: 仅更新 hidden 字段, 不动其它配置 */
+async function toggleHidden(id, curHidden, name) {
+  try {
+    await api(`/api/intersections/${id}`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ hidden: !curHidden })
+    });
+    setStatus(`路口「${name}」已${curHidden ? '在大屏显示' : '在大屏隐藏'}`, 'success');
+    showToast(`路口「${name}」已${curHidden ? '在大屏显示' : '在大屏隐藏'}`, 'success');
+    await loadList();
+  } catch (e) {
+    setStatus('切换失败: ' + e.message, 'error');
+    showToast('切换失败: ' + e.message, 'error');
+  }
+}
+
+async function delRecord(id, name) {
+  if (!confirm(`确定删除路口「${name}」(id=${id})？`)) return;
+  try {
+    await api(`/api/intersections/${id}`, { method: 'DELETE' });
+    if (editingId === id) editingId = null;
+    setStatus(`已删除路口「${name}」`, 'success');
+    showToast(`已删除路口「${name}」`, 'success');
+    await loadList();
+  } catch (e) { setStatus('删除失败: ' + e.message, 'error'); }
+}
+
+/* ---------- 播放预览: 已绑定设备的车道显示卡 (实时画面 + 小数据卡预览) ---------- */
+let _previewPlayers = [];
+let _previewStatsTimer = null;
+
+function escHtml(s) {
+  return String(s == null ? '' : s).replace(/[&<>"]/g,
+    c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+}
+
+function loadScript(src) {
+  return new Promise((ok, fail) => {
+    if (document.querySelector(`script[src="${src}"]`)) return ok();
+    const s = document.createElement('script');
+    s.src = src; s.onload = ok;
+    s.onerror = () => fail(new Error('脚本加载失败(内网?): ' + src));
+    document.head.appendChild(s);
+  });
+}
+
+/* 在指定 <video> 上起播某设备流 (按协议动态加载 flv.js / hls.js)
+   playersArr: 播放器实例收集数组, 便于统一销毁; 缺省归入模态框播放器的 _previewPlayers */
+async function playStreamOnVideo(videoEl, deviceId, playersArr) {
+  const players = playersArr || _previewPlayers;
+  const res = await api(`/api/devices/${encodeURIComponent(deviceId)}/play`);
+  const { play_url, protocol } = res;   // 本页 api() 直接返回解析后的响应体
+  if (protocol === 'flv') {
+    await loadScript('/static/vendor/flv.min.js');
+    if (!window.flvjs) throw new Error('flv.js 未加载');
+    const player = flvjs.createPlayer({ type: 'flv', url: play_url, isLive: true });
+    player.attachMediaElement(videoEl); player.load();
+    players.push(player);
+    await videoEl.play().catch(() => {});
+  } else {
+    await loadScript('/static/vendor/hls.min.js');
+    if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
+      videoEl.src = play_url;            // Safari 原生 HLS
+      await videoEl.play().catch(() => {});
+    } else if (window.Hls && Hls.isSupported()) {
+      const player = new Hls();
+      player.loadSource(play_url); player.attachMedia(videoEl);
+      players.push(player);
+      await videoEl.play().catch(() => {});
+    } else {
+      throw new Error('浏览器不支持 HLS 播放');
+    }
+  }
+}
+
+/* 小数据卡统计渲染 (当前在场 / 今日累计 / 本小时 / 拥挤 / 设备状态) */
+function renderGateStats(row) {
+  if (!row || (!row.device_id && !row.name)) {
+    return `<div class="gate-stat"><div class="gs-t">状态</div><div class="gs-v warn">无数据</div></div>`;
+  }
+  const curV = row.current_vehicles ?? 0;
+  const curP = row.current_persons ?? 0;
+  const tV = (row.today_vehicle_in || 0) + (row.today_vehicle_out || 0);
+  const tP = (row.today_person_in || 0) + (row.today_person_out || 0);
+  const hV = (row.hour_vehicle_in || 0) + (row.hour_vehicle_out || 0);
+  const hP = (row.hour_person_in || 0) + (row.hour_person_out || 0);
+  const congested = !!row.congested;
+  const statusTxt = row.status === 'abnormal' ? '异常' : (row.status || '—');
+  return `
+    <div class="gate-stat veh"><div class="gs-t">当前在场车辆</div><div class="gs-v">${curV}</div></div>
+    <div class="gate-stat per"><div class="gs-t">当前在场人流</div><div class="gs-v">${curP}</div></div>
+    <div class="gate-stat"><div class="gs-t">今日车流(进+出)</div><div class="gs-v">${tV}</div></div>
+    <div class="gate-stat"><div class="gs-t">今日人流(进+出)</div><div class="gs-v">${tP}</div></div>
+    <div class="gate-stat"><div class="gs-t">本小时车流</div><div class="gs-v">${hV}</div></div>
+    <div class="gate-stat"><div class="gs-t">本小时人流</div><div class="gs-v">${hP}</div></div>
+    <div class="gate-stat ${congested ? 'warn' : ''}"><div class="gs-t">拥挤状态</div><div class="gs-v">${congested ? '拥挤' : '正常'}</div></div>
+    <div class="gate-stat"><div class="gs-t">设备状态</div><div class="gs-v">${statusTxt}</div></div>
+  `;
+}
+
+async function previewGate(id, name) {
+  const modal = document.getElementById('previewModal');
+  const body = document.getElementById('previewBody');
+  document.getElementById('previewTitle').textContent = name || '路口';
+  body.innerHTML = `<div class="modal-loading">⏳ 正在载入路口配置与设备…</div>`;
+  modal.classList.add('show');
+  // 先停掉上一轮可能残留的播放器/定时器
+  if (_previewStatsTimer) { clearInterval(_previewStatsTimer); _previewStatsTimer = null; }
+  _previewPlayers.forEach(p => { try { p.destroy(); } catch (e) {} });
+  _previewPlayers = [];
+  try {
+    const r = await api(`/api/intersections/${id}`);
+    const slots = slotsToArray(r.card_style && r.card_style.slots);
+    const bound = slots.filter(s => (s.device || '').trim());
+    if (!bound.length) {
+      body.innerHTML = `<div class="modal-empty">该路口所有槽位都未绑定设备，无法预览。<br>请先在「路口信息」的槽位编辑器中为车道绑定设备。</div>`;
+      showToast('该路口槽位未绑定设备，无法预览', 'error');
+      return;
+    }
+    const [devs, stats] = await Promise.all([
+      api('/api/devices').catch(() => []),
+      api('/api/stats/devices').catch(() => [])
+    ]);
+    const devList = Array.isArray(devs) ? devs : [];
+    const statList = Array.isArray(stats) ? stats : [];
+    const statByName = {};
+    statList.forEach(s => { if (s.name) statByName[s.name] = s; if (s.device_id) statByName[s.device_id] = s; });
+
+    // 每个槽位渲染一张车道显示卡: 已绑定设备 → 视频 + 统计; 未绑定 → 占位
+    body.innerHTML = `<div class="gate-grid">` + slots.map((s, i) => {
+      const dev = (s.device || '').trim();
+      if (!dev) {
+        return `<div class="gate-card"><div class="gate-card-head"><span class="gname">${escHtml(s.label || ('槽位' + (i + 1)))}</span><span class="gdev">未绑定设备</span></div><div class="no-dev">该槽位未绑定设备</div></div>`;
+      }
+      const d = devList.find(x => x.name === dev) || devList.find(x => x.id === dev);
+      const devId = d ? (d.id || d.name) : dev;
+      const row = statByName[dev] || statByName[devId] || {};
+      return `<div class="gate-card" data-dev="${escAttr(dev)}">
+        <div class="gate-card-head"><span class="gname">${escHtml(s.label || ('槽位' + (i + 1)))}</span><span class="gdev">${escHtml(dev)}</span></div>
+        <video id="pv-video-${i}" muted autoplay playsinline style="width:100%;background:#000;aspect-ratio:16/9;display:block;object-fit:contain"></video>
+        <div class="gate-stats">${renderGateStats(row)}</div>
+      </div>`;
+    }).join('') + `</div>`;
+
+    // 逐路起播（仅已绑定设备的槽位）
+    for (let i = 0; i < slots.length; i++) {
+      const dev = (slots[i].device || '').trim();
+      if (!dev) continue;
+      const v = document.getElementById('pv-video-' + i);
+      if (!v) continue;
+      const d = devList.find(x => x.name === dev) || devList.find(x => x.id === dev);
+      const devId = d ? (d.id || d.name) : dev;
+      try {
+        await playStreamOnVideo(v, devId);
+      } catch (e) {
+        const ph = document.createElement('div');
+        ph.className = 'no-stream';
+        ph.textContent = '播放失败: ' + e.message;
+        v.replaceWith(ph);
+      }
+    }
+    // 定时刷新小数据卡统计（每 3 秒）
+    _previewStatsTimer = setInterval(async () => {
+      try {
+        const fresh = await api('/api/stats/devices');
+        const arr = Array.isArray(fresh) ? fresh : [];
+        const m = {};
+        arr.forEach(s => { if (s.name) m[s.name] = s; if (s.device_id) m[s.device_id] = s; });
+        document.querySelectorAll('.gate-card[data-dev]').forEach(card => {
+          const dv = card.getAttribute('data-dev');
+          const row = m[dv];
+          const box = card.querySelector('.gate-stats');
+          if (row && box) box.innerHTML = renderGateStats(row);
+        });
+      } catch (e) { /* 静默刷新失败 */ }
+    }, 3000);
+  } catch (e) {
+    body.innerHTML = `<div class="modal-empty">载入失败: ${escHtml(e.message)}</div>`;
+    showToast('预览载入失败: ' + e.message, 'error');
+  }
+}
+
+function closePreview() {
+  if (_previewStatsTimer) { clearInterval(_previewStatsTimer); _previewStatsTimer = null; }
+  _previewPlayers.forEach(p => { try { p.destroy(); } catch (e) {} });
+  _previewPlayers = [];
+  const body = document.getElementById('previewBody');
+  if (body) body.innerHTML = '';
+  const modal = document.getElementById('previewModal');
+  if (modal) modal.classList.remove('show');
+}
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closePreview(); });
+
+function resetForm() {
+  editingId = null;
+  cfg = blankCfg();
+  applyToForm(); renderLaneEditor(); renderPreview();
+  setStatus('已重置为空白配置 (新增模式)', 'info');
+}
+
+/* ---------- 初始化 ---------- */
+cfg = blankCfg();
+applyToForm();
+renderLaneEditor();
+renderPreview();
+startPreviewStats();
+loadSlotDevices();
+const _fScenic = document.getElementById('fScenic');
+if (_fScenic) _fScenic.addEventListener('change', () => loadSlotDevices());
+/* 默认载入列表第一个路口进入「编辑(更新)」模式; 列表为空则保持空白「新增」模式。
+   点「＋ 新增路口」(resetForm) 随时回到空白新增态。 */
+(async () => {
+  try {
+    const list = await loadList();
+    if (list && list.length) await loadRecord(list[0].id);
+  } catch (e) { /* 列表/首条载入失败 → 保持新增态, 静默 */ }
+})();
+</script>
+</body>
+</html>

@@ -14,7 +14,7 @@
 
     <!-- 全局 Toast 与加载遮罩 -->
     <ToastHost />
-    <LoadingOverlay :show="loading" text="智慧交管平台初始化中…" />
+    <LoadingOverlay :show="loading" text="美丽大同文旅交通预警平台初始化中…" />
 
     <!-- 卡片双击放大遮罩（全局单例） -->
     <CardZoomModal />

@@ -1,7 +1,9 @@
 <template>
   <div class="chart-card">
     <div class="chart-toolbar">
-      <span class="chart-title">📅 按天人数/车流统计</span>
+      <span class="chart-title">📅 按天人数/车流统计
+        <em class="scope-tag" v-if="scenic.state.scenic">{{ scenic.state.scenic }}</em>
+      </span>
       <div class="chart-filters">
         <button class="tool-btn mini" :class="{ active: days === 7 }" @click="setDays(7)">近7天</button>
         <button class="tool-btn mini" :class="{ active: days === 14 }" @click="setDays(14)">近14天</button>
@@ -30,15 +32,17 @@
  * 聚合成每日总量: 车辆进/出、人员进/出, X 轴为日期, 双 Y 轴（车辆/人员）。
  * 错误处理: 422 时间非法 / 503 MySQL 未启用 / 网络超时, 均展示并可重试。
  */
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useEcharts, makeTooltip, makeGrid, makeLegend, makeAxis, CHART_THEME } from '../composables/useEcharts.js'
 import { getHourlyHistory } from '../api/endpoints.js'
 import { useToast } from '../composables/useToast.js'
+import { useScenic } from '../composables/useScenic.js'
 
 // 注意：加载态不使用 useEcharts 的 showLoading/hideLoading（其依赖 ECharts 实例，
 // 实例未就绪时空操作，会造成"一直加载中"假象），统一由 .chart-loading 文案承载。
 const { chartRef, setOption, exportImage } = useEcharts()
 const { push } = useToast()
+const scenic = useScenic()
 
 const days = ref(14)
 const loading = ref(false)
@@ -55,7 +59,6 @@ const summary = computed(() => {
   })
   return `近 ${daysCount} 天合计 · 车流 进/出 ${vin}/${vout} · 人流 进/出 ${pin}/${pout}`
 })
-
 function fmtDate(d) {
   const p = (n) => (n < 10 ? '0' + n : '' + n)
   return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate())
@@ -138,18 +141,20 @@ function render() {
   })
 }
 
-/** 查询最近 N 天的逐小时记录（全局合计）并聚合渲染 */
+/** 查询最近 N 天的逐小时记录（全局合计 / 指定景区）并聚合渲染 */
 async function query() {
   loading.value = true
   error.value = ''
   try {
     const end = fmtDate(new Date())
     const start = fmtDate(new Date(Date.now() - (days.value - 1) * 864e5))
-    const res = await withTimeout(getHourlyHistory(null, start, end), 8000)
+    const res = await withTimeout(getHourlyHistory(null, start, end, scenic.state.scenic), 8000)
     records.value = (res && res.records) || []
     render()
     if (!records.value.length) {
-      error.value = '该时段暂无归档数据（可能 MySQL 未启用或范围内无记录）'
+      error.value = scenic.state.scenic
+        ? `景区「${scenic.state.scenic}」该时段暂无归档数据`
+        : '该时段暂无归档数据（可能 MySQL 未启用或范围内无记录）'
     }
   } catch (e) {
     const map = { 422: '时间参数格式非法', 503: 'MySQL 长期归档未启用', 404: '设备不存在' }
@@ -161,6 +166,12 @@ async function query() {
     loading.value = false
   }
 }
+
+// 顶部切换景区 → 重新拉取该景区的按天统计
+watch(() => scenic.state.scenic, () => {
+  if (records.value.length) records.value = []
+  query()
+})
 
 function exportImg() {
   const url = exportImage()
@@ -185,6 +196,18 @@ onMounted(() => {
 }
 .chart-card :deep(.chart-box) {
   min-height: 160px;
+}
+.scope-tag {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border: 1px solid rgba(0, 225, 255, .45);
+  border-radius: 4px;
+  background: rgba(0, 225, 255, .12);
+  color: #7fd6ff;
+  font-size: 10px;
+  font-style: normal;
+  vertical-align: middle;
 }
 .hh-error {
   display: flex;

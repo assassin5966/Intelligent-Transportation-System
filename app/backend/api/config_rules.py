@@ -18,7 +18,22 @@ router = APIRouter(prefix="/api/config", tags=["config"])
 
 # ---- 参数元数据 (与 configs/business_rules.yaml 注释对齐) ----
 # default: 页面展示的"出厂默认值", 与 yaml 初始值一致; 修改后可通过"恢复默认"一键还原.
+# 分组按 dict 顺序渲染到页面; 检测层置顶 (识别准确性的第一环, 在越线计数之前).
+# 参数可带 "section" 指定实际写入的 yaml 分组 (缺省 = 所属分组 key),
+# 如 yolo_conf 展示在检测层卡片, 但实际写入 yaml 的 tracking: 节.
+# readonly: true 的参数仅展示当前生效值, 不可通过页面修改 (如 env 结构性参数).
 _RULE_META: dict[str, dict[str, Any]] = {
+    "detection": {
+        "title": "检测层",
+        "desc": "YOLO 检测与采样参数。imgsz 按批次更新；decode_max_fps 对新建或重连的视频流生效。decode_max_short_side 需重建 AI 容器。",
+        "params": {
+            "yolo_conf": {"label": "YOLO 置信度", "desc": "检测置信度阈值: 调高→远处/黄昏小目标漏检, 调低→误检增多 (0.4 曾致黄昏远处车辆漏检)", "type": "float", "default": 0.3, "step": 0.05, "min": 0.05, "max": 1, "section": "tracking"},
+            "yolo_iou": {"label": "NMS IoU", "desc": "非极大值抑制 IoU 阈值: 调低→相邻目标易被合并漏检, 调高→同一目标出双框重复计数", "type": "float", "default": 0.5, "step": 0.05, "min": 0.05, "max": 1, "section": "tracking"},
+            "imgsz": {"label": "推理输入尺寸", "desc": "YOLO 输入尺寸参数；实际张量受原图比例和矩形填充影响。保存后按批次生效。", "type": "int", "default": int(settings.infer_imgsz), "step": 32, "min": 320, "max": 1920, "section": "inference"},
+            "decode_max_fps": {"label": "解码采样帧率上限", "desc": "解码后选取原始帧，实际输出可能低于上限；0=不限速。保存后新建或重连的流生效。", "type": "float", "default": float(settings.decode_max_fps), "step": 1, "min": 0, "max": 60, "section": "inference"},
+            "decode_max_short_side": {"label": "解码缩放短边", "desc": "解码端把短边缩放到该值再输出 (4K 流收益最大), 过小会糊掉远处目标; 结构性参数 — 需修改 .env.gpu 的 DECODE_MAX_SHORT_SIDE 并重建 AI 容器, 页面不可改", "type": "int", "default": int(settings.decode_max_short_side), "readonly": True},
+        },
+    },
     "counting": {
         "title": "越线计数",
         "desc": "跨线计数算法参数 (AI 服务, counter.py)",
@@ -90,13 +105,23 @@ _RULE_META: dict[str, dict[str, Any]] = {
     },
     "tracking": {
         "title": "目标跟踪",
-        "desc": "YOLO 检测与跟踪参数 (AI 服务, tracker.py), 算法本身由 bytetrack.yaml 决定",
+        "desc": "跟踪参数 (AI 服务, tracker.py), 算法本身由 bytetrack.yaml 决定; yolo_conf / yolo_iou 已上移到「检测层」卡片",
         "params": {
-            "yolo_conf": {"label": "YOLO 置信度", "desc": "检测置信度阈值", "type": "float", "default": 0.4, "step": 0.05, "min": 0.05, "max": 1},
-            "yolo_iou": {"label": "NMS IoU", "desc": "非极大值抑制 IoU 阈值", "type": "float", "default": 0.5, "step": 0.05, "min": 0.05, "max": 1},
             "track_buffer": {"label": "跟踪历史长度", "desc": "跟踪轨迹保留帧数 (遮挡频繁场景可增大)", "type": "int", "default": 30, "min": 5, "max": 200},
         },
     },
+}
+
+# 参数 key 平铺查找表 (参数 key 全局唯一): 供写回文件时按 key 取元数据,
+# 因为展示分组 (detection) 与 yaml 写入节 (tracking/inference) 可能不同.
+_ALL_PARAMS: dict[str, dict[str, Any]] = {
+    key: p for meta in _RULE_META.values() for key, p in meta["params"].items()
+}
+# 参数 key -> 实际写入的 yaml 节名 (section 缺省 = 所属分组 key)
+_PARAM_SECTION: dict[str, str] = {
+    key: p.get("section", sec)
+    for sec, meta in _RULE_META.items()
+    for key, p in meta["params"].items()
 }
 
 
@@ -149,7 +174,7 @@ def _update_file(path: Path, updates: dict[str, dict[str, Any]]) -> None:
             m = re.match(r"^(\s*)([\w-]+):\s*(\S+)(\s*#.*)?$", body)
             if m and m.group(2) in remaining[cur]:
                 indent, key, _val, tail = m.groups()
-                t = _RULE_META[cur]["params"][key]["type"]
+                t = _ALL_PARAMS[key]["type"]
                 lines[i] = f"{indent}{key}: {_format_value(remaining[cur].pop(key), t)}{tail or ''}\n"
 
     # 第二遍: 追加 yaml 中不存在的参数
@@ -172,7 +197,7 @@ def _update_file(path: Path, updates: dict[str, dict[str, Any]]) -> None:
                 break
         new_lines = []
         for key, v in keys.items():
-            meta = _RULE_META[sec]["params"][key]
+            meta = _ALL_PARAMS[key]
             new_lines.append(f"  {key}: {_format_value(v, meta['type'])}  # {meta['label']}\n")
         lines[insert_at:insert_at] = new_lines
 
@@ -190,7 +215,8 @@ def _build_groups(values: dict[str, dict] | None = None) -> list[dict]:
     for sec, meta in _RULE_META.items():
         params = []
         for key, p in meta["params"].items():
-            file_val = values.get(sec, {}).get(key)
+            # 展示分组与 yaml 写入节可能不同 (如检测层卡片写 tracking/inference 节)
+            file_val = values.get(_PARAM_SECTION[key], {}).get(key)
             params.append({
                 "key": key,
                 "label": p["label"],
@@ -201,6 +227,8 @@ def _build_groups(values: dict[str, dict] | None = None) -> list[dict]:
                 "max": p.get("max"),
                 "default": p["default"],
                 "value": file_val if file_val is not None else p["default"],
+                "readonly": bool(p.get("readonly")),
+                "section": _PARAM_SECTION[key],
             })
         groups.append({
             "key": sec,
@@ -229,12 +257,15 @@ async def update_business_rules_api(body: dict):
         incoming = body.get(sec)
         if not isinstance(incoming, dict):
             continue
-        valid: dict[str, Any] = {}
         for key, pm in meta["params"].items():
-            if key in incoming:
-                valid[key] = _coerce_value(key, pm, incoming[key])
-        if valid:
-            updates[sec] = valid
+            if key not in incoming:
+                continue
+            # 只读参数 (env 结构性配置) 不接受页面写入
+            if pm.get("readonly"):
+                continue
+            # 按参数实际写入节归并 (section 缺省 = 所属分组 key)
+            target = _PARAM_SECTION[key]
+            updates.setdefault(target, {})[key] = _coerce_value(key, pm, incoming[key])
     if not updates:
         raise HTTPException(400, "请求体未包含任何可更新参数")
 

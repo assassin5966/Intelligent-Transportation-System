@@ -1,7 +1,6 @@
 <template>
   <div class="card">
-    <div class="card-hd">👮 警力分配</div>
-    <div class="card-bd">
+    <div class="card-hd">👮 警力分配</div>    <div class="card-bd">
       <div class="field">
         <label>总警力</label>
         <input v-model="total" type="number" min="0" />

@@ -1,12 +1,12 @@
 # ============================================================
-# 智慧古城车辆人流监管平台 - GPU 版容器编排 (NVIDIA CUDA 12.2 / amd64, 8x RTX 4090)
-# 目标服务器: 23.45.1.115 (宿主机, 需先装 NVIDIA 驱动 + nvidia-container-toolkit)
+# 智慧古城车辆人流监管平台 - GPU 版容器编排 (NVIDIA CUDA 12.2 / amd64, 卡数自适应)
+# 目标服务器: 10.10.10.11 (宿主机, 需先装 NVIDIA 驱动 + nvidia-container-toolkit)
 #
 # 本文件独立使用, 不与 docker-compose.yml 叠加:
 #   docker compose -f docker-compose.gpu.yml up -d
 #   bash scripts/start_all_gpu.sh
 # 与 CPU 版 (docker-compose.yml) 的唯一区别: ai/backend 使用 GPU 镜像 smart-city-platform:gpu,
-# 且 ai 预留 8 张 4090。
+# 且 ai 挂载全部可见 GPU (count: all), 卡内引擎数由 INFER_SLOTS_PER_GPU=0 自适应.
 #
 # 前提: 宿主机已装 NVIDIA 驱动 (R530+, 支持 CUDA 12.2) 与 nvidia-container-toolkit
 # 验证: docker compose -f docker-compose.gpu.yml exec ai \
@@ -31,6 +31,10 @@ services:
     environment:
       - REDIS_URL=redis://redis:6379/0
       - BACKEND_URL=http://backend:8000
+      - EVENT_OUTBOX_PATH=/app/event-outbox/events.sqlite3
+      - EVENT_DELIVERY_PROTOCOL=${EVENT_DELIVERY_PROTOCOL:-legacy}
+      - BUSINESS_TIMEZONE=${BUSINESS_TIMEZONE:-Asia/Shanghai}
+      - TZ=${BUSINESS_TIMEZONE:-Asia/Shanghai}
       - PYTHONUNBUFFERED=1
       # CUDA 12.2 驱动向下兼容 cu121 轮子
       # 显存分配策略 expandable_segments 默认禁用: 与个别驱动/内核模块组合存在
@@ -38,6 +42,10 @@ services:
       # 如需降低显存碎片可恢复:
       #   - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
       # - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+      - PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128  # 使用原生分配器防止碎片化
+      - CUDA_MODULE_LOADING=LAZY
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
       # 计数可观测性 (排查漏计/误计): 控制台日志级别 / 运行统计周期 / 逐事件明细
       # LOG_LEVEL=DEBUG 时 docker logs 可看到详细日志 (文件日志 logs/*.log 始终 DEBUG)
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
@@ -47,19 +55,28 @@ services:
       - MOCK_ENABLED=${MOCK_ENABLED:-false}
       # GPU 批量推理: 每卡 1 个模型实例 + 批内多路 track (32 路 32 实例 -> 卡数实例).
       # INFER_MODE=legacy 可一键回退为旧的"每路独立实例"路径
-      - INFER_MODE=${INFER_MODE:-auto}
+      - INFER_MODE=${INFER_MODE:-gpu_batch}
       - INFER_GPU_DEVICES=${INFER_GPU_DEVICES:-}
-      - INFER_SLOTS_PER_GPU=${INFER_SLOTS_PER_GPU:-8}
+      - INFER_ENGINES_PER_GPU=${INFER_ENGINES_PER_GPU:-1}
+      # 每卡槽位: 0=按 INFER_CAPACITY 自适应 (ceil(路数/实际卡数)); >0 固定值
+      - INFER_SLOTS_PER_GPU=${INFER_SLOTS_PER_GPU:-0}
+      - INFER_CAPACITY=${INFER_CAPACITY:-32}
+      - INFER_SLOTS_MAX=${INFER_SLOTS_MAX:-32}
       - INFER_IMGSZ=${INFER_IMGSZ:-960}
       - INFER_HALF=${INFER_HALF:-true}
-      - INFER_BATCH_TIMEOUT_MS=${INFER_BATCH_TIMEOUT_MS:-40}
+      - INFER_BATCH_TIMEOUT_MS=${INFER_BATCH_TIMEOUT_MS:-80}
       - INFER_QUEUE_MAX_BATCHES=${INFER_QUEUE_MAX_BATCHES:-2}
+      - INFER_MAX_QUEUE_AGE_S=${INFER_MAX_QUEUE_AGE_S:-2}
       # CPU 批量推理: auto 模式下 GPU 不可用/自检失败时自动转 cpu_batch (不降 legacy)
       - INFER_CPU_ENGINES=${INFER_CPU_ENGINES:-2}
       - INFER_CPU_THREADS=${INFER_CPU_THREADS:-0}
-      # 解码侧采样: 按帧率 grab/retrieve 节流 + 可选解码端降分辨率 (4K 流收益最大)
+      # 解码侧采样: 按帧率节流 + 解码端降分辨率 (ffmpeg 后端在子进程内完成, 4K 流收益最大)
+      - DECODE_BACKEND=${DECODE_BACKEND:-ffmpeg}
       - DECODE_MAX_FPS=${DECODE_MAX_FPS:-8}
-      - DECODE_MAX_SHORT_SIDE=${DECODE_MAX_SHORT_SIDE:-0}
+      - DECODE_FPS_SAMPLING=${DECODE_FPS_SAMPLING:-interval}
+      - DECODE_MAX_SHORT_SIDE=${DECODE_MAX_SHORT_SIDE:-540}
+      - STREAM_STALL_TIMEOUT_S=${STREAM_STALL_TIMEOUT_S:-15}
+      - CLOCK_JUMP_TOLERANCE_S=${CLOCK_JUMP_TOLERANCE_S:-2}
     volumes:
       - ./app:/app/app:cached
       - ./models:/app/models:cached
@@ -68,26 +85,42 @@ services:
       # 依赖镜像内的 torch/CUDA). 注意会遮蔽镜像内的 /app/scripts, 宿主机目录须与此处一致
       - ./scripts:/app/scripts:cached
       - ./logs:/app/logs
+      - event-outbox:/app/event-outbox
       - model-cache:/root/.cache
     depends_on:
       redis:
         condition: service_started
-      # 等 backend 健康后再启 AI: outbox 上报不重试, backend 未就绪期间产生的
-      # 越线事件会被永久丢弃 (直接表现为"启动初期计数缺失")
+      # 等 backend 健康后再启 AI；越线事件持久化并在后端恢复后重试
       backend:
         condition: service_healthy
     # 挂共享网, 供 AI 按服务名访问外部 ZLM(zlmediakit) 拉 HTTP-FLV
     networks:
       - default
       - wvp-shared
-    # 8 卡 4090: 全部预留给该容器; 单进程默认 0 号卡,
-    # 多卡分片可按实例拆分并配 CUDA_VISIBLE_DEVICES (见 Dockerfile.gpu 头注释)
+    # 特权模式 (等价 docker run --privileged): 现场经验, 部分机器驱动/容器运行时组合
+    # 下 nvidia 设备节点权限不足导致 CUDA 初始化失败, 特权模式绕开设备 cgroup 限制;
+    # 内网隔离部署, 可接受. 已装 nvidia-container-toolkit 的标准环境可去掉
+    privileged: true
+    # 共享内存 8g (等价 docker run --shm-size=8g): 默认 64MB 太小,
+    # 多进程组件 (如 DataLoader workers) 会因 /dev/shm 不足崩溃; 线程内推理非必需, 预留保险
+    shm_size: "8g"
+    ulimits:
+      memlock:
+        soft: -1      # 解除内存锁定限制
+        hard: -1
+      stack:
+        soft: 67108864   # 扩大栈内存
+        hard: 67108864
+    ipc: host
+    # 卡数自适应: count: all 挂载本机全部 GPU (8卡/4卡/2卡机器同一份编排直接跑,
+    # 卡内引擎数由 INFER_SLOTS_PER_GPU=0 自适应); 固定 count: 8 在少卡机器上
+    # 容器会因 GPU 设备数不足创建失败
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
-              count: 8          # 固定 8 卡; 弹性场景可改 all
+              count: all
               capabilities: [gpu]
 
   # ---------- 业务后端 (FastAPI: 实时统计/告警/REST API/预测) ----------
@@ -97,17 +130,25 @@ services:
     restart: unless-stopped
     command: ["uvicorn", "app.backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
     ports:
-      - "8000:8000"
+      - "18000:8000"  # 宿主8000被 wvp-zlm 的 ZLM WebRTC(rtc)端口占用, 宿主侧改18000; 容器内仍8000, 前端nginx经容器网访问不受影响
     environment:
       - REDIS_URL=redis://redis:6379/0
       - AI_SERVICE_URL=http://ai:8001
+      - EVENT_LEDGER_ENABLED=${EVENT_LEDGER_ENABLED:-false}
+      - BUSINESS_TIMEZONE=${BUSINESS_TIMEZONE:-Asia/Shanghai}
+      - TZ=${BUSINESS_TIMEZONE:-Asia/Shanghai}
       - PYTHONUNBUFFERED=1
+      # 解码侧采样参数透传: 业务规则页「检测层」卡片展示 AI 侧生效值 (与 ai 服务同源 .env.gpu)
+      - DECODE_BACKEND=${DECODE_BACKEND:-ffmpeg}
+      - DECODE_MAX_FPS=${DECODE_MAX_FPS:-8}
+      - DECODE_MAX_SHORT_SIDE=${DECODE_MAX_SHORT_SIDE:-540}
       # WVP-GB28181 对接 (WVP/ZLM 已外部部署; 启用需 WVP_ENABLED=true 且 WVP_API_URL 指向外部 WVP)
       - WVP_ENABLED=${WVP_ENABLED:-false}
       - WVP_API_URL=${WVP_API_URL:-http://wvp:18080}
       - WVP_USERNAME=${WVP_USERNAME:-admin}
       - WVP_PASSWORD=${WVP_PASSWORD:-admin}
       - WVP_SYNC_INTERVAL=${WVP_SYNC_INTERVAL:-30}
+      - WVP_PLAY_RETRY_MAX_S=${WVP_PLAY_RETRY_MAX_S:-120}
       - WVP_PLAY_PROTOCOL=${WVP_PLAY_PROTOCOL:-flv}
       - WVP_STREAM_SUB=${WVP_STREAM_SUB:-true}
       # 前端播放地址翻译 (/api/devices/glm-5.3_common/play); 空值走自动推导/原样返回
@@ -130,6 +171,8 @@ services:
       - ./configs:/app/configs:cached
       - ./static:/app/static:cached
       - ./data:/app/data:cached
+      - ./scripts:/app/scripts:ro
+      - event-outbox:/app/event-outbox:ro
       - ./logs:/app/logs
     # 健康检查: 供 ai 的 depends_on condition=service_healthy 使用
     # (镜像内无 curl, 用 python 标准库探测 /health)
@@ -140,8 +183,10 @@ services:
       retries: 12
       start_period: 20s
     depends_on:
-      - redis
-      - mysql
+      redis:
+        condition: service_started
+      mysql:
+        condition: service_healthy  # 等 MySQL 真正可连接, 否则启动建表失败
     # 挂共享网, 供 backend 按服务名访问外部 WVP(wvp:18080)
     networks:
       - default
@@ -164,13 +209,22 @@ services:
       - "3307:3306"
     volumes:
       - mysql-data:/var/lib/mysql
+    # 健康检查: 供 backend depends_on condition=service_healthy 使用
+    # (MySQL 首次初始化需 10~30s; 不等健康则后端启动时建表会失败 -> device_info 表缺失)
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p$$MYSQL_ROOT_PASSWORD"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
 
   # ---------- Redis: 实时状态 (当前车辆/人员数量、告警、设备配置) ----------
   redis:
     image: redis:7-alpine
     container_name: dt-redis
     restart: unless-stopped
-    command: ["redis-server", "--appendonly", "yes"]
+    # 后端应答前同步 AOF；去重账本禁止被内存淘汰（故障时返回错误，队列保留待重试）。
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "always", "--maxmemory-policy", "noeviction"]
     ports:
       - "16379:6379"
     volumes:
@@ -197,6 +251,7 @@ services:
       - backend
 
 volumes:
+  event-outbox:
   redis-data:
   model-cache:
   mysql-data:

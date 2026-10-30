@@ -9,11 +9,12 @@ from pathlib import Path
 from typing import Literal, Optional
 
 import httpx
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel
 
 from ...common import device_info
 from ...common.config import settings
+from ...common.counting_config import effective_line_intervals, parse_counting_config
 from ...common.logger import logger
 from ...common.redis_client import get_redis
 from ..core.stream_urls import to_browser, to_internal
@@ -33,17 +34,41 @@ def _get_client() -> httpx.AsyncClient:
     return _shared_client
 
 
-def _warn_if_out_of_range(coords: list[list[float]], name: str) -> None:
-    """归一化坐标应在 [0,1]; 超出范围告警 (计数线会画到画面外)."""
-    for pt in coords:
-        for v in pt:
-            if v < 0 or v > 1:
-                logger.warning(f"{name} 存在超出 [0,1] 的值 {v}, 计数线可能偏离画面")
-                return
+async def _resolve_device_key(redis, device_id: str) -> str:
+    """按名称解析设备 Redis 键 (名称即身份, 兼容长名/短名别名).
+
+    device_info 白名单 name 常带通道号尾缀 (如 '...路西以南106米(枪-南)031208'),
+    而 WVP 同步注册进 Redis 的键是 WVP 通道名 (同串去尾缀). 同步侧
+    device_info.is_registered 有 _resolve_key 短名前缀兜底, 这里对齐做反向兼容:
+    精确未命中时按归一化前缀匹配现存设备键 (取最长匹配), 使 /play /snapshot
+    /enable 等接口对 device_info 长名与 WVP 短名都能命中.
+    最长匹配有多个同名别名时不猜测，返回原键 (由调用方抛 404).
+    """
+    key = _DEVICE_KEY_PREFIX + device_id
+    if await redis.exists(key):
+        return key
+    norm = device_info.normalize(device_id)
+    if not norm:
+        return key
+    best_ids, best_len = [], 0
+    async for k in redis.scan_iter(match=_DEVICE_KEY_PREFIX + "*", count=100):
+        rid = k[len(_DEVICE_KEY_PREFIX):]
+        rnorm = device_info.normalize(rid)
+        if not rnorm or not norm.startswith(rnorm) or len(rnorm) < best_len:
+            continue
+        if len(rnorm) > best_len:
+            best_ids, best_len = [rid], len(rnorm)
+        else:
+            best_ids.append(rid)
+    if len(best_ids) == 1:
+        return _DEVICE_KEY_PREFIX + best_ids[0]
+    if best_ids:
+        logger.warning(f"设备别名 {device_id!r} 匹配多个设备，不自动选择")
+    return key
 
 
 class DeviceIn(BaseModel):
-    id: str
+    id: Optional[str] = None  # 设备唯一标识; 缺省取 name (名称即身份, 与 WVP 同步一致)
     name: str
     stream_url: str
     line_coords: Optional[str] = None  # "x1,y1,x2,y2" 归一化 0-1
@@ -71,10 +96,15 @@ class DeviceOut(BaseModel):
     gb_device_id: Optional[str] = None
     gb_channel_id: Optional[str] = None
     status: str = "registered"
+    ai_status: Optional[str] = None  # 与设备/通道在线状态分开
+    wvp_sync_status: Optional[str] = None  # 查询是否完整，不与 AI 心跳状态混用
     last_heartbeat: Optional[str] = None
     longitude: Optional[float] = None  # 设备经纬度 (来自 data/device_geo.json, 按名称匹配)
     latitude: Optional[float] = None
     category: Optional[str] = None  # 点位分类 (来自 data/device_category.json, 按名称匹配)
+    region: Optional[str] = None  # 所属景区 (来自 device_info.region, 前端全局景区筛选依据)
+    intersection_id: Optional[int] = None  # 所属路口 (来自 device_info.intersection_id, 路口←设备关联)
+    show_on_map: Optional[bool] = True  # 是否在大屏显示点位 (device_info.show_on_map; 未登记设备不受控)
 
 
 # 设备经纬度映射缓存: 设备名称 -> {"longitude", "latitude"} (来自 data/device_geo.json)
@@ -164,51 +194,22 @@ def category_by_name(name: str) -> Optional[str]:
 
 
 def _line_from_coords(line_coords: Optional[str]) -> list[list[float]]:
-    """解析 line_coords -> [[x1,y1],[x2,y2]]; 无法解析时返回默认线并告警."""
-    if line_coords:
-        try:
-            parts = [float(x) for x in line_coords.split(",")]
-            if len(parts) == 4:
-                coords = [[parts[0], parts[1]], [parts[2], parts[3]]]
-                _warn_if_out_of_range(coords, "line_coords")
-                return coords
-        except ValueError:
-            logger.warning(f"line_coords 格式非法, 使用默认线: {line_coords!r}")
-    return [[0.5, 0.1], [0.5, 0.9]]
+    """兼容旧调用名；无效配置抛错，绝不默默替换默认线。"""
+    return parse_counting_config(line_coords, None, None)[0]
 
 
 def _anchor_from_coords(anchor_coords: Optional[str]) -> Optional[list[float]]:
-    """解析 anchor_coords -> [x,y]; 无法解析时返回 None (由 counter 用默认锚点) 并告警."""
-    if anchor_coords:
-        try:
-            parts = [float(x) for x in anchor_coords.split(",")]
-            if len(parts) == 2:
-                _warn_if_out_of_range([parts], "anchor_coords")
-                return [parts[0], parts[1]]
-        except ValueError:
-            logger.warning(f"anchor_coords 格式非法, 使用默认锚点: {anchor_coords!r}")
-    return None
+    """兼容旧调用名；空值表示使用默认锚点，格式无效则抛错。"""
+    return parse_counting_config(None, anchor_coords, None, require_line=False)[1]
 
 
 def _roi_from_coords(roi_coords: Optional[str]) -> Optional[list[list[float]]]:
-    """解析 roi_coords -> [[x,y],...]; 需偶数个值且 >=3 顶点, 否则返回 None 并告警."""
-    if not roi_coords:
-        return None
-    try:
-        parts = [float(x) for x in roi_coords.split(",")]
-    except ValueError:
-        logger.warning(f"roi_coords 格式非法, 忽略 ROI: {roi_coords!r}")
-        return None
-    if len(parts) % 2 != 0 or len(parts) < 6:
-        logger.warning(f"roi_coords 需偶数个值且至少3个顶点, 忽略 ROI: {roi_coords!r}")
-        return None
-    polygon = [[parts[i], parts[i + 1]] for i in range(0, len(parts), 2)]
-    _warn_if_out_of_range(polygon, "roi_coords")
-    return polygon
+    """兼容旧调用名；空值关闭 ROI，格式无效则抛错。"""
+    return parse_counting_config(None, None, roi_coords, require_line=False)[2]
 
 
-async def _forward_to_ai(method: str, path: str, json_body: Optional[dict] = None) -> None:
-    """转发到 AI 分析服务; 失败仅告警, 不阻塞设备配置落库."""
+async def _forward_to_ai(method: str, path: str, json_body: Optional[dict] = None) -> bool:
+    """转发到 AI 分析服务; 返回是否成功 (失败仅告警, 不阻塞设备配置落库)."""
     url = f"{settings.ai_service_url}{path}"
     try:
         client = _get_client()
@@ -218,8 +219,11 @@ async def _forward_to_ai(method: str, path: str, json_body: Optional[dict] = Non
             resp = await client.request(method, url)
         if resp.status_code >= 400:
             logger.warning(f"AI 服务转发失败 {method} {url}: HTTP {resp.status_code}")
+            return False
+        return True
     except Exception as e:  # noqa: BLE001
         logger.warning(f"AI 服务不可达 {method} {url}: {e}")
+        return False
 
 
 def _capture_frame_sync(url: str, max_frames: int = 30) -> Optional[bytes]:
@@ -267,7 +271,7 @@ def _capture_frame_sync(url: str, max_frames: int = 30) -> Optional[bytes]:
 
 
 @router.get("")
-async def list_():
+async def list_(scenic: str = Query(None, description="可选: 景区名; 只返回该景区下的设备")):
     redis = get_redis()
     found = []
     async for key in redis.scan_iter(f"{_DEVICE_KEY_PREFIX}*"):
@@ -286,7 +290,17 @@ async def list_():
             clean["latitude"] = lat
             # 按设备名称补全点位分类 (来自 data/device_category.json)
             clean["category"] = category_by_name(clean.get("name", ""))
+            # 按设备名称补全所属景区 (来自 MySQL device_info.region; 未登记为空;
+            # 在线设备用门/口简称时按门级关键字兜底匹配, 见 device_info.region_for)
+            clean["region"] = device_info.region_for(clean.get("name", ""))
+            # 按设备名称补全所属路口 id (来自 MySQL device_info.intersection_id; 未关联为空)
+            clean["intersection_id"] = device_info.intersection_id_for(clean.get("name", ""))
+            # 按设备名称补全「是否大屏显示」开关 (来自 MySQL device_info.show_on_map)
+            clean["show_on_map"] = device_info.show_on_map_for(clean.get("name", ""))
             found.append(DeviceOut(**clean))
+    if scenic and scenic.strip():
+        target = scenic.strip()
+        found = [d for d in found if (d.region or "") == target]
     return found
 
 
@@ -297,12 +311,22 @@ async def register(dev: DeviceIn):
     启流统一由 POST /api/devices/{device_id}/enable 负责: 手动注册设备注册后
     status=registered, 配置计数线并 enable 后才启动 AI 管道.
     """
+    try:
+        parse_counting_config(dev.line_coords, dev.anchor_coords, dev.roi_coords, require_line=False)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
     redis = get_redis()
-    key = f"{_DEVICE_KEY_PREFIX}{dev.id}"
+    # 名称即身份: id 缺省取 name; '/' 会被 FastAPI 路径参数截断, 注册时直接拒绝
+    dev_id = (dev.id or "").strip() or dev.name.strip()
+    if not dev_id:
+        raise HTTPException(400, "id 与 name 不能同时为空")
+    if "/" in dev_id:
+        raise HTTPException(400, f"设备标识含非法字符 '/': {dev_id}")
+    key = f"{_DEVICE_KEY_PREFIX}{dev_id}"
     await redis.hset(
         key,
         mapping={
-            "id": dev.id,
+            "id": dev_id,
             "name": dev.name,
             "stream_url": dev.stream_url,
             "line_coords": dev.line_coords or "",
@@ -317,35 +341,44 @@ async def register(dev: DeviceIn):
             "status": "registered",
         },
     )
-    return {"id": dev.id, "status": "registered"}
+    return {"id": dev_id, "status": "registered"}
 
 
 @router.delete("/{device_id}")
 async def remove(device_id: str):
     redis = get_redis()
-    key = f"{_DEVICE_KEY_PREFIX}{device_id}"
+    key = await _resolve_device_key(redis, device_id)
     exists = await redis.exists(key)
     if not exists:
         raise HTTPException(404, "device not found")
+    real_id = key[len(_DEVICE_KEY_PREFIX):]
     await redis.delete(key)
-    await _forward_to_ai("DELETE", f"/devices/{device_id}")
+    await _forward_to_ai("DELETE", f"/devices/{real_id}")
     return {"status": "deleted", "id": device_id}
 
 
+class DeviceHeartbeat(BaseModel):
+    ai_status: Optional[Literal["stopped", "waiting_first_frame", "no_frames", "no_recent_frame",
+                                "no_recent_inference", "low_fps", "processing", "event_persist_blocked"]] = None
+
+
 @router.post("/{device_id}/heartbeat")
-async def heartbeat(device_id: str):
+async def heartbeat(device_id: str, body: Optional[DeviceHeartbeat] = None):
     """AI 服务心跳: 更新设备最后心跳时间, 标记设备在线."""
     from datetime import datetime, timezone
     redis = get_redis()
-    key = f"{_DEVICE_KEY_PREFIX}{device_id}"
+    key = await _resolve_device_key(redis, device_id)
     exists = await redis.exists(key)
     if not exists:
         raise HTTPException(404, "device not found")
     now_iso = datetime.now(timezone.utc).isoformat()
-    await redis.hset(key, mapping={
+    fields = {
         "last_heartbeat": now_iso,
         "status": "online",
-    })
+    }
+    if body and body.ai_status:
+        fields["ai_status"] = body.ai_status
+    await redis.hset(key, mapping=fields)
     return {"device_id": device_id, "heartbeat": now_iso}
 
 
@@ -372,7 +405,7 @@ async def snapshot(device_id: str):
     截完自动释放资源.
     """
     redis = get_redis()
-    key = _DEVICE_KEY_PREFIX + device_id
+    key = await _resolve_device_key(redis, device_id)
     data = await redis.hgetall(key)
     if not data:
         raise HTTPException(404, "device not found")
@@ -423,7 +456,7 @@ async def refresh_stream(device_id: str):
     if not settings.wvp_enabled:
         raise HTTPException(503, "WVP 未启用 (wvp_enabled=false)")
     redis = get_redis()
-    data = await redis.hgetall(_DEVICE_KEY_PREFIX + device_id)
+    data = await redis.hgetall(await _resolve_device_key(redis, device_id))
     if not data:
         raise HTTPException(404, "device not found")
     gb_dev = data.get("gb_device_id", "")
@@ -458,7 +491,7 @@ async def play(device_id: str, request: Request):
       3. stream_url 已是 http(s)://: 原样返回 (如 ZLM FLV 直配)
     """
     redis = get_redis()
-    data = await redis.hgetall(_DEVICE_KEY_PREFIX + device_id)
+    data = await redis.hgetall(await _resolve_device_key(redis, device_id))
     if not data:
         raise HTTPException(404, "device not found")
 
@@ -522,6 +555,7 @@ class DeviceEnableIn(BaseModel):
     count_only: Optional[Literal["enter", "exit"]] = None
     camera_type: Optional[Literal["vehicle", "person"]] = None
     roi_coords: Optional[str] = None
+    allow_multi_roi: bool = False  # 客户端已预览并确认凹 ROI 的多段有效计数线
     max_vehicles: Optional[int] = None  # 拥挤判断: ROI 内最大车辆数阈值 (设置后车辆拥挤判断生效)
     max_persons: Optional[int] = None  # 拥挤判断: ROI 内最大人数阈值 (设置后人流拥挤判断生效)
 
@@ -534,8 +568,14 @@ async def enable_device(device_id: str, body: DeviceEnableIn):
       1. WVP 同步设备: 调 WVP 拿流地址 → 启流 (status: synced -> online).
       2. 手动注册设备: 更新配置 → 重启 AI 管道 (status: registered -> running).
     """
+    try:
+        line, _anchor, roi = parse_counting_config(body.line_coords, body.anchor_coords, body.roi_coords)
+        if roi is not None and len(effective_line_intervals(line, roi)) > 1 and not body.allow_multi_roi:
+            raise ValueError('ROI 包含多段有效计数线，请使用支持多段预览的配置页面')
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
     redis = get_redis()
-    key = _DEVICE_KEY_PREFIX + device_id
+    key = await _resolve_device_key(redis, device_id)
     data = await redis.hgetall(key)
     if not data:
         raise HTTPException(404, "device not found")
@@ -543,6 +583,7 @@ async def enable_device(device_id: str, body: DeviceEnableIn):
     gb_dev = data.get("gb_device_id", "")
     gb_ch = data.get("gb_channel_id", "")
     is_wvp = bool(settings.wvp_enabled and gb_dev and gb_ch)
+    real_id = key[len(_DEVICE_KEY_PREFIX):]
 
     # 落库计数线配置
     await redis.hset(
@@ -570,19 +611,32 @@ async def enable_device(device_id: str, body: DeviceEnableIn):
         if not stream_url:
             raise HTTPException(502, f"WVP 点播失败, 无法获取流地址 (gb_dev={gb_dev}, gb_ch={gb_ch})")
 
-        await _start_ai_pipeline(updated, stream_url)
-        await redis.hset(key, "status", "online")
+        # 先停旧管道: 重复点「启流计数」时类型(只检车/只检人)/方向/计数线/ROI 可能已改,
+        # 旧管道不重启会继续用旧配置 (POST /devices 只会返回 409 device already running)
+        await _forward_to_ai("DELETE", f"/devices/{real_id}")
+        if not await _start_ai_pipeline(updated, stream_url):
+            await redis.hset(key, "ai_status", "start_failed")
+            logger.error(f"[WVP] 设备 {device_id} 启流失败 (推理容量已满或 AI 服务异常)")
+            raise HTTPException(
+                503, "AI 启流失败: 推理容量已满或 AI 服务异常, 请查看 AI 服务日志"
+            )
+        await redis.hset(key, mapping={"status": "online", "ai_status": "waiting_first_frame"})
         logger.info(f"[WVP] 设备 {device_id} 已启用并启流")
-        return {"device_id": device_id, "status": "online", "stream_url": stream_url}
+        return {"device_id": device_id, "status": "online", "ai_status": "waiting_first_frame", "stream_url": stream_url}
     else:
         # 模式 2: 手动注册设备 - 重启 AI 管道 (先停旧管道, 再起新管道)
         from ..core.wvp_sync import _start_ai_pipeline
 
         # 先停止旧管道 (如果存在)
-        await _forward_to_ai("DELETE", f"/devices/{device_id}")
+        await _forward_to_ai("DELETE", f"/devices/{real_id}")
 
         # 再启动新管道
-        await _start_ai_pipeline(updated, updated.get("stream_url", ""))
-        await redis.hset(key, "status", "online")
+        if not await _start_ai_pipeline(updated, updated.get("stream_url", "")):
+            await redis.hset(key, "ai_status", "start_failed")
+            logger.error(f"[手动] 设备 {device_id} 启流失败 (推理容量已满或 AI 服务异常)")
+            raise HTTPException(
+                503, "AI 启流失败: 推理容量已满或 AI 服务异常, 请查看 AI 服务日志"
+            )
+        await redis.hset(key, mapping={"status": "online", "ai_status": "waiting_first_frame"})
         logger.info(f"[手动] 设备 {device_id} 已重新配置并启流")
-        return {"device_id": device_id, "status": "online", "stream_url": updated.get("stream_url", "")}
+        return {"device_id": device_id, "status": "online", "ai_status": "waiting_first_frame", "stream_url": updated.get("stream_url", "")}

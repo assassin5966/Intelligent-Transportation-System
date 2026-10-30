@@ -9,7 +9,9 @@ data/device_category.json (源自 data/设备信息汇总表.xlsx, 已提前固�
 - 运行时: CRUD 接口写 MySQL 后同步刷新缓存, 展示链路立即生效
 - MySQL 未启用/不可用时缓存为空, 展示链路回落旧 JSON 文件 (兼容本地开发, 只读不写)
 """
+import asyncio
 import json
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -32,6 +34,8 @@ CREATE TABLE IF NOT EXISTS {_TABLE} (
     region VARCHAR(64) NULL COMMENT '区域(如 大同古城)',
     entrance_type VARCHAR(16) NULL COMMENT '出入口类型(入口/出口/出入口, 由 category 派生)',
     point_type VARCHAR(16) NULL COMMENT '点位类型(便道/车辆卡口, 由 category 派生)',
+    intersection_id INT UNSIGNED NULL COMMENT '所属路口(id, 关联 intersection_info.id)',
+    show_on_map TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否在大屏显示该设备点位(0=不显示, 1=显示)',
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (id),
@@ -148,6 +152,18 @@ async def ensure_table() -> None:
                     "WHEN category LIKE '%卡口%' THEN '车辆卡口' END "
                     "WHERE point_type IS NULL"
                 )
+            if not await _has_column(cur, "intersection_id"):
+                await cur.execute(
+                    f"ALTER TABLE {_TABLE} ADD COLUMN intersection_id INT UNSIGNED NULL "
+                    "COMMENT '所属路口(id, 关联 intersection_info.id)' AFTER point_type"
+                )
+            # 旧表无「大屏显示」开关列: 补列 (默认 0 = 关闭; 存量设备一律保持关闭,
+            # 由运维页面「大屏显示」开关逐台/批量开启)
+            if not await _has_column(cur, "show_on_map"):
+                await cur.execute(
+                    f"ALTER TABLE {_TABLE} ADD COLUMN show_on_map TINYINT(1) NOT NULL DEFAULT 0 "
+                    "COMMENT '是否在大屏显示该设备点位(0=不显示, 1=显示)' AFTER intersection_id"
+                )
 
 
 async def count() -> int:
@@ -192,6 +208,87 @@ def get(name: str) -> Optional[dict]:
     return _cache.get(key) if key else None
 
 
+# 门级关键字 (如「永泰东门」): 用于「在线设备短名 → 设备信息表全称」的景区归属兜底匹配
+_GATE_RE = re.compile(r"[\u4e00-\u9fa5]{2}(?:东|西|南|北|正|大)?门")
+
+
+def gate_key(name: str) -> str:
+    """取名称中的门级关键字: 「永泰东门1口」→永泰东门; 「…和阳南门出口…」→和阳南门."""
+    m = _GATE_RE.search(normalize(name))
+    return m.group(0) if m else ""
+
+
+def region_for(name: str) -> str:
+    """按名称取所属景区 (region), 未登记返回 "".
+
+    1) 先走 get() 精确/短名前缀匹配;
+    2) 兜底: 大屏在线设备常用门/口简称 (如「永泰东门1口」), 而 device_info 存的是
+       白名单全称 (如「GAJK-4926永泰东门入口处…」), 归一化后无法前缀命中 ——
+       改用门级关键字匹配, 且仅当命中点位同属一个景区时才采用, 避免误划景区.
+    """
+    row = get(name)
+    region = str((row or {}).get("region") or "").strip()
+    if region:
+        return region
+    key = gate_key(name)
+    if not key:
+        return ""
+    regions = {
+        str(r.get("region") or "").strip()
+        for n, r in _cache.items()
+        if key in n and str(r.get("region") or "").strip()
+    }
+    return regions.pop() if len(regions) == 1 else ""
+
+
+def intersection_id_for(name: str) -> Optional[int]:
+    """按设备名称取所属路口 id (intersection_info.id); 未关联返回 None.
+
+    1) 先走 get() 精确/短名前缀匹配 (依赖回填的 intersection_id 列);
+    2) 兜底: 在线设备常用门/口简称, 而 device_info 存的是白名单全称, 归一化后
+       无法前缀命中 —— 改用门级关键字匹配, 仅当命中点位同属一个路口时才采用.
+    """
+    row = get(name)
+    iid = row.get("intersection_id") if row else None
+    if iid:
+        return int(iid)
+    key = gate_key(name)
+    if not key:
+        return None
+    ids = {
+        int(r["intersection_id"])
+        for n, r in _cache.items()
+        if key in n and r.get("intersection_id")
+    }
+    return ids.pop() if len(ids) == 1 else None
+
+
+def show_on_map_for(name: str) -> bool:
+    """按设备名称取「是否大屏显示」开关 (热路径, 读内存缓存).
+
+    仅对 device_info 已登记设备生效; 未登记设备 (如手动注册的在线通道) 不受该开关
+    控制, 一律返回 True (照常上图), 避免"改不到就无法显示"。
+    """
+    row = get(name)
+    if row is None:
+        return True
+    return bool(row.get("show_on_map"))
+
+
+async def set_show_on_map_all(value: bool) -> int:
+    """批量设置全部设备的「大屏显示」开关, 同步内存缓存. 返回影响条数."""
+    pool = await get_pool()
+    flag = 1 if value else 0
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(f"UPDATE {_TABLE} SET show_on_map = %s", (flag,))
+            affected = cur.rowcount
+    for r in _cache.values():
+        r["show_on_map"] = bool(flag)
+    logger.info(f"批量设置大屏显示开关: show_on_map={flag}, 影响 {affected} 条")
+    return int(affected or 0)
+
+
 def geo_map() -> dict[str, tuple[float, float]]:
     """返回 {归一化名称: (经度, 纬度)} 快照 (警力就近归区等使用)."""
     return {
@@ -213,7 +310,7 @@ async def reload_cache() -> None:
         async with conn.cursor(aiomysql.DictCursor) as cur:
             await cur.execute(
                 f"SELECT name, point_id, category, longitude, latitude, status, region, "
-                f"entrance_type, point_type FROM {_TABLE}"
+                f"entrance_type, point_type, intersection_id, show_on_map FROM {_TABLE}"
             )
             rows = await cur.fetchall()
     _cache = {}
@@ -234,6 +331,9 @@ async def reload_cache() -> None:
             # 列为空时按 category 兜底派生 (旧数据未回填也能正确展示)
             "entrance_type": r["entrance_type"] or derive_entrance_type(r["category"]),
             "point_type": r["point_type"] or derive_point_type(r["category"]),
+            "intersection_id": int(r["intersection_id"]) if r["intersection_id"] is not None else None,
+            # 大屏显示开关 (device_info.show_on_map): 0/None 均按关闭处理
+            "show_on_map": bool(r.get("show_on_map")),
         }
     logger.info(f"设备信息表已加载 {len(_cache)} 条到内存缓存")
 
@@ -245,7 +345,7 @@ async def fetch(name: str) -> Optional[dict]:
         async with conn.cursor(aiomysql.DictCursor) as cur:
             await cur.execute(
                 f"SELECT id, name, point_id, category, longitude, latitude, status, region, "
-                f"entrance_type, point_type FROM {_TABLE} "
+                f"entrance_type, point_type, intersection_id, show_on_map FROM {_TABLE} "
                 f"WHERE name = %s",
                 (normalize(name),),
             )
@@ -262,11 +362,14 @@ async def upsert(
     region: Optional[str] = None,
     entrance_type: Optional[str] = None,
     point_type: Optional[str] = None,
+    intersection_id: Optional[int] = None,
+    show_on_map: Optional[bool] = False,
 ) -> str:
     """新增/更新一条设备信息 (name 唯一, 冲突则覆盖), 并同步内存缓存. 返回归一化名称.
 
     出入口类型/点位类型未显式传入时按 category 自动派生; 显式传入则以此为准
     (运维页面手工改过的值不会被 category 覆盖).
+    show_on_map: 是否在大屏显示该设备点位, 缺省 False (新建设备默认不上图).
     """
     norm = normalize(name)
     if not norm:
@@ -275,11 +378,12 @@ async def upsert(
     category = category or None
     entrance_type = entrance_type or derive_entrance_type(category)
     point_type = point_type or derive_point_type(category)
+    show_on_map_val = 1 if show_on_map else 0
     pool = await get_pool()
     sql = f"""
     INSERT INTO {_TABLE} (name, point_id, category, longitude, latitude, status, region,
-                          entrance_type, point_type)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                          entrance_type, point_type, intersection_id, show_on_map)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     ON DUPLICATE KEY UPDATE
         point_id = VALUES(point_id),
         category = VALUES(category),
@@ -288,14 +392,16 @@ async def upsert(
         status = VALUES(status),
         region = VALUES(region),
         entrance_type = VALUES(entrance_type),
-        point_type = VALUES(point_type)
+        point_type = VALUES(point_type),
+        intersection_id = VALUES(intersection_id),
+        show_on_map = VALUES(show_on_map)
     """
     async with pool.acquire() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
                 sql,
                 (norm, point_id or None, category, longitude, latitude, status or None, region,
-                 entrance_type, point_type),
+                 entrance_type, point_type, intersection_id, show_on_map_val),
             )
     _cache[norm] = {
         "point_id": point_id or None,
@@ -306,6 +412,8 @@ async def upsert(
         "region": region,
         "entrance_type": entrance_type,
         "point_type": point_type,
+        "intersection_id": intersection_id,
+        "show_on_map": bool(show_on_map_val),
     }
     _alias.clear()  # 新增/改名后短名解析失效, 下次查询重建
     return norm
@@ -332,7 +440,7 @@ async def list_all() -> list[dict]:
         async with conn.cursor(aiomysql.DictCursor) as cur:
             await cur.execute(
                 f"SELECT id, name, point_id, category, longitude, latitude, status, region, "
-                f"entrance_type, point_type, updated_at "
+                f"entrance_type, point_type, intersection_id, show_on_map, updated_at "
                 f"FROM {_TABLE} ORDER BY id"
             )
             rows = await cur.fetchall()
@@ -341,7 +449,41 @@ async def list_all() -> list[dict]:
         row = dict(r)
         row["longitude"] = float(row["longitude"]) if row["longitude"] is not None else None
         row["latitude"] = float(row["latitude"]) if row["latitude"] is not None else None
+        row["show_on_map"] = bool(row.get("show_on_map"))
         result.append(row)
+    return result
+
+
+async def search_options(q: Optional[str] = None, scenic: Optional[str] = None) -> list[dict]:
+    """槽位绑定设备下拉选项: 来自 MySQL device_info 表, 支持名称模糊检索与景区过滤.
+
+    仅返回绑定所需字段 (id/name/region/category/point_id), 不含经纬度等大字段.
+    q 按 name LIKE %q% 模糊匹配 (走 MySQL 默认排序规则, 大小写不敏感);
+    scenic 按 region 精确过滤 (与前端全局景区筛选对齐).
+    """
+    pool = await get_pool()
+    sql = f"SELECT id, name, region, category, point_id FROM {_TABLE} WHERE 1=1"
+    args: list = []
+    if q and q.strip():
+        sql += " AND name LIKE %s"
+        args.append(f"%{q.strip()}%")
+    if scenic and scenic.strip():
+        sql += " AND region = %s"
+        args.append(scenic.strip())
+    sql += " ORDER BY id"
+    async with pool.acquire() as conn:
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute(sql, args)
+            rows = await cur.fetchall()
+    result = []
+    for r in rows:
+        result.append({
+            "id": r["id"],
+            "name": r["name"],
+            "region": r.get("region") or _REGION_DEFAULT,
+            "category": r.get("category") or None,
+            "point_id": r.get("point_id") or None,
+        })
     return result
 
 
@@ -361,6 +503,8 @@ def list_cached() -> list[dict]:
             "region": r["region"] or _REGION_DEFAULT,
             "entrance_type": r["entrance_type"],
             "point_type": r["point_type"],
+            "intersection_id": r["intersection_id"],
+            "show_on_map": bool(r.get("show_on_map")),
         }
         for n, r in _cache.items()
     ]
@@ -428,3 +572,81 @@ async def initialize_if_empty() -> int:
         logger.info("设备信息表已有数据, 跳过初始化")
         return 0
     return await seed_from_json_if_empty()
+
+
+async def backfill_intersection_ids() -> int:
+    """按设备名最长匹配路口名回填 intersection_id (仅填 NULL 行, 幂等).
+
+    匹配规则与大屏前端 gateKeyOfCfg 一致: 路口名完整出现在设备名中, 多个命中取最长者
+    (如「永泰东门」优先于「永泰」)。只处理 intersection_id IS NULL 的设备, 不覆盖运维
+    在设备页手工指定的关联; 回填后同步内存缓存, 展示链路立即生效。
+    依赖 intersection_info 表已建好 + 种子已导入 (启动链路保证顺序)。
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            try:
+                await cur.execute("SELECT id, name FROM intersection_info")
+                crossroads = [
+                    (int(r["id"]), str(r["name"]).strip())
+                    for r in await cur.fetchall()
+                    if r.get("name")
+                ]
+            except aiomysql.Error as e:  # noqa: BLE001
+                logger.warning(f"回填设备所属路口: 读取 intersection_info 失败, 跳过: {e}")
+                return 0
+            if not crossroads:
+                return 0
+            crossroads.sort(key=lambda item: len(item[1]), reverse=True)
+
+            await cur.execute(f"SELECT id, name FROM {_TABLE} WHERE intersection_id IS NULL")
+            pending = await cur.fetchall()
+            if not pending:
+                return 0
+
+            hits: list[tuple[int, int, str]] = []
+            for d in pending:
+                norm = normalize(d.get("name"))
+                if not norm:
+                    continue
+                for iid, iname in crossroads:
+                    if iname in norm:
+                        hits.append((iid, int(d["id"]), norm))
+                        break
+            if not hits:
+                return 0
+
+            for iid, did, _ in hits:
+                await cur.execute(
+                    f"UPDATE {_TABLE} SET intersection_id = %s "
+                    f"WHERE id = %s AND intersection_id IS NULL",
+                    (iid, did),
+                )
+    for iid, _, norm in hits:
+        if norm in _cache:
+            _cache[norm]["intersection_id"] = iid
+    logger.info(f"设备所属路口回填完成: {len(hits)} 条 (按名称最长匹配)")
+    return len(hits)
+
+
+# 表就绪标记: 建表+种子导入成功后置位, 之后各入口免重复 DDL/查询
+_ready = False
+_ready_lock = asyncio.Lock()
+
+
+async def ensure_ready(force: bool = False) -> None:
+    """确保 device_info 表可用 (建表 + 空表种子导入 + 缓存加载), 幂等单飞.
+
+    后端可能早于 MySQL 就绪, 首次调用失败时不置 _ready, 下次调用自动重试,
+    因此任意入口 (启动 lifespan / 运维 API) 先调本函数即可自愈 "表不存在 (1146)".
+    """
+    global _ready
+    if _ready and not force:
+        return
+    async with _ready_lock:
+        if _ready and not force:
+            return
+        await ensure_table()
+        await initialize_if_empty()
+        await reload_cache()
+        _ready = True

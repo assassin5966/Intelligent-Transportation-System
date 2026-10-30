@@ -25,6 +25,7 @@ import {
 import { API_BASE, USE_MOCK } from '../api/config.js'
 import { useToast } from './useToast.js'
 import { useDevices } from './useDevices.js'
+import { useScenic } from './useScenic.js'
 
 const state = reactive({
   stats: null,        // RealtimeStats（后端 /ws stats.data）
@@ -70,8 +71,8 @@ class MockSocket {
         if (this.onopen) this.onopen()
         // 连接即推一次 stats
         this._emit(m.mockWsStats())
-        // 每 2 秒推一次 stats（对齐文档「每 2 秒」）
-        this._timers.push(setInterval(() => this._emit(m.mockWsStats()), 2000))
+        // 每 5 秒推一次 stats（对齐前端节流窗口，避免 mock 模式帧被全部丢弃）
+        this._timers.push(setInterval(() => this._emit(m.mockWsStats()), 5000))
         // 初始推 prediction / police_plan
         this._emit(m.mockWsPrediction())
         this._emit(m.mockWsPolicePlan())
@@ -165,21 +166,34 @@ function scheduleReconnect() {
   setTimeout(connectBackend, wait)
 }
 
-/** 按 WS 消息 type 分发（v0.11.0：stats / alert / prediction / police_plan） */
+/** 按 WS 消息 type 分发（v0.11.0：stats / alert / prediction / police_plan）
+ *  stats 节流：后端每 2s 推全量，前端 ≥5s 才应用一帧（丢弃中间帧只留最新，无信息损失），
+ *  降低大屏常驻渲染压力（statsRev→标点/大卡/看板整条更新链的触发频率随之下降）。 */
+let lastStatsApply = 0
+const STATS_APPLY_INTERVAL = 5000
+
 function dispatch(msg) {
   if (!msg || !msg.type) return
   switch (msg.type) {
-    case 'stats':
+    case 'stats': {
+      const due = Date.now() - lastStatsApply >= STATS_APPLY_INTERVAL
+      if (!due) break
+      lastStatsApply = Date.now()
       if (msg.data) state.stats = msg.data
       if (msg.devices) useDevices().applyWsDevices(msg.devices)
       break
+    }
     case 'alert': {
       if (!msg.data) break
       state.alerts.unshift(msg.data)
       if (state.alerts.length > 200) state.alerts.length = 200
       // 拥挤告警 onset/recovery 即时 Toast 提示（§5.2）
+      // 景区筛选下只提示当前景区设备的告警（findById 查的是已过滤集合）
       if (msg.data.category === 'congestion' && msg.data.device_id) {
         try {
+          const cur = useScenic().state.scenic
+          const dv = cur ? useDevices().findById(msg.data.device_id) : null
+          if (cur && !dv) break
           const isRecovery = msg.data.phase === 'recovery'
           const score = msg.data.congestion_score != null ? ` (拥挤度 ${msg.data.congestion_score})` : ''
           useToast().push(

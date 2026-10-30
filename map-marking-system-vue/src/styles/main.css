@@ -505,6 +505,9 @@ select#styleSelect {
 }
 
 /* ==================== 大屏顶栏 ==================== */
+/* 布局：标题(左) → 搜索框+景区筛选(紧跟标题靠左) → 操作按钮+实时时钟(靠右)
+   收缩顺序：标题省略号 > 搜索框变窄 > 按钮文字省略；时钟和景区选择永不压缩，
+   避免旧版「top-actions 被压缩后按钮溢出、压在实时时钟上」的重叠问题 */
 .topbar {
     position: fixed;
     top: 0;
@@ -514,9 +517,9 @@ select#styleSelect {
     z-index: 900;
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    padding: 0 24px;
+    justify-content: flex-start;
+    gap: 14px;
+    padding: 0 18px;
     background: linear-gradient(180deg, rgba(6, 16, 32, .97), rgba(6, 18, 32, .74));
     border-bottom: 1px solid rgba(0, 225, 255, .45);
     box-shadow: 0 0 26px rgba(0, 170, 255, .28), inset 0 -1px 0 rgba(0, 225, 255, .18);
@@ -566,25 +569,27 @@ select#styleSelect {
 }
 
 .top-left {
-    /* flex-grow 3:4(右) 使"标题→第一个选择框"间距较默认缩小约 25%,
-       右侧按钮/时钟更多, 让右侧多吸收留白, 视觉更均衡 */
-    flex: 3 1 0;
+    /* 标题区可收缩(省略号)，为中部筛选与右侧按钮让位；不参与"挤压后溢出" */
+    flex: 0 1 auto;
     min-width: 0;
 }
 
 .top-center {
-    flex: 0 0 auto;
+    /* 搜索框 + 景区筛选：紧跟标题、整体靠左；可收缩(搜索框变窄)但不换行 */
+    flex: 0 1 auto;
     gap: 10px;
     min-width: 0;
+    margin-right: auto;
 }
 
 .top-right {
-    flex: 4 1 0;
+    /* 按钮组 + 实时时钟：整体不压缩，保证时钟永远完整显示、不与按钮重叠 */
+    flex: 0 0 auto;
     justify-content: flex-end;
     flex-direction: row;
     align-items: center;
-    gap: 10px;
-    min-width: 0;
+    gap: 12px;
+    margin-left: auto;
 }
 
 .top-logo {
@@ -598,12 +603,13 @@ select#styleSelect {
     color: #eaffff;
     font-size: 16px;
     font-weight: 700;
-    letter-spacing: 3px;
-    margin-left: 10px;
+    letter-spacing: 2.5px;
+    margin-left: 8px;
     text-shadow: 0 0 12px rgba(0, 225, 255, .55);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+    min-width: 0;
 }
 
 @keyframes spin {
@@ -681,32 +687,328 @@ select#styleSelect {
     font-size: 13px;
 }
 
-/* —— 顶栏右侧：设备管理/计数启流/业务规则 + 主题切换（紧凑按钮，不增加顶栏高度） —— */
+/* —— 顶栏右侧：适配范围/设备管理/计数启流/业务规则 + 主题切换 + 实时时钟 —— */
 .top-right {
-    gap: 12px;
+    gap: 14px;
 }
 
 .top-actions {
     display: flex;
     align-items: center;
     gap: 8px;
+    flex: 0 1 auto;
     min-width: 0;
 }
 
 .top-actions .tool-btn {
     padding: 6px 10px;
     font-size: 12.5px;
+    /* 极端窄屏时宁可按钮文字省略，也不允许溢出压到实时时钟 */
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* —— 全局景区筛选（右上角查询条件，作用于地图/门卡/指标/统计/运维页） —— */
+.scenic-pick {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 30px;
+    padding: 0 8px;
+    border: 1px solid rgba(120, 160, 220, .35);
+    border-radius: 8px;
+    background: rgba(10, 22, 44, .72);
+    transition: border-color .15s ease, box-shadow .15s ease;
+}
+
+.scenic-pick:hover {
+    border-color: rgba(0, 225, 255, .55);
+}
+
+.scenic-pick.active {
+    border-color: rgba(0, 225, 255, .75);
+    box-shadow: 0 0 10px rgba(0, 225, 255, .22);
+}
+
+.scenic-pick .sp-ic {
+    font-size: 13px;
+    line-height: 1;
+    filter: saturate(.9);
+}
+
+.scenic-pick .sp-select {
+    max-width: 116px;
+    padding: 2px 4px;
+    border: none;
+    outline: none;
+    background: #0f1e36;
+    color: #d4e4ff;
+    font-size: 12.5px;
+    font-family: inherit;
+    cursor: pointer;
+    color-scheme: dark;
+}
+
+[data-theme="light"] .scenic-pick {
+    background: rgba(255, 255, 255, .9);
+    border-color: rgba(30, 90, 150, .28);
+}
+
+[data-theme="light"] .scenic-pick .sp-select {
+    background: #fff;
+    color: #1c3a5e;
+    color-scheme: light;
+}
+
+/* ==================== 路口名称缩略牌（点击展开路口数据卡） ====================
+ * 落点 = intersection_info 配置经纬度（未配置时回落卡口设备坐标中点），
+ * 牌子只显示路口名称 + 在线状态点；点击后展开该路口的完整数据卡。
+ * Leaflet divIcon 容器固定 0×0，内部胶囊以坐标点为锚：底部尖角贴着坐标。
+ */
+.gate-name-icon {
+    background: none;
+    border: none;
+    width: 0 !important;
+    height: 0 !important;
+    overflow: visible;
+}
+
+.gate-name-icon .gn-pin {
+    position: absolute;
+    left: 0;
+    top: 0;
+    /* 8px = 尖角高度：胶囊整体悬在坐标点正上方，不压住设备标点 */
+    transform: translate(-50%, calc(-100% - 8px));
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    height: 22px;
+    padding: 0 9px 0 8px;
+    border-radius: 11px;
+    background: var(--c-rp-bg);
+    border: 1px solid var(--c-rp-border);
+    box-shadow: 0 5px 16px rgba(0, 0, 0, .5), 0 0 12px rgba(0, 170, 255, .16);
+    color: var(--c-rp-title);
+    font-size: 11.5px;
+    font-weight: 600;
+    line-height: 1;
+    white-space: nowrap;
+    cursor: pointer;
+    user-select: none;
+    transition: border-color .16s ease, box-shadow .16s ease, background .16s ease;
+}
+
+/* 指向坐标点的小尖角（与胶囊同底色、同描边） */
+.gate-name-icon .gn-pin::after {
+    content: '';
+    position: absolute;
+    left: 50%;
+    bottom: -4.5px;
+    width: 8px;
+    height: 8px;
+    margin-left: -4px;
+    background: inherit;
+    border-right: 1px solid var(--c-rp-border);
+    border-bottom: 1px solid var(--c-rp-border);
+    border-bottom-right-radius: 1.5px;
+    transform: rotate(45deg);
+}
+
+/* 左侧语义色条：入口=车流绿 / 出口=人流蓝（与大卡边框同语义） */
+.gate-name-icon .gn-pin.in::before,
+.gate-name-icon .gn-pin.out::before {
+    content: '';
+    position: absolute;
+    left: 1px;
+    top: 5px;
+    bottom: 5px;
+    width: 2px;
+    border-radius: 2px;
+}
+
+.gate-name-icon .gn-pin.in::before { background: var(--c-flow-veh-dot); }
+.gate-name-icon .gn-pin.out::before { background: var(--c-flow-per-dot); }
+
+/* 在线状态点 */
+.gate-name-icon .gn-dot {
+    flex: 0 0 auto;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--c-rp-off);
+    box-shadow: 0 0 0 2px rgba(143, 166, 196, .16);
+}
+
+.gate-name-icon .gn-dot.on {
+    background: var(--c-rp-ok);
+    box-shadow: 0 0 0 2px rgba(61, 220, 132, .18), 0 0 6px rgba(61, 220, 132, .7);
+}
+
+.gate-name-icon .gn-name { letter-spacing: .3px; }
+.gate-name-icon .gn-ar { font-size: 9px; color: var(--c-rp-muted); }
+
+.gate-name-icon .gn-pin:hover {
+    border-color: var(--c-accent);
+    box-shadow: 0 6px 18px rgba(0, 0, 0, .55), 0 0 14px var(--c-accent-glow);
+}
+
+/* 展开态：描边高亮 + 光晕，箭头翻转 */
+.gate-name-icon .gn-pin.active {
+    border-color: var(--c-accent);
+    box-shadow: 0 0 0 1px var(--c-accent-glow), 0 6px 20px rgba(0, 0, 0, .55), 0 0 18px var(--c-accent-glow);
+}
+
+.gate-name-icon .gn-pin.active .gn-ar { color: var(--c-accent); }
+
+/* —— 一键全展开 / 收起（地图右上，避开顶栏与右侧卡片栏） —— */
+.gate-cards-toggle {
+    position: fixed;
+    right: 302px;
+    top: 84px;
+    z-index: 9600;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 30px;
+    padding: 0 12px;
+    border-radius: 15px;
+    border: 1px solid rgba(110, 170, 255, .32);
+    background: rgba(10, 18, 32, .82);
+    backdrop-filter: blur(10px);
+    color: #cfe3ff;
+    font-size: 12px;
+    font-family: inherit;
+    cursor: pointer;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, .4);
+    transition: border-color .15s ease, box-shadow .15s ease, color .15s ease, background .15s ease;
+}
+
+.gate-cards-toggle:hover {
+    border-color: var(--c-accent);
+    color: #fff;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, .5), 0 0 14px var(--c-accent-glow);
+}
+
+.gate-cards-toggle.on {
+    border-color: var(--c-accent);
+    color: var(--c-accent);
+    background: rgba(0, 56, 84, .72);
+    box-shadow: 0 0 0 1px var(--c-accent-glow), 0 6px 20px rgba(0, 0, 0, .45);
+}
+
+[data-theme="light"] .gate-cards-toggle {
+    background: rgba(255, 255, 255, .92);
+    border-color: rgba(0, 119, 200, .3);
+    color: #1f2d3d;
+    box-shadow: 0 6px 18px rgba(20, 50, 90, .16);
+}
+
+[data-theme="light"] .gate-cards-toggle.on {
+    color: #0077c8;
+    background: rgba(232, 242, 252, .96);
+}
+
+@media (max-width: 1366px) {
+    .gate-cards-toggle {
+        right: 12px;
+        top: 118px;
+    }
+}
+
+/* —— 景区空态提示（所选景区无设备时浮在地图上方） —— */
+.scenic-empty {
+    position: fixed;
+    left: 50%;
+    top: 46%;
+    transform: translate(-50%, -50%);
+    z-index: 900;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    max-width: 520px;
+    padding: 14px 20px;
+    border: 1px solid rgba(0, 225, 255, .4);
+    border-radius: 12px;
+    background: rgba(8, 18, 36, .92);
+    box-shadow: 0 8px 30px rgba(0, 0, 0, .45);
+    pointer-events: none;
+}
+
+.scenic-empty .se-ic {
+    font-size: 26px;
+}
+
+.scenic-empty .se-tx {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.scenic-empty .se-tx b {
+    font-size: 14px;
+    color: #d4e4ff;
+}
+
+.scenic-empty .se-tx i {
+    font-style: normal;
+    font-size: 12px;
+    color: #7f93b8;
+    line-height: 1.5;
+}
+
+[data-theme="light"] .scenic-empty {
+    background: rgba(255, 255, 255, .96);
+    border-color: rgba(30, 90, 150, .35);
+}
+
+[data-theme="light"] .scenic-empty .se-tx b {
+    color: #1c3a5e;
+}
+
+[data-theme="light"] .scenic-empty .se-tx i {
+    color: #5c7290;
 }
 
 /* ==================== 顶栏自适应间距 (桌面 / 平板 / 移动) ==================== */
-/* 中等屏(≤1500): 留白本就有限, 左/右 flex 恢复 1:1, 避免标题区间距被过度压缩 */
+/* 中等屏(≤1500): 整体压缩字号/间距, 保证"标题 → 搜索框+景区 → 按钮组 → 时钟"单行不重叠 */
 @media (max-width: 1500px) {
-    .top-left,
-    .top-right {
-        flex: 1 1 0;
-    }
     .topbar {
-        padding: 0 18px;
+        padding: 0 14px;
+        gap: 10px;
+    }
+    .top-sub {
+        font-size: 15px;
+        letter-spacing: 2px;
+    }
+    .top-right {
+        gap: 10px;
+    }
+    .top-actions {
+        gap: 6px;
+    }
+    .top-actions .tool-btn {
+        padding: 6px 8px;
+        font-size: 12px;
+    }
+    .dev-search {
+        width: 208px;
+        flex: 0 1 208px;
+    }
+    .top-action {
+        padding: 0 9px;
+        font-size: 12px;
+    }
+    /* 中等屏主题按钮只留图标（title 已带说明），把宽度留给时钟 */
+    .top-action .ta-lb {
+        display: none;
+    }
+    .clock-panel {
+        padding: 6px 11px;
+    }
+    .clock-time {
+        font-size: 22px;
     }
 }
 
@@ -2628,7 +2930,7 @@ select#styleSelect {
  *   .rp-head / .rp-sub      卡头：点位名 + 属性副标题 + 编号坐标 + 状态胶囊
  *   .rp-body / .rp-cross    主体断面：双侧便道（斜纹）+ 四车道（2 实线 3 虚线）
  *                           + 2 组摄像头 + 覆盖范围虚线 + N/S 方位
- *   .rp-mini ×4             骑在断面上的小数据卡（车流量绿 ×2 / 人流量蓝 ×2）
+ *   .rp-mini ×N             与断面并列的小数据卡带（车流量绿 / 人流量蓝，尾部一侧 flex 排布）
  *   （.rp-foot 脚注图例已移除：集中展示于左栏信息卡 FlowLegendPanel，警力分配下方）
  * 外层 .tip-card 由 TipLayer 用 transform 定位，内部一律走常规流式布局；
  * 颜色全部取 --c-rp-* / --c-flow-* 主题令牌 → 浅色 / 深色主题自动适配。
@@ -2767,39 +3069,54 @@ select#styleSelect {
     box-shadow: 0 0 6px var(--c-rp-bad);
 }
 
-/* —— 主体：道路断面 —— */
+/* —— 主体：道路断面 + 小数据卡带 —— */
+/* body 为 flex 容器：断面(.rp-stage) 与小数据卡带(.rp-minis) 并列，
+ * 与运维页 intersection-config.html 预览卡(.icard-body + .stat-row)同构：
+ *   ns 断面 → 纵向堆叠（卡带横排在断面头/尾）；ew 断面 → 横向并排（卡带竖列在断面左/右侧）。 */
 .tip-card .rp-body {
     position: relative;
     display: flex;
     flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    padding: 8px 5px 7px;
+    align-items: stretch;
+    gap: 5px;
+    padding: 6px 5px 7px;
 }
 
-/* 断面容器：宽 = rp-body 内容宽 100%（370px），ns 高 214px / ew 高 246px。
- * 内部 .rp-rot 绝对定位并按 --rot 整体旋转；4 张小数据卡是 .rp-cross 的直接子元素，
- * 由 JS 按旋转角直接算「可视坐标」落位（下游侧一整排/列），不再随断面旋转。 */
+.tip-card .rp-body[data-axis="ew"] {
+    flex-direction: row;
+    align-items: center;
+}
+
+/* 断面舞台：包住 .rp-cross，ew 时与小卡列分摊卡宽（卡带 104 + 舞台余量 ≈ 261 > 旋转后路宽 239） */
+.tip-card .rp-stage {
+    position: relative;
+    flex: 1;
+    min-width: 0;
+    display: flex;
+}
+
+/* 断面容器：宽 = 舞台宽 100%。
+ * ns：高 250（沿行车方向加长：容纳翻倍后的箭头 108 + 摄像头 22 + 净距）；
+ * ew：预旋尺寸 246×239，旋转 90° 后可视 239×246 → 高 246 恰好容纳。
+ * 内部 .rp-rot 绝对定位并按 --rot 整体旋转；小数据卡带是 .rp-body 的直接子元素（不随断面旋转）。 */
 .tip-card .rp-cross {
     position: relative;
     flex: none;
+    width: 100%;
 }
 
 .tip-card .rp-cross[data-axis="ns"] {
-    width: 100%;
-    height: 214px;
+    height: 250px;
 }
 
 .tip-card .rp-cross[data-axis="ew"] {
-    width: 100%;
     height: 246px;
 }
 
 /* 旋转组：便道 + 车道区(flex) + 便道 一行，6 段等宽（便道 = 车道宽度）。
- * ns：横贯断面全宽、高 136（原 118 加厚 15%，原上游 18px 方位标区已随方位标移除回收）；
- *     rot=180 时断面靠下停靠（top = 214-136），小卡带翻转到上方。
- * ew：预旋尺寸 246×239（旋转 ±90° 后可视 239×246，断面带加厚 15%），按流向水平停靠，
- *     下游侧留给小卡列（4 张竖排）。 */
+ * ns：铺满断面（370×250），rot 0/180 绕中心旋转；
+ * ew：预旋 246×239 在断面盒内居中，旋转 90°/-90° 后恰好占满断面盒高。
+ * 小卡带一律在车道尾部（上游侧）—— 由 .rp-body 内 DOM 顺序决定（见 buildFlowTipHtml）。 */
 .tip-card .rp-rot {
     position: absolute;
     display: flex;
@@ -2807,20 +3124,24 @@ select#styleSelect {
     transform: rotate(var(--rot, 0deg));
 }
 
-.tip-card .rp-cross[data-axis="ns"] .rp-rot { left: 0; top: 0; width: 100%; height: 136px; }
-.tip-card .rp-cross[data-axis="ns"][data-rot="180"] .rp-rot { top: 78px; }
-.tip-card .rp-cross[data-axis="ew"] .rp-rot { width: 246px; height: 239px; top: -16px; }
-.tip-card .rp-cross[data-axis="ew"][data-rot="-90"] .rp-rot { left: 58.5px; }
-/* rot=90 用「右侧内缩 58.5」与 -90 左右镜像：旋转组可视宽 239，
- * 若沿用左侧偏移 153.5 会使右边界达 399.5（超断面 367、超卡宽 380），被 overflow:hidden 裁掉。 */
-.tip-card .rp-cross[data-axis="ew"][data-rot="90"] .rp-rot { right: 58.5px; }
+.tip-card .rp-cross[data-axis="ns"] .rp-rot { left: 0; top: 0; width: 100%; height: 100%; }
+.tip-card .rp-cross[data-axis="ew"] .rp-rot {
+    width: 246px;
+    height: 239px;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%) rotate(var(--rot, 0deg));
+}
 
-/* 双侧便道（人行道）：斜纹条，与车道等宽 —— 6 段等分（2 便道 + 4 车道，扣除 7px 标线：
- * 2 实线×2px + 3 虚线×1px），随断面带宽自动缩放 */
+/* 双侧便道（人行道）：斜纹条，宽度 = 单条车道宽度（与车道数解耦）。
+ * 便道与 .rp-road 同为 .rp-rot 的 flex 子项，而 .rp-road 内部还含固定宽度的标线，
+ * 因此不能用等权 flex:1（那样便道会与整条路面等宽）。改为按「段数」显式给宽：
+ * 可伸缩段 = 车道数 N + 2 便道，标线总宽 = 2 实线×2px + (N-1) 虚线×1px = N+3 px，
+ * 由 JS 注入 --sw-w = (100% - (N+3)px) / (N+2) → 便道与单车道严格等宽（N=4 时即 (100%-7px)/6）。 */
 .tip-card .rp-sw {
     position: relative;
-    width: calc((100% - 7px) / 6);
     flex: none;
+    width: var(--sw-w, calc((100% - 7px) / 6));
     background: repeating-linear-gradient(45deg, transparent 0 3px, var(--c-rp-sw-hatch) 3px 4px), var(--c-rp-sw-bg);
 }
 
@@ -2883,7 +3204,8 @@ select#styleSelect {
 
 .tip-card .rp-lane-tag {
     position: absolute;
-    top: 1.5%;
+    top: auto;
+    bottom: 4%;          /* 车道名挂在车道尾部 = 箭头的末尾（箭尖）一侧：局部坐标下箭头朝 +y，箭尖在底部 */
     left: 50%;
     /* 自身反旋：车道名永远水平（随断面旋转就位，仅文字转正） */
     transform: translateX(-50%) rotate(calc(-1 * var(--rot, 0deg)));
@@ -2895,10 +3217,11 @@ select#styleSelect {
 
 .tip-card .rp-lane-num {
     position: absolute;
-    top: 18%;
+    top: auto;
+    bottom: 13%;         /* 车道号同挂箭尖一侧（箭尖 = 48% + 54px，号中心留 18px+ 净距） */
     left: 50%;
     /* 自身反旋：车道号永远水平 */
-    transform: translate(-50%, -50%) rotate(calc(-1 * var(--rot, 0deg)));
+    transform: translate(-50%, 50%) rotate(calc(-1 * var(--rot, 0deg)));
     font-size: 15px;
     font-weight: 800;
     color: var(--c-rp-lane-num);
@@ -2909,11 +3232,12 @@ select#styleSelect {
  * 纵向位置 29%（36–58px）经四向旋转实测无遮挡：既不压车道号，也不被小数据卡压住 */
 .tip-card .rp-lane-flow {
     position: absolute;
-    top: 29%;
+    top: 48%;            /* 骑在计数线(.rp-cov top:48%)上: 中心对齐 */
     left: 50%;
-    width: 12px;
-    height: 22px;
-    margin-left: -6px;
+    width: 36px;         /* 整体翻倍（原 18）：加宽加粗更醒目 */
+    height: 108px;       /* 整体翻倍（原 54） */
+    margin-left: -18px;
+    margin-top: -54px;   /* 半高, 使箭头中心压在计数线上 */
     pointer-events: none;
     user-select: none;
 }
@@ -2922,25 +3246,24 @@ select#styleSelect {
     position: absolute;
     left: 50%;
     top: 0;
-    width: 2px;
-    height: 15px;
-    margin-left: -1px;
-    border-radius: 1px;
+    width: 8px;          /* 翻倍（原 4） */
+    height: 76px;
+    margin-left: -4px;
+    border-radius: 4px;
     background: var(--c-rp-flow);
-    box-shadow: 0 0 6px var(--c-rp-flow-glow);
+    box-shadow: 0 0 12px var(--c-rp-flow-glow);
 }
 
 .tip-card .rp-fl-head {
     position: absolute;
     left: 50%;
     bottom: 0;
-    width: 0;
-    height: 0;
-    margin-left: -3.5px;
-    border-left: 3.5px solid transparent;
-    border-right: 3.5px solid transparent;
-    border-top: 7px solid var(--c-rp-flow);
-    filter: drop-shadow(0 0 4px var(--c-rp-flow-glow));
+    width: 36px;         /* 翻倍（原 18×16） */
+    height: 32px;
+    margin-left: -18px;
+    background: var(--c-rp-flow);
+    clip-path: polygon(50% 100%, 0 0, 100% 0);
+    filter: drop-shadow(0 0 8px var(--c-rp-flow-glow));
 }
 
 /* 摄像头图标（每 2 条车道一组，架在虚线上） */
@@ -2948,49 +3271,27 @@ select#styleSelect {
     position: absolute;
     left: var(--x, 50%);
     top: var(--y, 50%);
-    transform: translate(-50%, -50%);
+    /* 自身反旋（与便道标签同法）：锚点位置随断面旋转（始终钉在箭头尾部外侧），
+       但图标本体永远保持水平正立 —— 否则 ew 断面（rot=±90）时摄像头随组转 90°，
+       渲染成竖向胶囊、看起来像被裁切「显示不完整」。 */
+    transform: translate(-50%, -50%) rotate(calc(-1 * var(--rot, 0deg)));
     z-index: 9;
 }
 
+/* 摄像头图标：与运维页 intersection-config.html 的 CAM_SVG 完全同款
+   （实心机身 + 镜头罩 + 镜头孔），尺寸 = 18x13 viewBox 的 1.5 倍。
+   图标由 .rp-anchor 反旋保持水平正立，任意断面朝向都不会转成竖向胶囊。 */
 .tip-card .rp-cam {
-    position: relative;
     display: block;
-    width: 14px;
-    height: 11px;
+    width: 27px;
+    height: 19.5px;
 }
 
-.tip-card .rp-cam-body {
-    position: absolute;
-    top: 0;
-    left: 0;
-    width: 12px;
-    height: 7px;
-    border: 1.5px solid var(--c-rp-accent);
-    border-radius: 2px 4px 4px 2px;
-    background: var(--c-rp-road-bg);
-    box-shadow: 0 0 6px var(--c-rp-accent-glow);
-}
-
-.tip-card .rp-cam-body::after {
-    content: "";
-    position: absolute;
-    right: 2px;
-    top: 50%;
-    transform: translateY(-50%);
-    width: 2.5px;
-    height: 2.5px;
-    border-radius: 50%;
-    background: var(--c-rp-accent);
-}
-
-.tip-card .rp-cam-pole {
-    position: absolute;
-    left: 50%;
-    bottom: 0;
-    width: 1px;
-    height: 4px;
-    background: var(--c-rp-accent);
-    transform: translateX(-50%);
+.tip-card .rp-cam svg {
+    display: block;
+    width: 100%;
+    height: 100%;
+    filter: drop-shadow(0 0 4px var(--c-rp-accent-glow));
 }
 
 /* 摄像头覆盖范围（红色细虚线，各横跨 2 条车道） */
@@ -3005,20 +3306,32 @@ select#styleSelect {
 
 .tip-card .rp-cov-2 { left: 50%; right: 5px; top: 48%; }
 
-/* —— 小数据卡（参考页 .card）：一排 4 张横贯断面全宽、贴下游侧 ——
- * 是 .rp-cross 的直属子元素（不随 .rp-rot 旋转），坐标由 JS 按断面 rot 映射到可视位置，
- * 元素本身无需反旋 → 文字天然水平 */
-.tip-card .rp-mini {
-    position: absolute;
-    left: var(--x, 50%);
-    top: var(--y, 50%);
-    transform: translate(-50%, -50%);
+/* —— 小数据卡带（与运维页预览卡 .stat-row 同构）：与断面并列的 flex 区块 ——
+ * 是 .rp-body 的直接子元素（不随 .rp-rot 旋转）→ 文字天然水平；
+ * 落位由 DOM 顺序决定（尾部一侧），内部顺序反转用 data-rev（row-reverse/column-reverse）。 */
+.tip-card .rp-minis {
+    flex: none;
+    display: flex;
+    gap: 4px;
     z-index: 7;
-    /* 宽度按内容取，只受 max-width 约束：避免绝对定位按 left 起算可用宽度而提前折行；
-     * 槽位中心距 91.7px，限宽 88 → 相邻小卡不重叠、最外侧也不越出断面（367px） */
-    width: max-content;
-    max-width: 88px;
-    padding: 2px;
+}
+
+.tip-card .rp-body[data-axis="ns"] .rp-minis { flex-direction: row; }
+.tip-card .rp-body[data-axis="ns"] .rp-minis[data-rev] { flex-direction: row-reverse; }
+
+/* ew 断面：竖向一列，固定宽 104px（运维页同款布局），卡宽随列、互不重叠 */
+.tip-card .rp-body[data-axis="ew"] .rp-minis {
+    flex-direction: column;
+    justify-content: center;
+    flex: 0 0 104px;
+    width: 104px;
+    gap: 5px;
+}
+.tip-card .rp-body[data-axis="ew"] .rp-minis[data-rev] { flex-direction: column-reverse; }
+
+.tip-card .rp-mini {
+    min-width: 0;
+    padding: 3px 4px;
     line-height: 1.3;
     border-radius: 6px;
     border: 1px solid var(--c-rp-border);
@@ -3030,6 +3343,10 @@ select#styleSelect {
     white-space: normal;
     overflow-wrap: anywhere;
 }
+
+/* ns 横排：N 张卡均分卡宽；ew 竖列：卡宽 = 列宽、高度按内容 */
+.tip-card .rp-body[data-axis="ns"] .rp-mini { flex: 1 1 0; }
+.tip-card .rp-body[data-axis="ew"] .rp-mini { flex: 0 0 auto; }
 
 /* 小数据卡可点击：打开该路设备的接口数据详情弹窗（交互绑定见 MapPanel.vue 事件委托） */
 .tip-card .rp-mini:hover {
@@ -3119,7 +3436,7 @@ select#styleSelect {
     border-color: var(--c-flow-per-border);
 }
 
-/* 便道人流小卡已改为 .rp-cross 直属子元素（与其他小卡同排），原 rp-side-l/r 悬挂规则废弃删除 */
+/* 便道人流小卡与其他槽位小卡同处 .rp-minis 卡带（flex 兄弟区块），原 rp-side-l/r 悬挂规则废弃删除 */
 
 /* —— 卡头右侧：进出标签 + 状态胶囊 —— */
 .tip-card .rp-head-r {
@@ -4170,9 +4487,9 @@ select#styleSelect {
     --c-rp-accent: #ff5a52;
     --c-rp-accent-glow: rgba(255, 90, 82, .35);
     --c-rp-cov: rgba(255, 90, 82, .6);
-    /* 车辆行驶方向指示线（暖橙，与红色摄像头覆盖线区分） */
-    --c-rp-flow: #ffb347;
-    --c-rp-flow-glow: rgba(255, 179, 71, .45);
+    /* 车辆行驶方向指示线（鲜明暖橙，与红色摄像头覆盖线区分） */
+    --c-rp-flow: #ff9100;                    /* 更鲜明的高饱和橙 */
+    --c-rp-flow-glow: rgba(255, 145, 0, .75);
     /* 方位罗盘 */
     --c-rp-compass-bg: rgba(9, 17, 30, .90);
     --c-rp-compass-n: #ff7a72;
@@ -4273,9 +4590,9 @@ select#styleSelect {
     --c-rp-accent: #e04a42;
     --c-rp-accent-glow: rgba(224, 74, 66, .28);
     --c-rp-cov: rgba(224, 74, 66, .55);
-    /* 车辆行驶方向指示线（暖橙，与红色摄像头覆盖线区分） */
-    --c-rp-flow: #c46a00;
-    --c-rp-flow-glow: rgba(196, 106, 0, .30);
+    /* 车辆行驶方向指示线（鲜明暖橙，与红色摄像头覆盖线区分） */
+    --c-rp-flow: #f27600;                    /* 浅色主题同样提高饱和度 */
+    --c-rp-flow-glow: rgba(242, 118, 0, .50);
     --c-rp-ok: #128a55;
     --c-rp-ok-bg: rgba(18, 138, 85, .10);
     --c-rp-ok-bd: rgba(18, 138, 85, .32);
@@ -5614,7 +5931,9 @@ body,
     display: flex;
     align-items: center;
     gap: 6px;
-    width: 268px;
+    width: 236px;
+    flex: 0 1 236px;
+    min-width: 150px;
     height: 34px;
     padding: 0 10px;
     border-radius: 8px;
@@ -5745,3 +6064,89 @@ body,
     color: var(--c-text-dim);
     text-align: center;
 }
+
+/* ==========================================================================
+ * 配置页同构断面 / 小数据卡（2026-10-26 新增）
+ * 大屏门级大卡的主体断面与小数据卡改为与运维页 intersection-config.html
+ * 预览卡完全同款的 DOM/CSS（类名前缀 rc-，与旧 rp-* 规则并存不冲突，旧类不再产出）。
+ * 颜色全部映射既有主题令牌（--c-rp-* / --c-flow-*）→ 浅色/深色主题自动适配。
+ * 布局尺寸与运维页 .road/.sidewalk/.lane/.stat-box 一致，仅箭头/字号按 380px 卡宽微调。
+ * ========================================================================== */
+
+/* —— 主体容器：stat-row + road-stage（与运维页 .icard-body 同构）—— */
+.tip-card .rc-body { display: flex; gap: 10px; margin: 8px 0 0; align-items: stretch; }
+.tip-card .rc-body.col { flex-direction: column; }
+.tip-card .rc-body.row .rc-stat-row { flex-direction: column; width: 128px; flex: none; justify-content: center; }
+.tip-card .rc-body.row .rc-stage { flex: 1; min-width: 0; }
+.tip-card .rc-body.row .rc-stat { flex: none; }
+/* minis-last：卡带排到断面之后（DOM 中卡带在前，用 order 对调） */
+.tip-card .rc-body.minis-last .rc-stat-row { order: 2; }
+.tip-card .rc-body.minis-last .rc-stage { order: 1; }
+
+/* —— 小数据卡：便道=蓝框 / 车卡=绿框（边框严格按槽位类型，与运维页 .stat-box 一致）—— */
+.tip-card .rc-stat-row { display: flex; gap: 8px; flex: 1; min-width: 0; }
+.tip-card .rc-stat { flex: 1; min-width: 0; border: 1px solid; border-radius: 6px;
+    padding: 6px 8px; font-size: 11px; cursor: pointer; transition: box-shadow .15s; }
+.tip-card .rc-stat.person { border-color: var(--c-flow-per-border); color: var(--c-flow-per-title); }
+.tip-card .rc-stat.vehicle { border-color: var(--c-flow-veh-border); color: var(--c-flow-veh-title); }
+.tip-card .rc-stat:hover { box-shadow: 0 0 0 1px currentColor inset; }
+.tip-card .rc-stat-t { font-weight: 600; line-height: 1.5; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tip-card .rc-dot { color: var(--c-flow-veh-dot); margin-right: 4px; }
+.tip-card .rc-stat-tag { display: inline-block; border: 1px solid currentColor; border-radius: 4px;
+    padding: 0 4px; margin-left: 5px; font-size: 9.5px; opacity: .9; font-weight: 700; }
+/* 「便道」字样放大加粗（运维页 .btd 同款语义） */
+.tip-card .rc-btd { font-style: normal; font-size: 1.15em; font-weight: 700; letter-spacing: .5px; }
+.tip-card .rc-metric { margin-top: 4px; color: var(--c-rp-muted); white-space: nowrap; }
+.tip-card .rc-metric b { font-weight: 700; font-size: 12px; font-variant-numeric: tabular-nums; }
+.tip-card .rc-stat.person .rc-metric b { color: var(--c-flow-per-data); }
+.tip-card .rc-stat.vehicle .rc-metric b { color: var(--c-flow-veh-data); }
+
+/* —— 断面：路面 / 便道 / 车道（与运维页 .road/.sidewalk/.lane 同构）—— */
+.tip-card .rc-stage { display: flex; justify-content: center; align-items: center; }
+.tip-card .rc-road { flex: none; display: flex; position: relative;
+    background: var(--c-rp-road-bg); border: 2px solid var(--c-rp-line); border-radius: 4px; min-height: 168px; }
+/* 横放断面（南北向行车）：车道竖条并排，便道在左右 */
+.tip-card .rc-road.ew { flex-direction: row; min-height: 220px; width: max-content; }
+/* 未配置车道宽度时铺满卡宽（防止 max-content 下空车道塌陷） */
+.tip-card .rc-road.rc-fluid { width: 100%; }
+/* 竖放断面（东西向行车）：车道横条堆叠，便道在上下 */
+.tip-card .rc-road.ns { flex-direction: column; width: 100%; }
+.tip-card .rc-sw { flex: 1; min-width: 0; position: relative;
+    border: 1px solid var(--c-rp-sw-border);
+    background-color: var(--c-rp-sw-bg);
+    background-image: repeating-linear-gradient(45deg, var(--c-rp-sw-hatch) 0 6px, transparent 6px 12px); }
+.tip-card .rc-sw-label { position: absolute; font-size: 11px; color: var(--c-rp-muted); }
+.tip-card .rc-road.ew .rc-sw-label { bottom: auto; top: 50%; left: 50%; transform: translate(-50%, -50%); }
+.tip-card .rc-road.ns .rc-sw-label { bottom: auto; left: 5px; top: 50%; transform: translateY(-50%); }
+.tip-card .rc-lane { flex: 1; min-width: 0; position: relative; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; }
+.tip-card .rc-road.ew .rc-lane + .rc-lane { border-left: 1px dashed var(--c-rp-line); }
+.tip-card .rc-road.ns .rc-lane + .rc-lane { border-top: 1px dashed var(--c-rp-line); }
+.tip-card .rc-road.ns .rc-lane { flex-direction: row; min-height: 44px; justify-content: flex-start; padding: 0 14px; gap: 18px; }
+/* 计数线：逐车道绘制（便道不含），相邻车道线段衔接成贯穿线；count_line=false 时隐藏 */
+.tip-card .rc-lane::before { content: ''; position: absolute; z-index: 2; pointer-events: none; }
+.tip-card .rc-road.ew .rc-lane::before { left: 0; right: 0; top: 52%; border-top: 2px dashed var(--c-rp-cov); }
+.tip-card .rc-road.ns .rc-lane::before { top: 0; bottom: 0; left: 52%; border-left: 2px dashed var(--c-rp-cov); }
+.tip-card .rc-road.no-count .rc-lane::before { display: none; }
+
+/* —— 行驶方向箭头 + 摄像头（旋转组基准朝下，整体转到真实行驶方向；摄像头恒在箭头尾部外侧）—— */
+.tip-card .rc-arrow-wrap { position: absolute; left: 52%; top: 52%;
+    transform: translate(-50%, -50%) rotate(var(--arrow-rot, -90deg)); }
+.tip-card .rc-arrow { position: absolute; left: 50%; top: 50%; width: 36px; height: 92px;
+    transform: translate(-50%, -50%); }
+.tip-card .rc-arrow::before { content: ''; position: absolute; left: 50%; top: 0; width: 8px; height: 64px;
+    margin-left: -4px; border-radius: 4px; background: var(--c-rp-flow);
+    box-shadow: 0 0 10px var(--c-rp-flow-glow); }
+.tip-card .rc-arrow::after { content: ''; position: absolute; left: 50%; bottom: 0; width: 36px; height: 28px;
+    margin-left: -18px; background: var(--c-rp-flow); clip-path: polygon(50% 100%, 0 0, 100% 0);
+    filter: drop-shadow(0 0 7px var(--c-rp-flow-glow)); }
+.tip-card .rc-cam { position: absolute; left: 50%; top: -67px; transform: translate(-50%, -50%); }
+
+/* —— 车道名：挂在车道尾部（箭尖一侧） —— */
+.tip-card .rc-lane-label { position: absolute; top: 5px; left: 50%; transform: translateX(-50%);
+    font-size: 11px; color: var(--c-rp-muted); white-space: nowrap; z-index: 3; }
+.tip-card .rc-road.ns .rc-lane-label { position: static; transform: none; }
+.tip-card .rc-lane.tail-left .rc-lane-label { margin: 0 auto 0 0; }
+.tip-card .rc-lane.tail-right .rc-lane-label { margin: 0 0 0 auto; }
+.tip-card .rc-lane.tail-top .rc-lane-label { top: 5px; bottom: auto; }
+.tip-card .rc-lane.tail-bottom .rc-lane-label { top: auto; bottom: 5px; }

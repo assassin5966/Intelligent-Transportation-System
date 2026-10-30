@@ -15,17 +15,38 @@
  * 组件若对 statsById 做 deep watch 会带来全量深度遍历 + 全量重绘；
  * 改为写一次自增一次，组件只 watch 这个数字即可。
  */
-import { reactive } from 'vue'
+import { reactive, watch } from 'vue'
 import { listDevices, getDeviceStats } from '../api/endpoints.js'
 import { useToast } from './useToast.js'
+import { useScenic } from './useScenic.js'
 
 const state = reactive({
-  devices: [],        // Device[]（设备基础信息）
+  devices: [],        // Device[]（设备基础信息）—— 已按全局景区过滤
   statsById: {},      // { [deviceId]: 实时计数 }
   positions: {},      // { [deviceId]: {lng,lat} } 地图落点（§3.2 经纬度）
   statsRev: 0,        // 统计变更计数器（见上方说明）
   loading: false
 })
+
+/**
+ * 全量设备（不受景区影响）。
+ * 景区只是「数据范围」条件：大屏的地图标点 / 门级大卡 / 指标都读 state.devices，
+ * 因此在这里统一收敛，选景区后各处自动一致，不必逐个组件过滤。
+ */
+let allDevices = []
+const scenic = useScenic().state
+
+/** 按当前景区重建 state.devices（空景区 = 全部） */
+function applyScenic() {
+  const s = scenic.scenic
+  state.devices = s
+    ? allDevices.filter((d) => String((d && d.region) || '').trim() === s)
+    : allDevices.slice()
+}
+
+// 顶栏切换景区 → 立即重算可见设备
+watch(() => scenic.scenic, applyScenic)
+
 
 const { push } = useToast()
 
@@ -48,12 +69,13 @@ async function load() {
   state.loading = true
   try {
     const [devs, stats] = await Promise.all([listDevices(), getDeviceStats().catch(() => [])])
-    state.devices = devs || []
+    allDevices = devs || []
+    applyScenic()
     applyStats(stats)
     // 落点：严格以后端返回的 longitude/latitude 为准（§3.2）。
     // 后端匹配不到 device_geo.json 时该值为 null，此时不落点（设备仍在列表/统计中，只是不上图），
     // 前端不伪造坐标；已由 WS 落点写入的坐标保持不变。
-    devs.forEach((d) => {
+    allDevices.forEach((d) => {
       if (state.positions[d.id]) return
       const geo = normalizeGeo(d)
       if (geo) state.positions[d.id] = geo
@@ -86,8 +108,8 @@ function applyWsDevices(devicesArr) {
   devicesArr.forEach((d) => {
     if (!d || !d.device_id) return
     const id = d.device_id
-    // 1) 设备基础信息合并进 state.devices
-    const idx = state.devices.findIndex((x) => x.id === id)
+    // 1) 设备基础信息合并进全量设备表
+    const idx = allDevices.findIndex((x) => x.id === id)
     const base = {
       id,
       name: d.name,
@@ -97,10 +119,12 @@ function applyWsDevices(devicesArr) {
       max_persons: d.max_persons ?? 0,
       category: d.category ?? null,
       longitude: d.longitude ?? null,
-      latitude: d.latitude ?? null
+      latitude: d.latitude ?? null,
+      // 大屏显示开关（device_info.show_on_map）: 后端未给（旧版本）时按显示处理
+      show_on_map: d.show_on_map !== false
     }
-    if (idx >= 0) state.devices[idx] = { ...state.devices[idx], ...base }
-    else state.devices.push(base)
+    if (idx >= 0) allDevices[idx] = { ...allDevices[idx], ...base }
+    else allDevices.push({ ...base, region: d.region || '' })
     // 2) 实时计数 + 拥挤度写入 statsById（统一字段，组件层直接消费）
     state.statsById[id] = {
       device_id: id,
@@ -138,6 +162,8 @@ function applyWsDevices(devicesArr) {
       state.positions[id] = { lng, lat }
     }
   })
+  // 4) 全量设备有变 → 按当前景区重算可见集合（景区切换与 WS 更新走同一条路径）
+  applyScenic()
   state.statsRev++
 }
 

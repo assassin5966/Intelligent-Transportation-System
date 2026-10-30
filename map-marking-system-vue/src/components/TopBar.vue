@@ -4,7 +4,7 @@
 
     <div class="top-left">
       <span class="top-logo">◈</span>
-      <span class="top-sub">智慧交管拥堵治理预警监控平台</span>
+      <span class="top-sub" title="美丽大同文旅交通预警监控平台">美丽大同文旅交通预警监控平台</span>
     </div>
 
     <div class="top-center">
@@ -45,6 +45,15 @@
           </div>
         </div>
       </Teleport>
+
+      <!-- 全局景区：紧跟搜索框（靠左），贯穿整个工程的数据范围条件（地图/门卡/指标/统计/运维页） -->
+      <div class="scenic-pick" :class="{ active: !!scenic.state.scenic }" title="全局查询条件：按景区筛选地图、指标与运维数据">
+        <span class="sp-ic">🏞</span>
+        <select class="sp-select" :value="scenic.state.scenic" @change="onScenicChange">
+          <option value="">全部景区</option>
+          <option v-for="o in scenic.state.options" :key="o" :value="o">{{ o }}</option>
+        </select>
+      </div>
     </div>
 
     <div class="top-right">
@@ -53,7 +62,6 @@
         <button class="tool-btn primary" @click="goOps('device-info.html')">🛠 设备管理</button>
         <button class="tool-btn" @click="goOps('device-config.html')">📡 计数启流</button>
         <button class="tool-btn" @click="goOps('business-rules.html')">⚙ 业务规则</button>
-        <span class="spacer"></span>
         <button class="top-action" @click="toggleTheme"
           :title="theme === 'dark' ? '切换到浅色模式' : '切换到深色模式'">
           <span class="ta-ic">{{ theme === 'dark' ? '☀️' : '🌙' }}</span>
@@ -78,11 +86,19 @@ import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useMapControl } from '../composables/useMapControl.js'
 import { useTheme } from '../composables/useTheme.js'
 import { useDevices } from '../composables/useDevices.js'
+import { useScenic } from '../composables/useScenic.js'
 import { API_BASE } from '../api/config.js'
 
 const { mapCtl } = useMapControl()
 const dev = useDevices()
 const { theme, toggleTheme } = useTheme()
+const scenic = useScenic()
+
+/** 切换全局景区：写入 localStorage → useDevices 监听后重算地图/门卡/指标 */
+function onScenicChange(e) {
+  scenic.setScenic(e.target.value)
+  dev.load()   // 顺带刷新一次设备基础信息，保证 region 最新
+}
 
 const cv = ref(null)
 const dateEl = ref(null)
@@ -197,6 +213,8 @@ onMounted(() => {
   tick(); timer = setInterval(tick, 1000)
   initParticles()
   window.addEventListener('resize', onWinResize)
+  // 全局景区选项（基线 ∪ 设备区域 ∪ 路口景区），失败时保留内置三项
+  scenic.loadOptions()
 })
 onBeforeUnmount(() => {
   if (timer) clearInterval(timer)

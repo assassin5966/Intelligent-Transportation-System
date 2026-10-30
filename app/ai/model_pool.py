@@ -44,7 +44,7 @@ class Lease:
     """一路设备对某个批量引擎某槽位的占用凭证 (随设备生命周期存在)."""
 
     mode: str          # gpu_batch | cpu_batch (取分配时刻的池模式)
-    engine_id: str     # "gpu0".."gpu7" / "cpu0".."cpuN"
+    engine_id: str     # "gpu0".."gpuN" / "cpu0".."cpuN" (N=卡数-1, 自适应)
     slot: int
     engine: GpuInferEngine
 
@@ -83,23 +83,33 @@ class ModelPool:
         if not gpus:
             reason = detail if not ok else "无可用 GPU 卡"
             if requested == "gpu_batch":
-                self._set_legacy(f"{reason} (gpu_batch 显式指定, 不降 CPU)")
+                self._set_unavailable(f"{reason} (gpu_batch 显式指定, 不降 CPU)")
                 return
             logger.warning(f"推理模式: GPU 不可用 ({reason}), 自动转 cpu_batch")
         else:
-            slots = max(1, int(settings.infer_slots_per_gpu))
-            timeout_s = max(0.0, int(settings.infer_batch_timeout_ms) / 1000.0)
-            specs = [
-                (f"gpu{g}", f"cuda:{g}", bool(settings.infer_half))
-                for g in gpus
-            ]
             try:
+                per_gpu = int(settings.infer_engines_per_gpu)
+                if per_gpu not in (1, 2):
+                    raise ValueError("INFER_ENGINES_PER_GPU 必须为 1 或 2")
+                fixed = int(settings.infer_slots_per_gpu)
+                if fixed > 0 and fixed < per_gpu:
+                    raise ValueError("INFER_SLOTS_PER_GPU 不足以为每个引擎分配槽位")
+                slots = self._resolve_slots(len(gpus) * per_gpu)
+                if fixed > 0:
+                    # 固定值是每卡总槽位，双引擎不能隐式把容量翻倍。
+                    slots = fixed // per_gpu
+                timeout_s = max(0.0, int(settings.infer_batch_timeout_ms) / 1000.0)
+                specs = [
+                    (f"gpu{g}" if per_gpu == 1 else f"gpu{g}-{i}",
+                     f"cuda:{g}", bool(settings.infer_half))
+                    for g in gpus for i in range(per_gpu)
+                ]
                 await self._start_engines(specs, "gpu_batch", slots, timeout_s)
                 return
             except Exception as e:  # noqa: BLE001
                 reason = f"GPU 引擎加载/自检失败: {type(e).__name__}: {e}"
                 if requested == "gpu_batch":
-                    self._set_legacy(f"{reason} (gpu_batch 显式指定, 不降 CPU)")
+                    self._set_unavailable(f"{reason} (gpu_batch 显式指定, 不降 CPU)")
                     return
                 logger.warning(f"推理模式: {reason}, 自动转 cpu_batch")
 
@@ -109,6 +119,12 @@ class ModelPool:
         self.mode = "legacy"
         self.reason = reason
         logger.warning(f"推理模式: legacy ({reason})")
+
+    def _set_unavailable(self, reason: str) -> None:
+        """批量引擎不可用时拒绝注册，避免隐式创建每路独立模型。"""
+        self.mode = "unavailable"
+        self.reason = reason
+        logger.error(f"推理不可用: {reason}; 仅显式 INFER_MODE=legacy 才启用独立模型")
 
     async def _init_cpu(self, *, explicit: bool) -> None:
         """启动 CPU 批量引擎; 失败回退 legacy (explicit 语义只影响提示文案)."""
@@ -120,7 +136,7 @@ class ModelPool:
             # torch 算子线程数为进程级全局: 每引擎批内算子用它, 多引擎并发时
             # 总线程数 ≈ 引擎数 × threads ≈ 核数, 不超订
             torch.set_num_threads(threads)
-            slots = max(1, int(settings.infer_slots_per_gpu))
+            slots = self._resolve_slots(n)
             timeout_s = max(0.0, int(settings.infer_batch_timeout_ms) / 1000.0)
             specs = [(f"cpu{i}", "cpu", False) for i in range(n)]
             await self._start_engines(specs, "cpu_batch", slots, timeout_s)
@@ -129,10 +145,33 @@ class ModelPool:
                 f"imgsz={settings.infer_imgsz}; CPU 部署建议 imgsz<=640 且拉子码流)"
             )
         except Exception as e:  # noqa: BLE001
-            self._set_legacy(
+            self._set_unavailable(
                 f"CPU 引擎加载/自检失败: {type(e).__name__}: {e}"
                 + (" (cpu_batch 显式指定)" if explicit else "")
             )
+
+    def _resolve_slots(self, n_engines: int) -> int:
+        """每引擎槽位数: 显式配置 (>0) 直接用; 0=按预期路数自适应.
+
+        自适应公式 ceil(infer_capacity / 引擎数): 32 路在 8 卡上得 4 槽, 换 4 卡
+        机器自动得 8 槽, 32 路仍全量跑批量, 不再有"槽位耗尽 -> 降级 legacy 独立
+        实例挤爆单卡"的回退. 批 VRAM 随槽位线性涨, 故 clamp 到 infer_slots_max
+        (小显存卡保护); 超出路数的设备仍按原语义降级 legacy.
+        """
+        fixed = int(settings.infer_slots_per_gpu)
+        if fixed > 0:
+            return max(1, fixed)
+        capacity = max(1, int(settings.infer_capacity))
+        slots = max(1, -(-capacity // max(1, n_engines)))  # ceil division
+        cap = max(1, int(settings.infer_slots_max))
+        if slots > cap:
+            logger.warning(
+                f"自适应槽位 ceil({capacity}/{n_engines})={slots} 超过上限 {cap} "
+                f"(批显存保护), 按 {cap} 生效; 超出容量的设备将降级 legacy"
+            )
+            slots = cap
+        logger.info(f"槽位自适应: ceil({capacity}/{n_engines}) = {slots} 槽/引擎")
+        return slots
 
     async def _start_engines(
         self, specs: list, mode: str, slots: int, timeout_s: float
@@ -205,8 +244,11 @@ class ModelPool:
 
         candidates = [e for e in self._engines if e.has_capacity()]
         if not candidates:
-            logger.warning(
-                f"推理引擎槽位已满 ({len(self._engines)} 引擎), {device_id} 降级为 legacy 独立实例"
+            # 不再回退 legacy: 每路各建一份模型会在单卡上互相争抢, 现场表现为
+            # 推理 44ms/批 恶化到 600ms/批. 由 service 层返回 503 让运维扩卡/降路数.
+            logger.error(
+                f"推理引擎槽位已满 ({len(self._engines)} 引擎), {device_id} 未分配槽位 "
+                f"(不回退 legacy 独立实例)"
             )
             return None
 
@@ -260,9 +302,9 @@ class ModelPool:
             except ValueError:
                 logger.warning(f"infer_gpu_devices 含非法项 {part!r}, 已忽略")
                 continue
-            if 0 <= gpu_id < count:
+            if 0 <= gpu_id < count and gpu_id not in out:
                 out.append(gpu_id)
-            else:
+            elif not 0 <= gpu_id < count:
                 logger.warning(f"infer_gpu_devices 卡号 {gpu_id} 超出可见范围 0-{count - 1}, 已忽略")
         return out
 

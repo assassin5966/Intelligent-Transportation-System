@@ -13,6 +13,10 @@ class Settings(BaseSettings):
     # ---- 服务间通信 ----
     backend_url: str = "http://backend:8000"
     ai_service_url: str = "http://ai:8001"
+    event_outbox_path: str = "data/event_outbox.sqlite3"
+    event_delivery_protocol: str = "legacy"  # legacy | journal_v2；仅在后端账本可用时切换
+    event_ledger_enabled: bool = False       # MySQL 事件账本及异步 Redis 物化，默认关闭
+    business_timezone: str = "Asia/Shanghai"  # v2 事件按此时区归入业务日/小时
 
     # ---- 服务端口 ----
     backend_port: int = 8000
@@ -38,12 +42,16 @@ class Settings(BaseSettings):
     # auto=CUDA 可用且自检通过则 gpu_batch, 否则自动转 cpu_batch (无 GPU 机器一键批量);
     # 显式指定 gpu_batch/cpu_batch 时引擎失败只回退 legacy, 不再静默换挡
     infer_mode: str = "auto"           # auto|gpu_batch|cpu_batch|legacy
-    infer_gpu_devices: str = ""        # 参与推理的卡号 "0,1,2,3,4,5,6,7"; 空=全部可见卡
-    infer_slots_per_gpu: int = 8       # 每卡槽位(设备数)上限; 超出该设备降级 legacy 独立实例
+    infer_gpu_devices: str = ""        # 参与推理的卡号 "0,1,2,3"; 空=全部可见卡 (换卡数不同的机器无需改)
+    infer_engines_per_gpu: int = 1     # 1=现有行为; 2=受控双引擎试验，需验证显存和真值精度
+    infer_slots_per_gpu: int = 8       # 每卡槽位(设备数)上限; 0=按 infer_capacity 自适应 (ceil(capacity/引擎数))
+    infer_capacity: int = 32           # 预期接入路数 (slots_per_gpu=0 时自适应槽位的基准)
+    infer_slots_max: int = 32          # 自适应槽位上限 (批 VRAM 随槽位增长的保护, 防小显存卡打爆); 默认放满 32 路, 避免超出部分降级 legacy 各自建模型挤爆单卡
     infer_imgsz: int = 960             # 推理输入尺寸(短边); 原图更小则用原图 (CPU 部署建议 640)
     infer_half: bool = True            # FP16 半精度 (仅 CUDA 生效, CPU 引擎自动关闭)
     infer_batch_timeout_ms: int = 40   # 组批等待窗口 (毫秒): 凑批上限时长, 单路时即纯延迟
     infer_queue_max_batches: int = 2   # 每卡待处理批次数上限; 超限丢帧 (EngineBusy)
+    infer_max_queue_age_s: float = 2.0  # 从提交至开始推理的最长等待时间，超时丢弃
     # ---- cpu_batch (无 GPU 部署) ----
     # 每个 CPU 引擎 = 1 个模型实例 + 1 条推理线程, 多引擎共享全部设备槽位 (最少负载分配).
     # CPU 批量近似线性扩展 (算力受限, 批大不省算力), 引擎数主要影响"路间隔离":
@@ -56,8 +64,12 @@ class Settings(BaseSettings):
     # 批量模式 (gpu_batch/cpu_batch) 下发; legacy 不下发, 与优化前行为一致.
     # CPU 部署此项更关键: grab() 全量解码省不掉, 32 路 4K 纯 CPU 解码不可行,
     # 必须配合拉子码流 + 降低 DECODE_MAX_FPS (2~4).
+    decode_backend: str = "ffmpeg"     # 解码后端: ffmpeg(解码/缩放/降帧率在子进程内完成) | opencv(旧行为)
     decode_max_fps: float = 8.0        # >0 按此帧率 grab/retrieve 节流; 0=不限速(旧行为)
+    decode_fps_sampling: str = "interval"  # interval=旧策略; grid=FFmpeg PTS 分桶试验，平均频率接近目标
     decode_max_short_side: int = 0     # >0 请求解码端缩放到该短边; 0=不缩放(旧行为)
+    stream_stall_timeout_s: float = 15.0  # 连续无新帧则重连; 0 禁用, 慢速源须调大
+    clock_jump_tolerance_s: float = 2.0   # 墙钟和单调时钟差值超过此值时隔离跨线状态
 
     # ---- 时序预测 ----
     chronos_model: str = "models"  # 本地 Chronos-2 模型目录
@@ -137,6 +149,7 @@ class Settings(BaseSettings):
     wvp_username: str = "admin"
     wvp_password: str = "admin"
     wvp_sync_interval: int = 30  # 设备轮询同步间隔 (秒)
+    wvp_play_retry_max_s: int = 120  # 单通道点播失败退避上限，成功后立即清除
     wvp_play_protocol: str = "flv"  # AI 拉流协议: flv | rtsp
     wvp_stream_sub: bool = True  # 拉子码流降低推理压力 (False=主码流)
 
@@ -152,6 +165,16 @@ class Settings(BaseSettings):
     # MediaMTX 对外地址 (如 http://172.16.168.9:8888); 空则按前端请求的 Host 自动推导 (:8888)
     # 用于把 RTSP 测试流 (rtsp://...:8554/{path}) 翻译成浏览器可播的 HLS 地址
     mediamtx_public_base: str = ""
+
+    # ---- 实时位置接入 (Apache Pulsar, 对接《实时位置数据接入规范 V1.0》) ----
+    # 接入方式: Pulsar 客户端消费 persistent://dtzhjg/device/location_realtime_v1
+    pulsar_enabled: bool = False  # 总开关; False 时跳过位置消费(默认关闭, 无 Pulsar 时不影响启动)
+    pulsar_service_url: str = "pulsar://23.45.1.99:6650"  # Pulsar 服务地址 (pulsar://)
+    pulsar_token: str = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJkdGpnemQifQ.eGuRXH9zM6gtFZFf1JFfjo7aXz13TCrpFJU2U5e0974"  # 接入 Token (规范 config.txt); 空字符串=不鉴权
+    pulsar_topic: str = "persistent://dtzhjg/device/location_realtime_v1"  # 订阅 Topic
+    pulsar_subscription: str = "client_sub_001"  # 订阅名称(接入方标识, 多家接入用不同名区分)
+    location_ttl_seconds: int = 3600  # 单设备最后位置在 Redis 的存活时间(秒)
+    location_online_timeout_seconds: int = 120  # 超过该秒数未更新视为离线
 
 
 settings = Settings()

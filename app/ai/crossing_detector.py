@@ -21,7 +21,11 @@ class CrossingDetector:
     ):
         self.geometry = geometry
         self.roi_detector = roi_detector
+        # min_motion 为历史配置口径 (px/帧 @25fps); 实际判定用速度 (px/s), 由
+        # LineCrossingCounter 按 min_motion × base_fps 换算后写入 min_speed.
+        # 这样 decode_max_fps 从 8 改成 6 时, 计数口径不会跟着变 33%.
         self.min_motion = min_motion
+        self.min_speed: float = min_motion * 25.0  # px/秒
 
         # 计数线参数 (由 LineCrossingCounter 通过 set_line_params 设置)
         self.line_start: List[float] = [0.0, 0.0]
@@ -30,6 +34,7 @@ class CrossingDetector:
         self.unit_normal: List[float] = [0.0, 0.0]
         self.clip_t0: float = 0.0
         self.clip_t1: float = 1.0
+        self.clip_intervals: Optional[List[Tuple[float, float]]] = None
 
     def set_line_params(
         self,
@@ -52,12 +57,14 @@ class CrossingDetector:
         self,
         prev_point: List[float],
         curr_point: List[float],
+        dt: Optional[float] = None,
     ) -> Optional[Tuple[str, List[float]]]:
         """检测是否发生跨线.
 
         Args:
             prev_point: 上一帧轨迹中心点 (像素坐标)
             curr_point: 当前帧轨迹中心点 (像素坐标)
+            dt: 两帧间隔 (秒); None 时按 25fps 估算 (离线工具/legacy 路径)
 
         Returns:
             (方向, 交点像素坐标) | None
@@ -77,7 +84,7 @@ class CrossingDetector:
             return None
 
         # 夹角过滤: 排除沿线滑动
-        if not self._angle_filter(prev_point, curr_point):
+        if not self._angle_filter(prev_point, curr_point, dt):
             return None
 
         # 本帧恰落在线上: 侧别未定, 留待下一帧确认 (下一帧 prev_off==0 可判向)
@@ -126,16 +133,21 @@ class CrossingDetector:
             float(prev_point[1] + s * (curr_point[1] - prev_point[1])),
         ]
 
-    def _angle_filter(self, prev_point: List[float], curr_point: List[float]) -> bool:
-        """夹角过滤: 运动向量在法向方向的投影 >= min_motion.
+    def _angle_filter(
+        self, prev_point: List[float], curr_point: List[float],
+        dt: Optional[float] = None,
+    ) -> bool:
+        """夹角过滤: 跨线方向速度 >= min_speed (px/秒).
 
-        运动向量 v 在法向 n_unit 上的投影 = v·n_unit, 即跨线方向位移.
-        返回 True 表示通过 (有效跨线运动).
+        运动向量 v 在法向上的投影 = v·n_unit, 即跨线方向的位移; 除以帧间隔得到
+        速度. 用速度而非"px/帧"判定, 解码帧率变化 (8fps -> 6fps) 时口径不变.
+        dt 缺失时按 25fps 估算, 与旧行为等价.
         """
         vx = curr_point[0] - prev_point[0]
         vy = curr_point[1] - prev_point[1]
         cross_component = vx * self.unit_normal[0] + vy * self.unit_normal[1]
-        return abs(cross_component) >= self.min_motion
+        step_dt = dt if dt and dt > 0 else 1.0 / 25.0
+        return abs(cross_component) / step_dt >= self.min_speed
 
     def _in_segment(self, point: List[float]) -> bool:
         """跨线点投影落在计数线有效段内 (裁剪到 ROI 后的 t∈[clip_t0,clip_t1]).
@@ -146,4 +158,5 @@ class CrossingDetector:
         if self.geometry.line_len_sq(self.line_start, self.line_end) == 0:
             return False
         t = self.geometry.projection_t(point, self.line_start, self.line_end)
-        return self.clip_t0 <= t <= self.clip_t1
+        intervals = self.clip_intervals if self.clip_intervals is not None else [(self.clip_t0, self.clip_t1)]
+        return any(start - 1e-9 <= t <= end + 1e-9 for start, end in intervals)

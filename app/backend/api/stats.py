@@ -126,6 +126,8 @@ async def _build_device_row(
         "latitude": lat,
         "category": pt.get("category"),
         "region": pt.get("region") or "大同古城",
+        # 是否在大屏显示该设备点位 (device_info.show_on_map; 前端据此过滤地图标点)
+        "show_on_map": bool(pt.get("show_on_map", True)),
     }
     s = stats_map.get(did)
     if s:
@@ -314,6 +316,7 @@ async def reset_stats(device_id: Optional[str] = Query(None, description="可选
 @router.get("/hourly/history")
 async def hourly_history(
     device_id: str = Query(None, description="可选: 指定设备ID; 缺省返回所有设备合计(全局)"),
+    scenic: str = Query(None, description="可选: 景区名; 只汇总该景区下的设备 (与 device_id 互斥, device_id 优先)"),
     start_date: str = Query(..., description="开始时间 (YYYY-MM-DD 或 YYYY-MM-DD:HH)"),
     end_date: str = Query(..., description="结束时间 (YYYY-MM-DD 或 YYYY-MM-DD:HH)"),
 ):
@@ -321,8 +324,9 @@ async def hourly_history(
 
     数据由归档调度器定时从 Redis 落库到 hourly_traffic 表, 不受 Redis 30 天
     保留窗口限制. 支持天+时精确范围, 例如 start_date=2026-08-01:01 到
-    end_date=2026-08-22:08 (闭区间). 只传日期则按整日查询. 不传 device_id 时
-    聚合所有设备 (全局汇总). 响应仅返回整个时间范围的总计 total, 不含逐小时明细.
+    end_date=2026-08-22:08 (闭区间). 只传日期则按整日查询. 不传 device_id /
+    scenic 时聚合所有设备 (全局汇总). 传 scenic 时按 device_info.region 圈定
+    该景区设备集合后聚合. 响应仅返回整个时间范围的总计 total, 不含逐小时明细.
     """
     try:
         start_dt, start_hour = _parse_hourly_bound(start_date, 0)
@@ -332,13 +336,35 @@ async def hourly_history(
     if (start_dt, start_hour) > (end_dt, end_hour):
         raise HTTPException(422, "开始时间不能晚于结束时间")
 
+    # 景区 -> 设备名集合 (device_info.region; 设备 id 即设备名, 与 hourly_traffic.device_id 对齐)
+    # 在线设备常用门/口简称 (如「永泰东门1口」) 且与归档 device_id 同名, 需一并纳入,
+    # 否则选了景区反而统计为空
+    scenic_ids: Optional[list[str]] = None
+    if scenic and scenic.strip() and not device_id:
+        target = scenic.strip()
+        ids = [
+            r["name"] for r in device_info.list_cached()
+            if str(r.get("region") or "").strip() == target
+        ]
+        try:
+            redis = get_redis()
+            async for key in redis.scan_iter(f"{_DEVICE_KEY_PREFIX}*"):
+                did = key.rsplit(":", 1)[-1]
+                if did not in ids and device_info.region_for(did) == target:
+                    ids.append(did)
+        except Exception:  # noqa: BLE001 — Redis 不可用时退化为仅 device_info 集合
+            pass
+        scenic_ids = ids
+
     if not settings.mysql_enabled:
         raise HTTPException(503, "MySQL 归档未启用 (MYSQL_ENABLED=false)")
     try:
         from ...common.mysql_client import ensure_table, query_hourly
 
         await ensure_table()
-        rows = await query_hourly(device_id, start_dt, start_hour, end_dt, end_hour)
+        rows = await query_hourly(
+            device_id, start_dt, start_hour, end_dt, end_hour, device_ids=scenic_ids
+        )
     except Exception as e:  # noqa: BLE001
         raise HTTPException(503, f"MySQL 查询失败: {e}") from e
 
@@ -359,6 +385,8 @@ async def hourly_history(
         total["person_out"] += r["person_out"]
     return {
         "device_id": device_id,
+        "scenic": (scenic or "").strip() or None,
+        "scenic_devices": len(scenic_ids) if scenic_ids is not None else None,
         "start": f"{start_dt.isoformat()}:{start_hour:02d}",
         "end": f"{end_dt.isoformat()}:{end_hour:02d}",
         "records": records,

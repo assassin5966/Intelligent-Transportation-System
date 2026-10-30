@@ -8,9 +8,32 @@
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { font-family: system-ui, sans-serif; background: #1a1a2e; color: #e0e0e0; padding: 20px; }
   h1 { font-size: 18px; margin-bottom: 16px; color: #8be9fd; }
-  .nav { margin-bottom: 16px; }
-  .nav a { color: #8be9fd; font-size: 13px; text-decoration: none; margin-right: 16px; }
-  .nav a:hover { text-decoration: underline; }
+  /* 统一导航菜单 */
+  .nav { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 18px; }
+  .nav a {
+    display: inline-flex; align-items: center;
+    padding: 9px 18px; font-size: 14px; font-weight: 500;
+    color: #c8d6e5; text-decoration: none;
+    background: #2a2a4e; border: 1px solid #3a3a5e; border-radius: 8px;
+    transition: all .2s ease;
+  }
+  .nav a:hover { background: #34345c; border-color: #0d7377; color: #8be9fd; transform: translateY(-1px); }
+  .nav a.active {
+    background: linear-gradient(135deg, #0d7377, #14a085);
+    border-color: #14a085; color: #fff; font-weight: 600;
+    box-shadow: 0 2px 10px rgba(13,115,119,.45);
+  }
+  /* 全局工具栏: 左侧导航 + 右上角全局景区查询条件 */
+  .topbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 18px; }
+  .topbar .nav { margin-bottom: 0; }
+  .global-filter { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+  .global-filter label { font-size: 13px; color: #aaa; white-space: nowrap; }
+  .global-filter select {
+    min-width: 158px; padding: 8px 12px; font-size: 14px;
+    background: #2a2a4e; color: #e0e0e0; border: 1px solid #3a3a5e; border-radius: 8px;
+  }
+  .global-filter select:focus { outline: none; border-color: #14a085; }
+  .global-filter .cnt { font-size: 12px; color: #8fa8cf; }
   .row { display: flex; gap: 12px; margin-bottom: 14px; align-items: center; flex-wrap: wrap; }
   input, select, button {
     padding: 6px 12px; border: 1px solid #444; border-radius: 4px;
@@ -41,15 +64,93 @@
   .hint { font-size: 12px; color: #888; margin-top: 8px; line-height: 1.6; }
   label { font-size: 13px; color: #aaa; }
   .cat-tag { display: inline-block; background: #2a2a4e; border: 1px solid #444; border-radius: 4px; padding: 2px 8px; }
+
+  /* ===== 设备列表表格(美化版) ===== */
+  .tb-actions { display: flex; gap: 6px; justify-content: center; }
+  .tb-actions button { padding: 5px 11px; font-size: 12px; }
+  /* 操作列改为纯图标按钮：30px 方块，横向只占 ~66px */
+  .tb-actions button.icon-btn { width: 30px; height: 28px; padding: 0; display: inline-flex;
+    align-items: center; justify-content: center; border-radius: 6px; }
+  .tb-actions button.icon-btn svg { display: block; pointer-events: none; }
+  .tb-actions button.icon-btn.danger { background: #c0392b; }
+  /* 经纬度合并单元格：经度在上、纬度在下（同列窄宽展示） */
+  .ll-cell span { display: block; line-height: 1.45; white-space: nowrap; }
+  .ll-cell span:last-child { color: #8fa8cf; }
+  .dc-status { display: inline-block; font-size: 11px; padding: 3px 9px; border-radius: 20px; white-space: nowrap; }  .dc-status.ok { background: rgba(46,204,113,.18); color: #2ecc71; border: 1px solid rgba(46,204,113,.5); }
+  .dc-status.wait { background: rgba(241,196,15,.16); color: #f1c40f; border: 1px solid rgba(241,196,15,.45); }
+  .dc-status.none { background: #2a2a4e; color: #8fa8cf; border: 1px solid #3a3a5e; }
+  .tb-wrap { overflow-x: auto; }
+
+  /* ===== 「大屏显示」滑块开关 (列表内即时生效) ===== */
+  .sw-cell { text-align: center; }
+  .sw { display: inline-flex; align-items: center; cursor: pointer; user-select: none; }
+  .sw input { position: absolute; opacity: 0; width: 0; height: 0; }
+  .sw-track {
+    position: relative; display: inline-block; width: 38px; height: 20px;
+    background: #3a3a5e; border: 1px solid #4a4a70; border-radius: 20px;
+    transition: background .18s ease, border-color .18s ease;
+  }
+  .sw-dot {
+    position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%;
+    background: #8fa8cf; transition: transform .18s ease, background .18s ease;
+  }
+  .sw input:checked + .sw-track { background: rgba(20,160,133,.35); border-color: #14a085; }
+  .sw input:checked + .sw-track .sw-dot { transform: translateX(18px); background: #2ee6a8; }
+  .sw input:focus-visible + .sw-track { outline: 2px solid #8be9fd; outline-offset: 2px; }
+  .sw input:disabled + .sw-track { opacity: .5; cursor: progress; }
+  .sw-batch { display: flex; gap: 8px; margin-left: 4px; }
+  .sw-batch button { background: #2a2a4e; border: 1px solid #3a3a5e; font-size: 12px; padding: 5px 10px; }
+  .sw-batch button:hover { background: #34345c; border-color: #14a085; }
+  .sw-line { display: flex; align-items: center; gap: 10px; font-size: 13px; color: #9fb6dd; }
+  .sw-line .sw { margin-top: 1px; }
+
+  /* ===== 编辑弹窗: 双栏(表单网格 + 视频) ===== */
+  .modal-mask { position: fixed; inset: 0; background: rgba(0,0,0,.65); display: none; align-items: center; justify-content: center; z-index: 9999; }
+  .modal-mask.show { display: flex; }
+  .modal-box { background: #232344; border: 1px solid #3a3a5e; border-radius: 14px; width: min(1000px, 95vw); max-height: 92vh; overflow: auto; box-shadow: 0 16px 50px rgba(0,0,0,.55); }
+  .modal-head { display: flex; align-items: center; justify-content: space-between; padding: 16px 20px; border-bottom: 1px solid #333; }
+  .modal-head .mt { font-size: 16px; color: #8be9fd; font-weight: 600; }
+  .modal-head .x { cursor: pointer; color: #aaa; font-size: 22px; line-height: 1; padding: 2px 10px; border-radius: 6px; }
+  .modal-head .x:hover { background: #34345c; color: #fff; }
+  .modal-body { padding: 18px 20px; }
+  .edit-grid { display: grid; grid-template-columns: 1.05fr 1fr; gap: 22px; align-items: start; }
+  @media (max-width: 780px) { .edit-grid { grid-template-columns: 1fr; } }
+  .edit-section-title { font-size: 13px; color: #8be9fd; font-weight: 600; margin: 0 0 14px; padding-bottom: 7px; border-bottom: 1px solid #333; }
+  .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 13px 14px; }
+  .field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+  .field.full { grid-column: 1 / -1; }
+  .field label { font-size: 12px; color: #9fb6dd; }
+  .field input, .field select { width: 100%; }
+  .edit-actions { grid-column: 1 / -1; display: flex; gap: 10px; margin-top: 4px; }
+  .edit-actions button { flex: 1; padding: 11px 0; font-size: 14px; }
+  .edit-video-col { background: #15152e; border: 1px solid #2a2a4e; border-radius: 10px; padding: 14px; }
+  .edit-video-col .vtitle { font-size: 13px; color: #8be9fd; font-weight: 600; margin: 0 0 10px; }
+  .modal-video { width: 100%; background: #000; aspect-ratio: 16/9; display: block; border-radius: 8px; object-fit: contain; }
+  .modal-msg { margin-top: 10px; font-size: 13px; color: #ff5e5e; min-height: 18px; }
+  .modal-msg.modal-loading { color: #f1c40f; }
 </style>
 </head>
 <body>
 
 <h1>设备信息管理 - 运维工具</h1>
-<div class="nav">
-  <a href="/static/device-config.html">← 设备计数配置</a>
-  <a href="/static/device-info.html">设备信息管理</a>
-  <a href="/static/business-rules.html">业务规则配置</a>
+<div class="topbar">
+  <div class="nav">
+    <a href="/static/device-config.html">设备计数配置</a>
+    <a href="/static/device-info.html" class="active">设备信息管理</a>
+    <a href="/static/business-rules.html">业务规则配置</a>
+    <a href="/static/intersection-config.html">路口数据卡配置</a>
+    <a href="/static/hardware-monitor.html">硬件监控</a>
+  </div>
+  <div class="global-filter">
+    <label for="globalScenic">景区</label>
+    <select id="globalScenic" title="全局查询条件: 按景区筛选设备信息" onchange="onGlobalScenicChange(this.value)">
+      <option value="">全部景区</option>
+      <option value="大同古城">大同古城</option>
+      <option value="云冈石窟">云冈石窟</option>
+      <option value="悬空寺">悬空寺</option>
+    </select>
+    <span id="globalScenicCount" class="cnt"></span>
+  </div>
 </div>
 
 <div class="row">
@@ -60,85 +161,57 @@
 
 <div class="panel">
   <h2>设备信息列表</h2>
-  <table>
-    <thead>
-      <tr>
-        <th>ID</th>
-        <th>设备名称</th>
-        <th>点位编号</th>
-        <th>点位分类</th>
-        <th>出入口类型</th>
-        <th>点位类型</th>
-        <th>经度</th>
-        <th>纬度</th>
-        <th>状态</th>
-        <th>区域</th>
-        <th>更新时间</th>
-        <th style="width:130px">操作</th>
-      </tr>
-    </thead>
-    <tbody id="tableBody"></tbody>
-  </table>
-  <div class="hint">共 <span id="count">0</span> 条设备信息。设备信息存储在 MySQL <code>device_info</code> 表（已从 device_geo.json / device_category.json 迁入），展示页（地图点位/统计卡片）读取同一份数据，此处增删改查即时生效。</div>
+  <div class="row" style="margin-bottom:12px">
+    <label>设备名称</label>
+    <input id="filterName" type="text" placeholder="模糊查询，如 南门" style="width:200px" oninput="applyFilter()">
+    <label>点位编号</label>
+    <input id="filterPoint" type="text" placeholder="模糊查询，如 GAJK-2648" style="width:160px" oninput="applyFilter()">
+    <button onclick="clearFilter()">清除筛选</button>
+    <span class="hint" style="margin:0">支持模糊（包含）匹配，忽略大小写与空格</span>
+    <div class="sw-batch">
+      <button onclick="batchMap(true)" title="把全部设备的大屏显示开关打开">大屏全开</button>
+      <button onclick="batchMap(false)" title="把全部设备的大屏显示开关关闭">大屏全关</button>
+    </div>
+    <span id="mapCount" class="hint" style="margin:0"></span>
+  </div>
+  <div class="tb-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>设备名称</th>
+          <th>点位编号</th>
+          <th>点位分类</th>
+          <th>出入口类型</th>
+          <th>点位类型</th>
+          <th title="上=经度，下=纬度">经纬度</th>
+          <th>状态</th>
+          <th>景区</th>
+          <th>更新时间</th>
+          <th style="width:86px" title="开关控制该设备的经纬度点位是否在前端大屏地图上绘制">大屏显示</th>
+          <th style="width:78px">操作</th>
+        </tr>
+      </thead>
+      <tbody id="devGrid"></tbody>
+    </table>
+  </div>
+  <div class="hint">共 <span id="count">0</span> 条设备信息。<b>「大屏显示」</b>开关控制该设备的经纬度点位是否在前端大屏地图上绘制（存 MySQL <code>device_info.show_on_map</code>，默认关闭；关闭时该设备不落点，门级数据卡不受影响）。设备信息存储在 MySQL <code>device_info</code> 表（已从 device_geo.json / device_category.json 迁入），展示页（地图点位/统计卡片）读取同一份数据，此处增删改查即时生效。</div>
 </div>
 
 <div class="panel">
-  <h2 id="formTitle">新增设备信息</h2>
-  <div class="row">
-    <label>设备名称 *</label>
-    <input id="fName" type="text" placeholder="如 GAJK-2648和阳南门出口路南以东85米" style="width:320px">
-    <label>点位编号</label>
-    <input id="fPointId" type="text" placeholder="如 GAJK-2648" style="width:120px">
-    <label>点位分类</label>
-    <input id="fCategory" type="text" list="catList" placeholder="选择或输入分类" style="width:200px">
-    <datalist id="catList">
-      <option value="城墙出入口便道监控点位"></option>
-      <option value="城墙入口车辆卡口点位"></option>
-      <option value="城墙出口车辆卡口点位"></option>
-    </datalist>
+  <h2>设备信息编辑</h2>
+  <div class="hint">点击列表「编辑预览」可对单条设备信息做编辑，并同时查看该设备的实时视频画面；点击「新增设备」可录入新设备。设备名称唯一，匹配时忽略空格。云冈类设备（JTKK 卡口）暂不支持入库。出入口类型/点位类型留空时按点位分类自动派生。</div>
+  <div class="row" style="margin-top:12px">
+    <button onclick="openEdit(null)">+ 新增设备</button>
   </div>
-  <div class="row">
-    <label>出入口类型</label>
-    <select id="fEntranceType" style="width:150px">
-      <option value="">自动（按点位分类派生）</option>
-      <option value="入口">入口</option>
-      <option value="出口">出口</option>
-      <option value="出入口">出入口</option>
-    </select>
-    <label>点位类型</label>
-    <select id="fPointType" style="width:150px">
-      <option value="">自动（按点位分类派生）</option>
-      <option value="便道">便道</option>
-      <option value="车辆卡口">车辆卡口</option>
-    </select>
-  </div>
-  <div class="row">
-    <label>经度</label>
-    <input id="fLng" type="number" step="0.000001" placeholder="如 113.312302" style="width:140px">
-    <label>纬度</label>
-    <input id="fLat" type="number" step="0.000001" placeholder="如 40.090118" style="width:140px">
-    <label>状态</label>
-    <select id="fStatus" style="width:120px">
-      <option value="">-</option>
-      <option value="已验证">已验证</option>
-      <option value="待验证">待验证</option>
-    </select>
-    <label>区域</label>
-    <input id="fRegion" type="text" value="大同古城" list="regionList" style="width:120px">
-    <datalist id="regionList">
-      <option value="大同古城"></option>
-    </datalist>
-    <button id="saveBtn" onclick="save()">保存</button>
-    <button id="cancelBtn" onclick="resetForm()" style="display:none" class="danger">取消编辑</button>
-  </div>
-  <div class="hint">设备名称唯一，匹配时忽略空格。云冈类设备（JTKK 卡口）暂不支持入库。出入口类型/点位类型留空时按点位分类自动派生，手工选择的值不会被覆盖。</div>
 </div>
 
 <div id="status"></div>
 
 <script src="config.js"></script>
+<script src="global-scenic.js"></script>
 <script>
-const tableBody = document.getElementById('tableBody');
+const devGrid = document.getElementById('devGrid');
 const statusEl = document.getElementById('status');
 let baseUrl = '';
 let editingName = null; // 编辑中的设备名称 (null = 新增模式)
@@ -146,6 +219,36 @@ let editingName = null; // 编辑中的设备名称 (null = 新增模式)
 // 后端地址默认取 static/config.js 配置; 未配置则同源(页面由后端 /static 提供)
 baseUrl = ((window.OPS_CONFIG && window.OPS_CONFIG.API_BASE) || window.location.origin).replace(/\/$/, '');
 document.getElementById('baseUrl').value = baseUrl;
+
+/* ---------- 全局景区 (右上角统一查询条件 + 设备编辑的「景区」下拉) ----------
+ * 库中仍是 device_info.region, 前端统一展示为「景区」; 选项来自
+ * /api/intersections/scenic-options (基线 ∪ 设备区域 ∪ 路口景区)。 */
+window.globalScenicApiBase = () => baseUrl;
+window.applyGlobalScenic = function () { applyFilter(); };
+
+function ensureRegionOption(value) {
+  const sel = document.getElementById('fRegion');
+  if (!sel || !value) return;
+  if (!Array.from(sel.options).some(o => o.value === value)) {
+    const opt = document.createElement('option');
+    opt.value = value; opt.textContent = value;
+    sel.appendChild(opt);
+  }
+}
+
+function fillRegionOptions(opts) {
+  const sel = document.getElementById('fRegion');
+  if (!sel) return;
+  const keep = sel.value || '大同古城';
+  sel.innerHTML = (opts && opts.length ? opts : ['大同古城'])
+    .map(o => `<option value="${o}">${o}</option>`).join('');
+  ensureRegionOption(keep);
+  sel.value = keep;
+}
+
+window.onScenicOptionsLoaded = function (opts) {
+  fillRegionOptions(opts);
+};
 
 function setStatus(msg, cls = 'info') {
   statusEl.textContent = msg;
@@ -172,66 +275,204 @@ function fmt(v) {
   return (v === null || v === undefined || v === '') ? '-' : v;
 }
 
+/** 时间统一展示为 "YYYY-MM-DD HH:mm:ss"（后端返回 ISO 8601，含 T 分隔符） */
+function fmtTime(v) {
+  if (v === null || v === undefined || v === '') return '-';
+  const s = String(v).trim().replace('T', ' ');
+  return s.length >= 19 ? s.slice(0, 19) : s;
+}
+
+let allDevices = [];   // 全量设备信息(供前端筛选)
+
 async function loadList() {
   baseUrl = document.getElementById('baseUrl').value;
   setStatus('加载设备信息列表...', 'pending');
   try {
-    const list = await api('/api/device-info');
-    tableBody.innerHTML = '';
-    document.getElementById('count').textContent = list.length;
-    if (!list.length) {
-      tableBody.innerHTML = '<tr><td colspan="12" class="empty">暂无设备信息 (MySQL 未启用时显示为空，请启用 MYSQL_ENABLED)</td></tr>';
-      setStatus('加载完成：0 条', 'success');
-      return;
-    }
-    list.forEach(d => {
-      const tr = document.createElement('tr');
-      tr.innerHTML = `
-        <td>${d.id}</td>
-        <td class="mono">${esc(d.name)}</td>
-        <td>${fmt(esc(d.point_id))}</td>
-        <td>${d.category ? '<span class="cat-tag">' + esc(d.category) + '</span>' : '-'}</td>
-        <td>${fmt(esc(d.entrance_type))}</td>
-        <td>${fmt(esc(d.point_type))}</td>
-        <td class="mono">${fmt(d.longitude)}</td>
-        <td class="mono">${fmt(d.latitude)}</td>
-        <td>${fmt(esc(d.status))}</td>
-        <td>${fmt(esc(d.region || '大同古城'))}</td>
-        <td class="mono">${fmt(esc(d.updated_at))}</td>
-        <td>
-          <button onclick='edit(${JSON.stringify(d)})'>编辑</button>
-          <button class="danger" onclick="del('${esc(d.name)}')">删除</button>
-        </td>`;
-      tableBody.appendChild(tr);
-    });
-    setStatus(`加载完成：共 ${list.length} 条设备信息`, 'success');
+    allDevices = await api('/api/device-info') || [];
+    applyFilter();   // 重新渲染(同时尊重已输入的筛选条件)
+    setStatus(`加载完成：共 ${allDevices.length} 条设备信息`, 'success');
   } catch (e) {
-    tableBody.innerHTML = '<tr><td colspan="12" class="empty">加载失败</td></tr>';
+    devGrid.innerHTML = '<tr><td colspan="12" class="empty">加载失败</td></tr>';
     setStatus('加载失败: ' + e.message, 'error');
   }
 }
 
-function edit(d) {
-  editingName = d.name;
-  document.getElementById('fName').value = d.name;
-  document.getElementById('fPointId').value = d.point_id || '';
-  document.getElementById('fCategory').value = d.category || '';
-  document.getElementById('fLng').value = d.longitude;
-  document.getElementById('fLat').value = d.latitude;
-  document.getElementById('fStatus').value = d.status || '';
-  document.getElementById('fRegion').value = d.region || '大同古城';
-  document.getElementById('fEntranceType').value = d.entrance_type || '';
-  document.getElementById('fPointType').value = d.point_type || '';
-  document.getElementById('formTitle').textContent = `编辑设备信息: ${d.name}`;
-  document.getElementById('cancelBtn').style.display = '';
-  document.getElementById('fName').focus();
-  window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+// 按 设备名称 / 点位编号 模糊筛选(忽略大小写与空格)
+function normalizeFilter(s) {
+  return (s == null ? '' : String(s)).trim().toLowerCase().replace(/\s+/g, '');
+}
+
+function applyFilter() {
+  const n = normalizeFilter(document.getElementById('filterName').value);
+  const p = normalizeFilter(document.getElementById('filterPoint').value);
+  const g = (typeof window.getGlobalScenic === 'function' && window.getGlobalScenic()) || '';
+  const filtered = allDevices.filter(d => {
+    const hitName = !n || normalizeFilter(d.name).includes(n);
+    const hitPoint = !p || normalizeFilter(d.point_id).includes(p);
+    // 全局景区条件 (region 为空按「大同古城」兜底, 与表格展示一致)
+    const hitScenic = !g || (d.region || '大同古城') === g;
+    return hitName && hitPoint && hitScenic;
+  });
+  renderRows(filtered);
+}
+
+function clearFilter() {
+  document.getElementById('filterName').value = '';
+  document.getElementById('filterPoint').value = '';
+  applyFilter();
+}
+
+function statusClass(s) {
+  if (s === '已验证') return 'ok';
+  if (s === '待验证') return 'wait';
+  return 'none';
+}
+
+/* 操作列图标 (内联 SVG, 随主题色 currentColor) */
+const ICON_EDIT = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>';
+const ICON_DEL = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>';
+
+function renderRows(list) {
+  devGrid.innerHTML = '';
+  document.getElementById('count').textContent = list.length;
+  updateMapCount();
+  if (!list.length) {
+    const msg = allDevices.length
+      ? '无匹配的设备信息（请调整筛选条件）'
+      : '暂无设备信息 (MySQL 未启用时显示为空，请启用 MYSQL_ENABLED)';
+    devGrid.innerHTML = '<tr><td colspan="12" class="empty">' + msg + '</td></tr>';
+    return;
+  }
+  list.forEach(d => {
+    const tr = document.createElement('tr');
+    const sc = statusClass(d.status);
+    const statusTxt = d.status || '未设置';
+    tr.innerHTML = `
+      <td>${d.id}</td>
+      <td class="mono">${esc(d.name)}</td>
+      <td>${fmt(esc(d.point_id))}</td>
+      <td>${d.category ? '<span class="cat-tag">' + esc(d.category) + '</span>' : '-'}</td>
+      <td>${fmt(esc(d.entrance_type))}</td>
+      <td>${fmt(esc(d.point_type))}</td>
+      <td class="mono ll-cell" title="经度 / 纬度">${`<span>${fmt(d.longitude)}</span><span>${fmt(d.latitude)}</span>`}</td>
+      <td><span class="dc-status ${sc}">${esc(statusTxt)}</span></td>
+      <td>${fmt(esc(d.region || '大同古城'))}</td>
+      <td class="mono">${esc(fmtTime(d.updated_at))}</td>
+      <td class="sw-cell">
+        <label class="sw" title="${d.show_on_map ? '已在大屏显示，点击关闭' : '大屏未显示，点击开启'}">
+          <input type="checkbox" data-dev="${esc(d.name)}" ${d.show_on_map ? 'checked' : ''} onchange="toggleMap(this)">
+          <span class="sw-track"><span class="sw-dot"></span></span>
+        </label>
+      </td>
+      <td>
+        <div class="tb-actions">
+          <button class="icon-btn" title="编辑预览" aria-label="编辑预览" onclick='openEdit(${JSON.stringify(d)})'>${ICON_EDIT}</button>
+          <button class="icon-btn danger" title="删除" aria-label="删除" onclick="del('${esc(d.name)}')">${ICON_DEL}</button>
+        </div>
+      </td>`;
+    devGrid.appendChild(tr);
+  });
+}
+
+/* 「大屏显示」计数 (全库口径, 不受筛选影响) */
+function updateMapCount() {
+  const el = document.getElementById('mapCount');
+  if (!el) return;
+  const on = allDevices.filter(d => d.show_on_map).length;
+  el.textContent = `大屏显示 ${on} / ${allDevices.length}`;
+}
+
+/* 单个「大屏显示」开关: 列表内即时生效 (直接 PUT, 不走编辑弹窗) */
+async function toggleMap(el) {
+  baseUrl = document.getElementById('baseUrl').value;
+  const name = el.dataset.dev;
+  const val = !!el.checked;
+  el.disabled = true;
+  const lb = el.closest('label');
+  if (lb) lb.title = val ? '已在大屏显示，点击关闭' : '大屏未显示，点击开启';
+  try {
+    await api('/api/device-info/' + encodeURIComponent(name), {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ show_on_map: val })
+    });
+    const d = allDevices.find(x => x.name === name);
+    if (d) d.show_on_map = val;
+    updateMapCount();
+    setStatus(`设备「${name}」大屏显示已${val ? '开启' : '关闭'}`, 'success');
+  } catch (e) {
+    el.checked = !val;
+    setStatus('切换大屏显示失败: ' + e.message, 'error');
+  } finally {
+    el.disabled = false;
+  }
+}
+
+/* 批量开关: 全部开启 / 全部关闭 */
+async function batchMap(on) {
+  baseUrl = document.getElementById('baseUrl').value;
+  const label = on ? '开启' : '关闭';
+  if (!confirm(`确定把全部设备的「大屏显示」${label}？`)) return;
+  setStatus(`正在批量${label}大屏显示...`, 'pending');
+  try {
+    const res = await api('/api/device-info/batch/show-on-map', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ show_on_map: !!on })
+    });
+    allDevices.forEach(d => { d.show_on_map = !!on; });
+    applyFilter();
+    setStatus(`已批量${label}大屏显示（${(res && res.affected) != null ? res.affected : allDevices.length} 条）`, 'success');
+  } catch (e) {
+    setStatus('批量设置失败: ' + e.message, 'error');
+  }
+}
+
+function openEdit(d) {
+  const mask = document.getElementById('editMask');  const video = document.getElementById('editVideo');
+  const msg = document.getElementById('editMsg');
+  if (d) {
+    editingName = d.name;
+    document.getElementById('fName').value = d.name;
+    document.getElementById('fPointId').value = d.point_id || '';
+    document.getElementById('fCategory').value = d.category || '';
+    document.getElementById('fLng').value = d.longitude;
+    document.getElementById('fLat').value = d.latitude;
+    document.getElementById('fStatus').value = d.status || '';
+    ensureRegionOption(d.region || '大同古城');
+    document.getElementById('fRegion').value = d.region || '大同古城';
+    document.getElementById('fEntranceType').value = d.entrance_type || '';
+    document.getElementById('fPointType').value = d.point_type || '';
+    document.getElementById('fShowOnMap').checked = !!d.show_on_map;
+    document.getElementById('formTitle').textContent = `编辑设备信息: ${d.name}`;
+    document.getElementById('cancelBtn').style.display = '';
+    document.getElementById('fName').focus();
+    if (msg) { msg.className = 'modal-msg modal-loading'; msg.textContent = '正在请求播放地址...'; }
+    if (video) { try { video.style.display = 'block'; } catch (e) {} }
+    mask.classList.add('show');
+    startPreview(d.name, video, msg);
+  } else {
+    editingName = null;
+    ['fName', 'fPointId', 'fCategory', 'fLng', 'fLat'].forEach(id => document.getElementById(id).value = '');
+    document.getElementById('fStatus').value = '';
+    ensureRegionOption('大同古城');
+    document.getElementById('fRegion').value = '大同古城';
+    document.getElementById('fEntranceType').value = '';
+    document.getElementById('fPointType').value = '';
+    document.getElementById('fShowOnMap').checked = false;
+    document.getElementById('formTitle').textContent = '新增设备信息';
+    document.getElementById('cancelBtn').style.display = 'none';
+    if (video) { try { video.pause(); video.removeAttribute('src'); video.load(); video.style.display = 'none'; } catch (e) {} }
+    if (msg) { msg.className = 'modal-msg'; msg.textContent = '新增模式：保存后可在列表行「编辑预览」中查看该设备实时画面'; }
+    mask.classList.add('show');
+  }
 }
 
 function resetForm() {
   editingName = null;
   ['fName', 'fPointId', 'fCategory', 'fLng', 'fLat'].forEach(id => document.getElementById(id).value = '');
   document.getElementById('fStatus').value = '';
+  ensureRegionOption('大同古城');
   document.getElementById('fRegion').value = '大同古城';
   document.getElementById('fEntranceType').value = '';
   document.getElementById('fPointType').value = '';
@@ -250,18 +491,19 @@ async function save() {
     status: document.getElementById('fStatus').value || null,
     region: document.getElementById('fRegion').value.trim() || null,
     entrance_type: document.getElementById('fEntranceType').value || null,
-    point_type: document.getElementById('fPointType').value || null
+    point_type: document.getElementById('fPointType').value || null,
+    show_on_map: !!document.getElementById('fShowOnMap').checked
   };
   if (!payload.name) { setStatus('设备名称不能为空', 'error'); return; }
 
   setStatus(editingName ? '正在更新...' : '正在新增...', 'pending');
   try {
     if (editingName) {
-      const { name, point_id, category, longitude, latitude, status, region, entrance_type, point_type } = payload;
+      const { name, point_id, category, longitude, latitude, status, region, entrance_type, point_type, show_on_map } = payload;
       await api('/api/device-info/' + encodeURIComponent(editingName), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ point_id, category, longitude, latitude, status, region, entrance_type, point_type })
+        body: JSON.stringify({ point_id, category, longitude, latitude, status, region, entrance_type, point_type, show_on_map })
       });
     } else {
       await api('/api/device-info', {
@@ -271,7 +513,7 @@ async function save() {
       });
     }
     setStatus(`设备「${payload.name}」已保存`, 'success');
-    resetForm();
+    closeEdit();
     await loadList();
   } catch (e) {
     setStatus('保存失败: ' + e.message, 'error');
@@ -285,7 +527,7 @@ async function del(name) {
   try {
     await api('/api/device-info/' + encodeURIComponent(name), { method: 'DELETE' });
     setStatus(`设备「${name}」已删除`, 'success');
-    if (editingName === name) resetForm();
+    if (editingName === name) closeEdit();
     await loadList();
   } catch (e) {
     setStatus('删除失败: ' + e.message, 'error');
@@ -294,6 +536,167 @@ async function del(name) {
 
 // 初始加载
 loadList();
+
+/* ---------- 播放预览 (复用 /api/devices/{name}/play + /static/vendor 播放库) ---------- */
+let _dvPlayer = null;   // 当前 flv.js / hls.js 实例
+
+function loadVendorScript(src) {
+  return new Promise((resolve, reject) => {
+    if (document.querySelector('script[src="' + src + '"]')) { resolve(); return; }
+    const s = document.createElement('script');
+    s.src = src;
+    s.onload = () => resolve();
+    s.onerror = () => reject(new Error('加载 ' + src + ' 失败'));
+    document.head.appendChild(s);
+  });
+}
+
+async function startPreview(name, video, msg) {
+  try {
+    const res = await api('/api/devices/' + encodeURIComponent(name) + '/play');
+    const url = res.play_url;
+    const protocol = (res.protocol || '').toLowerCase();
+    if (!url) throw new Error('未返回播放地址（设备可能未注册/未在线）');
+    if (msg) { msg.className = 'modal-msg modal-loading'; msg.textContent = '正在加载视频流 (' + protocol + ')...'; }
+    await loadVendorScript(protocol === 'hls' ? '/static/vendor/hls.min.js' : '/static/vendor/flv.min.js');
+    if (_dvPlayer) { try { _dvPlayer.destroy(); } catch (e) {} _dvPlayer = null; }
+    if (video) video.style.display = 'block';
+    if (protocol === 'flv') {
+      if (window.flvjs && flvjs.isSupported()) {
+        _dvPlayer = flvjs.createPlayer({ type: 'flv', url: url, isLive: true }, { enableStashBuffer: false, stashInitialSize: 128 });
+        _dvPlayer.attachMediaElement(video);
+        _dvPlayer.load();
+        _dvPlayer.play();
+      } else { throw new Error('当前浏览器不支持 flv.js 播放'); }
+    } else if (protocol === 'hls') {
+      if (video.canPlayType('application/vnd.apple.mpegurl')) {
+        video.src = url; video.play();
+      } else if (window.Hls && Hls.isSupported()) {
+        _dvPlayer = new Hls(); _dvPlayer.loadSource(url); _dvPlayer.attachMedia(video); _dvPlayer.play();
+      } else { throw new Error('当前浏览器不支持 HLS 播放'); }
+    } else {
+      video.src = url; video.play();
+    }
+    video.onerror = () => { if (msg) { msg.className = 'modal-msg'; msg.textContent = '视频播放出错（流可能已断开或地址不可用）'; } };
+    if (msg) { msg.className = 'modal-msg'; msg.textContent = '正在播放：' + name; }
+  } catch (e) {
+    if (msg) { msg.className = 'modal-msg'; msg.textContent = '预览失败：' + e.message; }
+    if (video) { video.style.display = 'none'; }
+  }
+}
+
+function closeEdit() {
+  const mask = document.getElementById('editMask');
+  if (_dvPlayer) { try { _dvPlayer.destroy(); } catch (e) {} _dvPlayer = null; }
+  const video = document.getElementById('editVideo');
+  if (video) { try { video.pause(); video.removeAttribute('src'); video.load(); } catch (e) {} }
+  if (mask) mask.classList.remove('show');
+  resetForm();
+}
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') {
+    const m = document.getElementById('editMask');
+    if (m && m.classList.contains('show')) closeEdit();
+  }
+});
 </script>
+<div id="editMask" class="modal-mask" onclick="if(event.target===this)closeEdit()">
+  <div class="modal-box">
+    <div class="modal-head">
+      <span class="mt" id="formTitle">新增设备信息</span>
+      <span class="x" onclick="closeEdit()" title="关闭">×</span>
+    </div>
+    <div class="modal-body">
+      <div class="edit-grid">
+        <div class="edit-form-col">
+          <div class="edit-section-title">设备基础信息</div>
+          <div class="form-grid">
+            <div class="field full">
+              <label>设备名称 *</label>
+              <input id="fName" type="text" placeholder="如 GAJK-2648和阳南门出口路南以东85米">
+            </div>
+            <div class="field">
+              <label>点位编号</label>
+              <input id="fPointId" type="text" placeholder="如 GAJK-2648">
+            </div>
+            <div class="field">
+              <label>点位分类</label>
+              <input id="fCategory" type="text" list="catList" placeholder="选择或输入分类">
+              <datalist id="catList">
+                <option value="城墙出入口便道监控点位"></option>
+                <option value="城墙入口车辆卡口点位"></option>
+                <option value="城墙出口车辆卡口点位"></option>
+              </datalist>
+            </div>
+            <div class="field">
+              <label>出入口类型</label>
+              <select id="fEntranceType">
+                <option value="">自动（按点位分类派生）</option>
+                <option value="入口">入口</option>
+                <option value="出口">出口</option>
+                <option value="出入口">出入口</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>点位类型</label>
+              <select id="fPointType">
+                <option value="">自动（按点位分类派生）</option>
+                <option value="便道">便道</option>
+                <option value="车辆卡口">车辆卡口</option>
+              </select>
+            </div>
+          </div>
+          <div class="edit-section-title" style="margin-top:16px">位置与归属</div>
+          <div class="form-grid">
+            <div class="field">
+              <label>经度</label>
+              <input id="fLng" type="number" step="0.000001" placeholder="如 113.312302">
+            </div>
+            <div class="field">
+              <label>纬度</label>
+              <input id="fLat" type="number" step="0.000001" placeholder="如 40.090118">
+            </div>
+            <div class="field">
+              <label>状态</label>
+              <select id="fStatus">
+                <option value="">-</option>
+                <option value="已验证">已验证</option>
+                <option value="待验证">待验证</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>景区</label>
+              <select id="fRegion" title="统一由全局景区选项提供 (库中仍存 device_info.region)">
+                <option value="大同古城" selected>大同古城</option>
+                <option value="云冈石窟">云冈石窟</option>
+                <option value="悬空寺">悬空寺</option>
+              </select>
+            </div>
+            <div class="field full">
+              <div class="sw-line">
+                <label class="sw" title="控制该设备的经纬度点位是否在前端大屏地图上绘制">
+                  <input type="checkbox" id="fShowOnMap">
+                  <span class="sw-track"><span class="sw-dot"></span></span>
+                </label>
+                <span>在前端大屏地图显示该设备点位（经纬度）</span>
+              </div>
+            </div>
+            <div class="edit-actions">
+              <button id="saveBtn" onclick="save()">保存</button>
+              <button id="cancelBtn" onclick="closeEdit()" style="display:none" class="danger">取消编辑</button>
+            </div>
+          </div>
+          <div class="hint">设备名称唯一，匹配时忽略空格。云冈类设备（JTKK 卡口）暂不支持入库。出入口类型/点位类型留空时按点位分类自动派生，手工选择的值不会被覆盖。</div>
+        </div>
+        <div class="edit-video-col">
+          <div class="vtitle">实时画面预览</div>
+          <video id="editVideo" class="modal-video" muted autoplay playsinline></video>
+          <div id="editMsg" class="modal-msg"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
 </body>
 </html>
